@@ -1,0 +1,35 @@
+# Build output and local tooling
+__pycache__/
+*.py[cod]
+/target/
+/frontend/web/serein_core.wasm
+/build/
+/dist/
+/out/
+/coverage/
+/node_modules/
+.gradle/
+.idea/
+.vscode/
+.DS_Store
+local.properties
+
+# Environment, logs, generated test data
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+
+# Signing material and local credentials
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+*.pem
+*.key
+
+# Project notes are retained in the source archive but not pushed by default.
+/docs/
+*.md
+!/README.md

@@ -1,0 +1,107 @@
+name: iOS Ad Hoc test IPA
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_internal_test:
+        description: Build an Ad Hoc IPA for registered test devices (not App Store release)
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  adhoc-ipa:
+    if: ${{ inputs.confirm_internal_test }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cross-check app versions before building
+        run: python3 scripts/check_versions.py
+      - name: Check signing secrets
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ADHOC_PROFILE_BASE64: ${{ secrets.ADHOC_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_TEAM_ID ADHOC_PROFILE_BASE64; do
+            if [[ -z "${!name}" ]]; then echo "Missing required GitHub secret: $name" >&2; exit 1; fi
+          done
+      - name: Install and validate Ad Hoc signing material
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ADHOC_PROFILE_BASE64: ${{ secrets.ADHOC_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          KEYCHAIN_PATH="$RUNNER_TEMP/serein-test.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/apple-distribution.p12"
+          security import "$RUNNER_TEMP/apple-distribution.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          printf '%s' "$ADHOC_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/adhoc.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/adhoc.mobileprovision" > "$RUNNER_TEMP/adhoc-profile.plist"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$RUNNER_TEMP/adhoc-profile.plist")
+          export PROFILE_UUID
+          python3 - "$RUNNER_TEMP/adhoc-profile.plist" <<'PY'
+          import datetime, os, plistlib, sys
+          with open(sys.argv[1], 'rb') as f:
+              p = plistlib.load(f)
+          team = os.environ['APPLE_TEAM_ID']
+          app_id = p.get('Entitlements', {}).get('application-identifier', '')
+          allowed = {f'{team}.io.serein.chat', f'{team}.*'}
+          assert team in p.get('TeamIdentifier', []), 'Ad Hoc profile team does not match APPLE_TEAM_ID'
+          assert app_id in allowed, 'Ad Hoc profile must cover io.serein.chat'
+          assert p.get('ProvisionedDevices'), 'Profile is not Ad Hoc or contains no registered test devices'
+          expiration = p.get('ExpirationDate')
+          assert expiration and expiration.replace(tzinfo=datetime.timezone.utc) > datetime.datetime.now(datetime.timezone.utc), 'Ad Hoc profile has expired'
+          assert p.get('UUID') == os.environ['PROFILE_UUID'], 'Could not read the provisioning profile UUID'
+          print('Ad Hoc profile is valid for io.serein.chat and includes registered devices.')
+          PY
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$RUNNER_TEMP/adhoc.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+      - name: Archive and export Ad Hoc IPA
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          VERSION="$(cut -d- -f1 VERSION)"
+          xcodebuild -project apps/ios/SereinChat.xcodeproj -scheme SereinChat -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/Serein-AdHoc.xcarchive" archive \
+            MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY='Apple Distribution' DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID"
+          cat > "$RUNNER_TEMP/export-adhoc.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>method</key><string>ad-hoc</string><key>teamID</key><string>$APPLE_TEAM_ID</string><key>signingStyle</key><string>manual</string><key>provisioningProfiles</key><dict><key>io.serein.chat</key><string>$PROFILE_UUID</string></dict></dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Serein-AdHoc.xcarchive" \
+            -exportPath "$RUNNER_TEMP/adhoc-export" -exportOptionsPlist "$RUNNER_TEMP/export-adhoc.plist"
+      - name: Upload internal test IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: serein-ios-adhoc-${{ github.sha }}
+          path: ${{ runner.temp }}/adhoc-export/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/serein-test.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/apple-distribution.p12" "$RUNNER_TEMP/adhoc.mobileprovision" "$RUNNER_TEMP/adhoc-profile.plist"

@@ -1,0 +1,156 @@
+name: Signed mobile releases
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require deliberate release approval and cross-check stable version/tag
+        env:
+          SEREIN_RELEASE_APPROVED: ${{ vars.SEREIN_RELEASE_APPROVED }}
+        run: |
+          set -euo pipefail
+          test "$SEREIN_RELEASE_APPROVED" = "true" || (echo 'Set repository variable SEREIN_RELEASE_APPROVED=true only after release gates are reviewed.' && exit 1)
+          python3 scripts/check_versions.py
+  android-release:
+    needs: release-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce tag and app version match
+        run: test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'platform-tools'
+      - name: Configure signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then echo "Missing required GitHub secret: $name" >&2; exit 1; fi
+          done
+          umask 077
+          mkdir -p "$RUNNER_TEMP/signing"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/signing/release.jks"
+      - name: Build signed APK
+        working-directory: apps/android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/signing/release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+        run: gradle --no-daemon :app:assembleRelease :app:bundleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: serein-android-release-${{ github.ref_name }}
+          path: |
+            apps/android/app/build/outputs/apk/release/*.apk
+            apps/android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+
+  ios-release:
+    needs: release-gate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce tag and app version match
+        run: test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
+      - name: Check signing secrets
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPSTORE_PROFILE_BASE64: ${{ secrets.APPSTORE_PROFILE_BASE64 }}
+          ADHOC_PROFILE_BASE64: ${{ secrets.ADHOC_PROFILE_BASE64 }}
+        run: |
+          for name in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_TEAM_ID APPSTORE_PROFILE_BASE64 ADHOC_PROFILE_BASE64; do
+            eval "value=\$$name"
+            test -n "$value" || (echo "Missing required GitHub secret: $name" && exit 1)
+          done
+      - name: Install Apple signing material
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPSTORE_PROFILE_BASE64: ${{ secrets.APPSTORE_PROFILE_BASE64 }}
+          ADHOC_PROFILE_BASE64: ${{ secrets.ADHOC_PROFILE_BASE64 }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/serein-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          echo "$KEYCHAIN_PASSWORD" > "$RUNNER_TEMP/keychain-password"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/apple-distribution.p12"
+          security import "$RUNNER_TEMP/apple-distribution.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$APPSTORE_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/appstore.mobileprovision"
+          echo "$ADHOC_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/adhoc.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/appstore.mobileprovision" > "$RUNNER_TEMP/appstore-profile.plist"
+          security cms -D -i "$RUNNER_TEMP/adhoc.mobileprovision" > "$RUNNER_TEMP/adhoc-profile.plist"
+          APPSTORE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$RUNNER_TEMP/appstore-profile.plist")
+          ADHOC_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$RUNNER_TEMP/adhoc-profile.plist")
+          cp "$RUNNER_TEMP/appstore.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$APPSTORE_UUID.mobileprovision"
+          cp "$RUNNER_TEMP/adhoc.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$ADHOC_UUID.mobileprovision"
+          echo "APPSTORE_UUID=$APPSTORE_UUID" >> "$GITHUB_ENV"
+          echo "ADHOC_UUID=$ADHOC_UUID" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+      - name: Archive and export App Store IPA
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          VERSION=$(cut -d- -f1 VERSION)
+          xcodebuild -project apps/ios/SereinChat.xcodeproj -scheme SereinChat -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/AppStore.xcarchive" archive \
+            MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY='Apple Distribution' DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$APPSTORE_UUID"
+          cat > "$RUNNER_TEMP/export-appstore.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>method</key><string>app-store-connect</string><key>teamID</key><string>$APPLE_TEAM_ID</string><key>signingStyle</key><string>manual</string><key>provisioningProfiles</key><dict><key>io.serein.chat</key><string>$APPSTORE_UUID</string></dict></dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/AppStore.xcarchive" -exportPath "$RUNNER_TEMP/appstore-export" -exportOptionsPlist "$RUNNER_TEMP/export-appstore.plist"
+      - name: Archive and export Ad Hoc IPA
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          VERSION=$(cut -d- -f1 VERSION)
+          xcodebuild -project apps/ios/SereinChat.xcodeproj -scheme SereinChat -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/AdHoc.xcarchive" archive \
+            MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY='Apple Distribution' DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$ADHOC_UUID"
+          cat > "$RUNNER_TEMP/export-adhoc.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>method</key><string>ad-hoc</string><key>teamID</key><string>$APPLE_TEAM_ID</string><key>signingStyle</key><string>manual</string><key>provisioningProfiles</key><dict><key>io.serein.chat</key><string>$ADHOC_UUID</string></dict></dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/AdHoc.xcarchive" -exportPath "$RUNNER_TEMP/adhoc-export" -exportOptionsPlist "$RUNNER_TEMP/export-adhoc.plist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: serein-ios-ipas-${{ github.ref_name }}
+          path: |
+            ${{ runner.temp }}/appstore-export/*.ipa
+            ${{ runner.temp }}/adhoc-export/*.ipa
+          if-no-files-found: error
