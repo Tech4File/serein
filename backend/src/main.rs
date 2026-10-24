@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let state = AppState { peers: Arc::new(PeerMap::new()), db, mailer, cookie_secure, allowed_origins: Arc::new(allowed_origins) };
     let app = Router::new()
-        .route("/healthz", get(|| async { Json(serde_json::json!({"status":"ok","service":"serein-api"})) }))
+        .route("/healthz", get(healthz)).route("/status", get(|| async { axum::response::Html(include_str!("../../frontend/web/status.html")) }))
         .route("/api/v1/auth/register", post(register)).route("/api/v1/auth/verify-email", post(verify_email)).route("/api/v1/auth/resend-verification", post(resend_verification)).route("/api/v1/auth/login", post(login)).route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/me", get(me)).route("/api/v1/messages", get(list_messages).post(send_message_api)).route("/api/v1/messages/:id/ack", post(ack_message_api)).route("/api/v1/settings", get(get_settings).put(put_settings)).route("/api/v1/contacts", get(list_contacts).post(create_contact_request))
         .route("/api/v1/contact-requests", get(list_contact_requests).post(create_contact_request)).route("/api/v1/contact-requests/:request_id/accept", post(accept_contact_request)).route("/api/v1/contact-requests/:request_id", delete(delete_contact_request))
@@ -96,11 +96,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/transfers/:transfer_id/ack", post(ack_encrypted_transfer)).route("/api/v1/transfers/:transfer_id", delete(abort_encrypted_transfer))
         .route("/v1/ws", get(ws_handler)).fallback_service(ServeDir::new("../frontend/web").append_index_html_on_directories(true))
         .layer(cors).layer(TraceLayer::new_for_http()).layer(middleware::from_fn_with_state(state.clone(),security_headers)).with_state(state);
-    let addr: SocketAddr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into()).parse()?;
+    let listen_addr = env::var("LISTEN_ADDR").or_else(|_| env::var("PORT").map(|port| format!("0.0.0.0:{port}"))).unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let addr: SocketAddr = listen_addr.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "Serein API and development relay listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn healthz(State(state):State<AppState>)->Response{
+    let database_ready=matches!(tokio::time::timeout(Duration::from_secs(2),sqlx::query("SELECT 1").execute(&state.db)).await,Ok(Ok(_)));
+    let frontend_ready=["../frontend/web/index.html","../frontend/web/app.js","../frontend/web/style.css"]
+        .iter().all(|path|std::path::Path::new(*path).is_file());
+    let ready=database_ready&&frontend_ready;
+    let health=serde_json::json!({
+        "status":if ready{"ready"}else{"degraded"},
+        "service":"Serein",
+        "components":{
+            "api":"ready",
+            "database":if database_ready{"ready"}else{"unavailable"},
+            "frontend":if frontend_ready{"available"}else{"unavailable"},
+            "email_delivery":if state.mailer.is_enabled(){"configured"}else{"disabled"}
+        }
+    });
+    let status=if ready{StatusCode::OK}else{StatusCode::SERVICE_UNAVAILABLE};
+    (status,Json(health)).into_response()
 }
 
 async fn initialize_schema(db: &PgPool) -> Result<(), sqlx::Error> {
@@ -193,7 +213,7 @@ async fn create_device_session(db:&PgPool,user_id:Uuid,device_name:&str,requeste
 async fn register(State(state):State<AppState>,Json(input):Json<RegisterInput>)->Response{
     if !state.mailer.is_enabled(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"email verification is not configured");}
     let username=normalise_username(&input.username);let email=input.email.trim().to_ascii_lowercase();let display=input.display_name.trim();
-    if !valid_username(&username){return api_error(StatusCode::BAD_REQUEST,"username must be 3–32 lowercase letters, digits, dots, dashes, or underscores");}if !valid_email(&email){return api_error(StatusCode::BAD_REQUEST,"enter a valid email address");}if !(2..=48).contains(&display.chars().count()){return api_error(StatusCode::BAD_REQUEST,"display name must be 2–48 characters");}if input.password.chars().count()<12{return api_error(StatusCode::BAD_REQUEST,"password must contain at least 12 characters");}if input.password.len()>1024{return api_error(StatusCode::BAD_REQUEST,"password must be no more than 1024 UTF-8 bytes");}
+    if !valid_username(&username){return api_error(StatusCode::BAD_REQUEST,"username must be 3–32 lowercase letters, digits, dots, dashes, or underscores");}if !valid_email(&email){return api_error(StatusCode::BAD_REQUEST,"enter a valid email address");}if !(2..=48).contains(&display.chars().count()){return api_error(StatusCode::BAD_REQUEST,"display name must be 2–48 characters");}if input.password.chars().count()<8{return api_error(StatusCode::BAD_REQUEST,"password must contain at least 8 characters");}if input.password.len()>1024{return api_error(StatusCode::BAD_REQUEST,"password must be no more than 1024 UTF-8 bytes");}
     let salt=SaltString::generate(&mut OsRng);let password_hash=match Argon2::default().hash_password(input.password.as_bytes(),&salt){Ok(h)=>h.to_string(),Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"could not create account")};
     let user_id=Uuid::new_v4();
     if let Err(error)=sqlx::query("INSERT INTO accounts(id,username,email,display_name,password_hash,email_verified) VALUES($1,$2,$3,$4,$5,FALSE)").bind(user_id).bind(&username).bind(&email).bind(display).bind(password_hash).execute(&state.db).await {

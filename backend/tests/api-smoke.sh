@@ -33,7 +33,7 @@ import json, pathlib, sys, uuid
 p=pathlib.Path(sys.argv[1]); emails=sys.argv[2:4]
 suffix=uuid.uuid4().hex[:8]
 data={
-  'a': {'username':f'testa{suffix}','email':emails[0],'display_name':'Test Account A','password':'test-password-12345','device_name':'Smoke browser A','device_id':str(uuid.uuid4())},
+  'a': {'username':f'testa{suffix}','email':emails[0],'display_name':'Test Account A','password':'eight123','device_name':'Smoke browser A','device_id':str(uuid.uuid4())},
   'b': {'username':f'testb{suffix}','email':emails[1],'display_name':'Test Account B','password':'test-password-67890','device_name':'Smoke browser B','device_id':str(uuid.uuid4())},
 }
 for k,v in data.items(): (p/f'{k}.json').write_text(json.dumps(v))

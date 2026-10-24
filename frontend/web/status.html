@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f4f6f8"><title>Service status · Serein</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#f4f6f8;--surface:#fff;--text:#17232b;--muted:#65757e;--line:#e2e8eb;--accent:#187c68;--ok:#187c68;--warn:#9a6a19;--bad:#a84347}
+    @media(prefers-color-scheme:dark){:root{--bg:#10161b;--surface:#171f25;--text:#ecf2f2;--muted:#a2b0b5;--line:#2c3940;--accent:#6dc5aa;--ok:#6dc5aa;--warn:#edc66b;--bad:#ff9a9a}}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;padding:28px}
+    main{width:min(680px,100%)}header{display:flex;align-items:center;gap:13px;margin:0 0 22px}.brand{width:44px;height:44px;border-radius:15px;background:var(--accent);color:white;display:grid;place-items:center;font-size:25px;font-weight:800}.eyebrow{color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.16em;margin:0 0 3px}h1{font-size:25px;letter-spacing:-.04em;margin:0}
+    .card{background:var(--surface);border:1px solid var(--line);border-radius:18px;overflow:hidden;box-shadow:0 18px 55px #18282f0c}.summary{padding:22px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:13px}.indicator{width:12px;height:12px;border-radius:50%;background:#94a0a5;box-shadow:0 0 0 5px color-mix(in srgb,#94a0a5 13%,transparent)}.summary[data-state="ready"] .indicator{background:var(--ok);box-shadow:0 0 0 5px color-mix(in srgb,var(--ok) 15%,transparent)}.summary[data-state="degraded"] .indicator{background:var(--warn);box-shadow:0 0 0 5px color-mix(in srgb,var(--warn) 15%,transparent)}.summary h2{font-size:17px;margin:0}.summary p{margin:3px 0 0;color:var(--muted);font-size:12px}
+    .checks{padding:5px 24px}.check{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:16px 0;border-bottom:1px solid var(--line)}.check:last-child{border:0}.check b{font-size:13px;font-weight:650}.check span{color:var(--muted);font-size:12px}.pill{display:inline-flex;align-items:center;gap:6px;border-radius:99px;padding:5px 9px;background:color-mix(in srgb,#94a0a5 12%,transparent);color:var(--muted)!important;font-size:10px!important;font-weight:700;white-space:nowrap}.pill:before{content:"";width:6px;height:6px;border-radius:50%;background:#94a0a5}.pill.ok{background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok)!important}.pill.ok:before{background:var(--ok)}.pill.warn{background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn)!important}.pill.warn:before{background:var(--warn)}.pill.bad{background:color-mix(in srgb,var(--bad) 12%,transparent);color:var(--bad)!important}.pill.bad:before{background:var(--bad)}
+    .foot{padding:15px 24px;background:color-mix(in srgb,var(--bg) 70%,var(--surface));color:var(--muted);font-size:11px}.foot a{color:var(--accent);text-decoration:none;margin-left:9px}.refresh{margin-top:17px;border:1px solid var(--line);border-radius:10px;padding:9px 13px;background:var(--surface);color:var(--text);font:inherit;font-size:12px;cursor:pointer}.refresh:hover{border-color:var(--accent)}
+    @media(max-width:480px){body{padding:18px}.summary,.checks,.foot{padding-left:17px;padding-right:17px}.check{align-items:flex-start}.pill{margin-top:1px}}
+  </style>
+</head>
+<body>
+  <main>
+    <header><div class="brand">s</div><div><p class="eyebrow">SEREIN · SERVICE HEALTH</p><h1>Service status</h1></div></header>
+    <section class="card" aria-live="polite">
+      <div id="summary" class="summary" data-state="loading"><i class="indicator"></i><div><h2 id="overall">Checking service health</h2><p id="checkedAt">Component status is refreshed when you open this page.</p></div></div>
+      <div class="checks">
+        <div class="check"><div><b>Account and messaging service</b><br><span>Application is responding to readiness checks.</span></div><span id="api" class="pill">Checking</span></div>
+        <div class="check"><div><b>Data storage</b><br><span>Database connectivity for core service operations.</span></div><span id="database" class="pill">Checking</span></div>
+        <div class="check"><div><b>Web interface</b><br><span>Core user-interface files are available to the service.</span></div><span id="frontend" class="pill">Checking</span></div>
+        <div class="check"><div><b>Email verification</b><br><span>Provider configuration only; delivery is not tested here.</span></div><span id="email" class="pill">Checking</span></div>
+      </div>
+      <div class="foot">This page reports sanitized component health only. It does not display private configuration or internal service details.<a href="/">Return to Serein</a></div>
+    </section>
+    <button id="refresh" class="refresh" type="button">Refresh status</button>
+  </main>
+  <script src="/status.js"></script>
+</body>
+</html>

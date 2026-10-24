@@ -1,1 +1,38 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Security notes · Serein Chat</title><link rel="stylesheet" href="style.css"></head><body><main class="shell"><header><div class="brandmark">S</div><div><p class="eyebrow">IMPORTANT</p><h1>Security notes</h1></div></header><section class="card"><h2>This is a development starter</h2><p style="margin-top:12px;color:#c0cada">The web demo encrypts message text in the browser with AES-GCM and sends ciphertext to the relay. It does not implement a vetted identity protocol, account authentication, device verification, ratchet, forward secrecy, or metadata protection. Room and device labels are routing metadata, not credentials. The Android and iOS folders are starter shells and are not interoperable encrypted clients yet.</p><p style="margin-top:14px;color:#c0cada">Do not use this project for sensitive communications or expose its development server directly to the internet. For production, integrate a maintained audited end-to-end protocol, secure device key storage, authenticated sessions, TLS, rate limits, bounded message retention, and independent security review.</p><p style="margin-top:18px"><a href="/">← Back to chat</a></p></section></main></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f4f6f8">
+  <title>Security status · Serein</title>
+  <link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="style.css">
+  <style>
+    body{min-height:100vh;background:var(--bg);color:var(--text);display:grid;place-items:center;padding:24px}
+    .security-page{width:min(760px,100%)}.security-head{display:flex;align-items:center;gap:13px;margin-bottom:20px}
+    .security-head .brand-icon{width:42px;height:42px;display:grid;place-items:center;border-radius:14px;background:var(--accent);color:#fff;font-size:25px;font-weight:800}
+    .security-head .eyebrow{margin:0 0 3px}.security-head h1{margin:0;font-size:26px;letter-spacing:-.04em}
+    .security-card{padding:clamp(20px,5vw,34px);border:1px solid var(--border);border-radius:18px;background:var(--surface);box-shadow:0 16px 50px #16252b0c}
+    .security-state{display:inline-flex;align-items:center;gap:8px;padding:7px 10px;border-radius:999px;background:var(--notice);color:var(--notice-text);font-size:11px;font-weight:700}
+    .security-state:before{content:"";width:7px;height:7px;border-radius:50%;background:#c28c35}
+    .security-card h2{font-size:18px;margin:20px 0 9px}.security-card p,.security-card li{color:var(--muted);font-size:13px;line-height:1.7}
+    .security-card ul{padding-left:20px}.security-card li+li{margin-top:5px}.security-card a{color:var(--accent);font-size:12px;text-decoration:none}
+  </style>
+</head>
+<body>
+  <main class="security-page">
+    <header class="security-head"><div class="brand-icon">s</div><div><p class="eyebrow">SEREIN · SECURITY</p><h1>Security status</h1></div></header>
+    <section class="security-card">
+      <span class="security-state">Not suitable for sensitive conversations</span>
+      <h2>What is currently protected</h2>
+      <p>The web client encrypts message text with AES-GCM before sending it to the relay. The passphrase is shared by conversation participants; this key setup is not a vetted identity protocol and has not received an independent security audit. The relay can still observe routing metadata.</p>
+      <ul>
+        <li>There is no verified device identity, ratchet, or forward secrecy.</li>
+        <li>Room and device identifiers are routing metadata, not authentication credentials.</li>
+        <li>The Android and iOS clients provide account access, but their native message delivery and encryption are not implemented.</li>
+        <li>HTTPS protects network transport when correctly configured; it is distinct from end-to-end encryption.</li>
+      </ul>
+      <p>Do not use this service for sensitive communications. A production release requires a maintained, audited end-to-end protocol, secure device-key handling, authenticated sessions, TLS, rate limits, bounded retention, and independent review.</p>
+      <a href="/">← Back to Serein</a>
+    </section>
+  </main>
+</body>
+</html>

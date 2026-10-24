@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn reliable_subscriber_rejects_without_blocking_realtime_subscriber() {
-        let mut engine = MoqEngine::new(limits(32, 64));
+        let mut engine = MoqEngine::new(limits(16, 64));
         let track = key();
         engine.publish_track(7, track.clone(), MediaKind::Data).unwrap();
         engine.subscribe(9, 10, &track, QueuePolicy::ReliableReject).unwrap();
@@ -414,6 +414,7 @@ mod tests {
         engine.publish_object(7, &track, object(1, 16)).unwrap();
         let report = engine.publish_object(7, &track, object(2, 16)).unwrap();
         assert_eq!(report.rejected_for_backpressure, 1);
+        assert_eq!(report.dropped_oldest, 1);
         assert_eq!(report.enqueued, 1);
     }
 

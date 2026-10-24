@@ -7,6 +7,7 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.*;
+import java.nio.charset.StandardCharsets;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -48,9 +49,15 @@ public final class MainActivity extends Activity {
     private EditText field(String hint, boolean password) {
         EditText e=SereinUi.field(this,hint,password);e.setSingleLine(true);return e;
     }
+    private LinearLayout passwordControl(EditText input) {
+        LinearLayout row=SereinUi.row(this);row.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(input,new LinearLayout.LayoutParams(0,pad(48),1));
+        Button toggle=SereinUi.button(this,"Show",false);toggle.setOnClickListener(v->{boolean hidden=input.getTransformationMethod() instanceof android.text.method.PasswordTransformationMethod;input.setTransformationMethod(hidden?null:android.text.method.PasswordTransformationMethod.getInstance());toggle.setText(hidden?"Hide":"Show");input.setSelection(input.getText().length());});
+        row.addView(toggle,SereinUi.margin(this,-2,42,6,0,0,0));return row;
+    }
     private void renderAuth() {
         base(registerMode ? "Create account" : "Sign in");
-        root.addView(paragraph("Native account client · development build"),SereinUi.margin(this,-1,-2,0,0,0,12));
+        root.addView(paragraph("Account access and device management"),SereinUi.margin(this,-1,-2,0,0,0,12));
         root.addView(SereinUi.label(this,"SECURE API ENDPOINT"),SereinUi.margin(this,-1,-2,0,0,0,5));
         endpointField=field("https://api.your-domain.example",false);endpointField.setText(api.baseUrl());root.addView(endpointField,SereinUi.margin(this,-1,48,0,0,0,13));
         LinearLayout tabs=SereinUi.row(this);Button signin=SereinUi.button(this,"Sign in",!registerMode);Button create=SereinUi.button(this,"Create account",registerMode);
@@ -64,14 +71,15 @@ public final class MainActivity extends Activity {
         } else {
             root.addView(SereinUi.label(this,"USERNAME OR EMAIL"),SereinUi.margin(this,-1,-2,0,13,0,5));username=field("Username or email",false);root.addView(username,SereinUi.margin(this,-1,48,0,0,0,7));
         }
-        root.addView(SereinUi.label(this,"PASSWORD · AT LEAST 12 CHARACTERS"),SereinUi.margin(this,-1,-2,0,8,0,5));EditText password=field("Password",true);root.addView(password,SereinUi.margin(this,-1,48,0,0,0,8));
-        TextView notice=paragraph("Email verification is required after registration; delivery depends on server mail-provider configuration. Chat encryption is a development demo, not audited E2EE.");root.addView(notice,SereinUi.margin(this,-1,-2,0,8,0,10));
+        root.addView(SereinUi.label(this,registerMode?"PASSWORD · AT LEAST 8 CHARACTERS":"PASSWORD"),SereinUi.margin(this,-1,-2,0,8,0,5));EditText password=field("Password",true);root.addView(passwordControl(password),SereinUi.margin(this,-1,48,0,0,0,8));
+        TextView notice=paragraph(registerMode?"Email verification is required after registration. Messaging is not available in this client yet.":"This client provides account access and device management; native message delivery is not available yet.");root.addView(notice,SereinUi.margin(this,-1,-2,0,8,0,10));
         Button proceed=SereinUi.button(this,registerMode?"Create account":"Sign in",true);root.addView(proceed,SereinUi.margin(this,-1,48,0,8,0,0));
         EditText finalDisplay=display, finalEmail=email;EditText finalUsername=username;
         proceed.setOnClickListener(v->{
             try { api.setBaseUrl(endpointField.getText().toString()); } catch (Exception e) { message(e.getMessage());return; }
             String pass=password.getText().toString(), identity=finalUsername.getText().toString().trim();
-            if(pass.length()<12){message("Password must contain at least 12 characters.");return;}
+            if(registerMode&&pass.codePointCount(0,pass.length())<8){message("Use at least 8 characters for your password.");return;}
+            if(registerMode&&pass.getBytes(StandardCharsets.UTF_8).length>1024){message("Password must be no more than 1024 UTF-8 bytes.");return;}
             if(identity.isEmpty()){message("Enter your username or email.");return;}
             proceed.setEnabled(false);proceed.setText("Connecting…");
             if(registerMode){String n=finalDisplay.getText().toString().trim(), em=finalEmail.getText().toString().trim();if(n.length()<2||em.isEmpty()){proceed.setEnabled(true);proceed.setText("Create account");message("Enter a display name and email.");return;}

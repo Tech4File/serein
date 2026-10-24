@@ -1,6 +1,6 @@
 [package]
 name = "serein-moq-engine"
-version = "0.4.0-dev.5"
+version = "0.4.0-dev.6"
 edition = "2021"
 license = "UNLICENSED"
 description = "First-party bounded media track/object routing core; transport adapter is separate"

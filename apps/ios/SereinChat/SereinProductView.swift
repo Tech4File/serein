@@ -25,13 +25,14 @@ private struct SereinNativeAuthView: View {
     @State private var username = ""
     @State private var email = ""
     @State private var password = ""
+    @State private var passwordVisible = false
     @State private var otpCode = ""
     var body: some View {
         ZStack {
             LinearGradient(colors: [Color(uiColor: .systemBackground), SereinPalette.paleMint.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    HStack { SereinAvatar(name: "Serein", size: 42); VStack(alignment: .leading) { Text("Serein").font(.system(size: 20, weight: .bold, design: .rounded)); Text("NATIVE ACCOUNT CLIENT").font(.system(size: 8, weight: .bold)).tracking(1.1).foregroundStyle(.secondary) }; Spacer() }
+                    HStack { SereinAvatar(name: "Serein", size: 42); VStack(alignment: .leading) { Text("Serein").font(.system(size: 20, weight: .bold, design: .rounded)); Text("SEREIN ACCOUNT").font(.system(size: 8, weight: .bold)).tracking(1.1).foregroundStyle(.secondary) }; Spacer() }
                     VStack(alignment: .leading, spacing: 7) { SereinSectionLabel(title: "ACCOUNT"); Text(registering ? "Create your account" : "Welcome back").font(.system(size: 29, weight: .bold, design: .rounded)); Text("Connect to your Serein API over HTTPS.").font(.system(size: 12)).foregroundStyle(.secondary) }
                     SereinCard {
                         VStack(spacing: 13) {
@@ -48,17 +49,24 @@ private struct SereinNativeAuthView: View {
                                     Button("Back to sign in") { api.verificationRequired = false; registering = false; otpCode = "" }.font(.system(size: 12))
                                 }
                             } else {
-                                HStack(spacing: 6) { modeButton("Sign in", active: !registering) { registering = false }; modeButton("Create account", active: registering) { registering = true } }
+                                HStack(spacing: 6) { modeButton("Sign in", active: !registering) { withAnimation(.easeInOut(duration: 0.2)) { registering = false } }; modeButton("Create account", active: registering) { withAnimation(.easeInOut(duration: 0.2)) { registering = true } } }
                                 if registering {
                                     input("Display name", text: $displayName, icon: "person")
                                     input("Username", text: $username, icon: "at")
                                     input("Email", text: $email, icon: "envelope")
                                 } else { input("Username or email", text: $username, icon: "person") }
-                                HStack { Image(systemName: "lock").foregroundStyle(.secondary); SecureField("Password · at least 12 characters", text: $password) }.padding(12).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
-                                if registering { Text("New accounts must verify their email before signing in. A code is sent by the server after registration.").font(.system(size: 10)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading) }
+                                HStack { Image(systemName: "lock").foregroundStyle(.secondary); Group { if passwordVisible { TextField("Password", text: $password) } else { SecureField("Password", text: $password) } }.textInputAutocapitalization(.never).autocorrectionDisabled(); Button { passwordVisible.toggle() } label: { Image(systemName: passwordVisible ? "eye.slash" : "eye") }.accessibilityLabel(passwordVisible ? "Hide password" : "Show password") }.padding(12).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
+                                if registering {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text("Password requirements").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                                        requirement("At least 8 characters", met: password.unicodeScalars.count >= 8)
+                                        requirement("No more than 1024 UTF-8 bytes", met: password.utf8.count <= 1024)
+                                    }.padding(11).frame(maxWidth: .infinity, alignment: .leading).background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10)).transition(.opacity.combined(with: .move(edge: .top)))
+                                    Text("New accounts must verify their email before signing in. A code is sent by the server after registration.").font(.system(size: 10)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                                }
                                 Button { Task { if registering { await api.register(username: username, email: email, displayName: displayName, password: password) } else { await api.signIn(identity: username, password: password) } } } label: {
                                     HStack { Spacer(); Text(api.busy ? "Connecting…" : (registering ? "Create account" : "Sign in")); Spacer(); Image(systemName: "arrow.right") }
-                                }.buttonStyle(SereinPrimaryButtonStyle()).disabled(api.busy || password.count < 12 || username.isEmpty)
+                                }.buttonStyle(SereinPrimaryButtonStyle()).disabled(api.busy || (registering && (password.unicodeScalars.count < 8 || password.utf8.count > 1024)) || username.isEmpty).animation(.easeInOut(duration: 0.2), value: registering)
                             }
                         }
                     }
@@ -69,6 +77,9 @@ private struct SereinNativeAuthView: View {
     }
     private func input(_ title: String, text: Binding<String>, icon: String) -> some View {
         HStack { Image(systemName: icon).foregroundStyle(.secondary); TextField(title, text: text).textInputAutocapitalization(.never).autocorrectionDisabled() }.padding(12).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
+    }
+    private func requirement(_ title: String, met: Bool) -> some View {
+        Label(title, systemImage: met ? "checkmark.circle.fill" : "circle").font(.system(size: 10)).foregroundStyle(met ? SereinPalette.green : Color.secondary)
     }
     private func modeButton(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) { Text(title).font(.system(size: 11, weight: .semibold)).frame(maxWidth: .infinity).padding(10).background(active ? SereinPalette.paleMint : Color.clear, in: RoundedRectangle(cornerRadius: 9)) }
@@ -164,7 +175,7 @@ private struct SereinNativeSettings: View {
                     ForEach(api.devices) { device in HStack { VStack(alignment: .leading, spacing: 3) { Text(device.name).font(.system(size: 12, weight: .semibold)); Text(device.online == true ? "Online" : (device.last_seen_at ?? "Last active unavailable")).font(.system(size: 10)).foregroundStyle(.secondary) }; Spacer(); if device.current == true { Text("THIS DEVICE").font(.system(size: 8, weight: .bold)).foregroundStyle(SereinPalette.green) } else { Button("Revoke", role: .destructive) { Task { await api.revoke(device) } }.font(.system(size: 10)) } } }
                     Button("Revoke other devices", role: .destructive) { confirmRevokeOthers = true }
                 }
-                Section("Security status") { Text("The web demo's passphrase encryption is not an audited E2EE protocol. This native app does not yet encrypt or send messages.").font(.system(size: 11)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery and calls are not configured.").font(.system(size: 11)).foregroundStyle(.secondary) }
+                Section("Security status") { Text("The web client encrypts message text with AES-GCM using a shared passphrase, but this is not an audited end-to-end protocol. This native app does not yet encrypt or send messages.").font(.system(size: 11)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery and calls are not configured.").font(.system(size: 11)).foregroundStyle(.secondary) }
                 Section { Button("Sign out", role: .destructive) { Task { await api.signOut() } } }
             }.listStyle(.insetGrouped).navigationTitle("Settings")
                 .task { await api.refreshAccountData() }
