@@ -112,9 +112,14 @@ impl Mailer {
     }
 
     pub fn is_enabled(&self) -> bool {
+        !matches!(&self.backend, Backend::Disabled)
+    }
+
+    pub fn provider_name(&self) -> &'static str {
         match &self.backend {
-            Backend::Disabled => false,
-            _ => true,
+            Backend::Disabled => "disabled",
+            Backend::Api { .. } => "api",
+            Backend::Smtp { .. } => "smtp",
         }
     }
 

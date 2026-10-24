@@ -21,15 +21,27 @@
         </div>
         <div id="signinFields"><label>Email or username<input id="loginIdentity" autocomplete="username" placeholder="Email or username"></label></div>
         <label>Password<div class="password-control"><input id="accountPassword" type="password" autocomplete="current-password" placeholder="Enter your password"><button class="password-toggle" type="button" data-toggle-password="accountPassword" aria-label="Show password" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button></div></label>
-        <section id="passwordRequirements" class="password-guidance" aria-label="Password requirements" aria-live="polite"><p>Registration password</p><ul><li data-password-rule="length">At least 8 characters</li><li data-password-rule="bytes">No more than 1024 UTF-8 bytes</li></ul></section>
+        <section id="passwordRequirements" class="password-guidance" aria-label="Password requirements" aria-live="polite"><p>Registration password</p><ul><li data-password-rule="length">At least 8 characters</li><li data-password-rule="upper">At least one uppercase letter (A–Z)</li><li data-password-rule="lower">At least one lowercase letter (a–z)</li><li data-password-rule="digit">At least one number (0–9)</li><li data-password-rule="bytes">No more than 1024 UTF-8 bytes</li></ul></section>
         <p id="signinFeedback" class="signin-feedback" aria-live="polite"></p>
         <div id="confirmPasswordWrap" class="hidden"><label>Confirm password<div class="password-control"><input id="confirmPassword" type="password" autocomplete="new-password" placeholder="Type your password again"><button class="password-toggle" type="button" data-toggle-password="confirmPassword" aria-label="Show confirmation password" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button></div></label><p id="confirmPasswordFeedback" class="confirm-feedback" aria-live="polite"></p></div>
         <button id="authSubmit" class="btn btn-primary btn-block" type="submit">Continue <span>→</span></button>
       </form>
-      <section id="verificationPanel" class="hidden">
-        <p class="eyebrow">CHECK YOUR INBOX</p><h3>Verify your email</h3><p class="muted">Enter the six-digit code we emailed you. Codes expire after ten minutes.</p>
-        <form id="verificationForm"><label>Email address<input id="verifyEmail" type="email" autocomplete="email" required placeholder="you@example.com"></label><label>One-time code<input id="otpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required placeholder="123456"></label><button class="btn btn-primary btn-block" type="submit">Verify email <span>→</span></button></form>
-        <label>Account email or username<input id="resendIdentity" autocomplete="username" placeholder="Email or username"></label><button id="resendCode" class="text-button" type="button">Resend verification code</button><button id="backToVerificationAuth" class="back-button" type="button">← Back to sign in</button>
+      <section id="verificationPanel" class="verification-panel hidden">
+        <p class="eyebrow">CHECK YOUR INBOX</p><h3>Verify your email</h3>
+        <p class="muted">Enter the six-digit code sent to <b id="verificationAddress">your email</b>. It expires after ten minutes.</p>
+        <p id="verificationMessage" class="verification-message" role="status" aria-live="polite"></p>
+        <form id="verificationForm" novalidate>
+          <div class="otp-inputs" role="group" aria-label="Six-digit email verification code">
+            <input class="otp-digit" data-otp-index="0" aria-label="Digit 1" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+            <input class="otp-digit" data-otp-index="1" aria-label="Digit 2" inputmode="numeric" maxlength="6">
+            <input class="otp-digit" data-otp-index="2" aria-label="Digit 3" inputmode="numeric" maxlength="6">
+            <input class="otp-digit" data-otp-index="3" aria-label="Digit 4" inputmode="numeric" maxlength="6">
+            <input class="otp-digit" data-otp-index="4" aria-label="Digit 5" inputmode="numeric" maxlength="6">
+            <input class="otp-digit" data-otp-index="5" aria-label="Digit 6" inputmode="numeric" maxlength="6">
+          </div>
+          <button id="verifySubmit" class="btn btn-primary btn-block verify-submit" type="submit" disabled><span id="verifySpinner" class="verify-spinner hidden" aria-hidden="true"></span><span id="verifySubmitLabel">Enter the six-digit code</span></button>
+        </form>
+        <div class="verification-actions"><button id="resendCode" class="text-button" type="button">Resend code</button><button id="backToVerificationAuth" class="verify-back" type="button">← Back to sign in</button></div>
       </section>
       <div id="relaySetup" class="relay-setup hidden"><div class="relay-heading"><button id="backToAuth" class="back-button" type="button">←</button><div><h3>Set up messaging</h3><p>Connect your account to start a conversation.</p></div></div><form id="connectForm"><label>Conversation passphrase<div class="password-control"><input id="passphrase" type="password" minlength="12" required autocomplete="current-password" placeholder="Use the same passphrase with your contact"><button class="password-toggle" type="button" data-toggle-password="passphrase" aria-label="Show passphrase" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button></div></label><label>API and relay URL<input id="relayUrl" required placeholder="https://api.example.com"></label><button class="btn btn-primary btn-block" type="submit">Open messaging <span>→</span></button></form></div>
       <p class="auth-foot">Email verification is required to create an account. Account verification and code delivery depend on server email-provider configuration.</p>

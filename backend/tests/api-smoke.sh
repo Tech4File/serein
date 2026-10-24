@@ -19,7 +19,8 @@ cleanup(){
 }
 trap cleanup EXIT
 
-cargo run --quiet --manifest-path "$(dirname "$0")/../Cargo.toml" >"$TMP/server.log" 2>&1 &
+BACKEND_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+(cd "$BACKEND_DIR" && cargo run --quiet --manifest-path "$BACKEND_DIR/Cargo.toml") >"$TMP/server.log" 2>&1 &
 PID=$!
 ready=0
 for _ in $(seq 1 60); do
@@ -28,13 +29,20 @@ for _ in $(seq 1 60); do
 done
 if [[ "$ready" != 1 ]]; then cat "$TMP/server.log"; echo "API did not become ready" >&2; exit 1; fi
 
+# Exact web-origin allowlisting is browser policy, not native-client authentication.
+curl -fsS -D "$TMP/allowed-origin.headers" -H 'Origin: http://127.0.0.1:8080' "$BASE_URL/healthz" >/dev/null
+grep -qi '^access-control-allow-origin: http://127.0.0.1:8080' "$TMP/allowed-origin.headers"
+blocked_origin_status="$(curl -sS -o "$TMP/blocked-origin.json" -w '%{http_code}' -H 'Origin: https://not-allowlisted.example' "$BASE_URL/healthz")"
+test "$blocked_origin_status" = 403
+curl -fsS "$BASE_URL/healthz" >/dev/null
+
 python3 - "$TMP" "$SMOKE_EMAIL_A" "$SMOKE_EMAIL_B" <<'PY'
 import json, pathlib, sys, uuid
 p=pathlib.Path(sys.argv[1]); emails=sys.argv[2:4]
 suffix=uuid.uuid4().hex[:8]
 data={
-  'a': {'username':f'testa{suffix}','email':emails[0],'display_name':'Test Account A','password':'eight123','device_name':'Smoke browser A','device_id':str(uuid.uuid4())},
-  'b': {'username':f'testb{suffix}','email':emails[1],'display_name':'Test Account B','password':'test-password-67890','device_name':'Smoke browser B','device_id':str(uuid.uuid4())},
+  'a': {'username':f'testa{suffix}','email':emails[0],'display_name':'Test Account A','password':'Serein123','device_name':'Smoke browser A','device_id':str(uuid.uuid4())},
+  'b': {'username':f'testb{suffix}','email':emails[1],'display_name':'Test Account B','password':'Test-password-67890','device_name':'Smoke browser B','device_id':str(uuid.uuid4())},
 }
 for k,v in data.items(): (p/f'{k}.json').write_text(json.dumps(v))
 (p/'a_device').write_text(data['a']['device_id'])
@@ -70,12 +78,22 @@ p=pathlib.Path(sys.argv[1]);a=json.loads((p/'a-register.json').read_text());b=js
 assert a['verification']['required'] is True and a['verification']['verified'] is False
 assert b['verification']['required'] is True and b['verification']['verified'] is False
 PY
+repeat_status="$(curl -sS -o "$TMP/a-register-repeat.json" -w '%{http_code}' -H 'Content-Type: application/json' -d "$(cat "$TMP/a.json")" "$BASE_URL/api/v1/auth/register")"
+test "$repeat_status" = 202
+python3 - "$TMP/a-register-repeat.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]));assert x['verification']['required'] is True and x['verification']['email']
+PY
 unverified_status="$(curl -sS -o "$TMP/unverified-login.json" -w '%{http_code}' -H 'Content-Type: application/json' -d "$(python3 - "$TMP/a.json" <<'PY'
 import json,sys
 x=json.load(open(sys.argv[1]));print(json.dumps({'identity':x['email'],'password':x['password']}))
 PY
 )" "$BASE_URL/api/v1/auth/login")"
 test "$unverified_status" = 403
+python3 - "$TMP/unverified-login.json" "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["email"])' "$TMP/a.json")" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]));assert x['verification']['required'] is True and x['verification']['email']==sys.argv[2]
+PY
 resend_status="$(curl -sS -o "$TMP/resend-cooldown.json" -w '%{http_code}' -H 'Content-Type: application/json' -d "$(python3 - "$TMP/a.json" <<'PY'
 import json,sys
 print(json.dumps({'identity':json.load(open(sys.argv[1]))['email']}))
@@ -255,4 +273,4 @@ message_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 invalid_status="$(curl -sS -o "$TMP/invalid-envelope.json" -w '%{http_code}' -c "$A" -b "$A" -H 'Content-Type: application/json' -d "{\"id\":\"$message_id\",\"to\":\"$(cat "$TMP/b_device")\",\"iv\":\"not-base64\",\"ciphertext\":\"bad\"}" "$BASE_URL/api/v1/messages")"
 test "$invalid_status" = 400
 
-echo "API smoke passed: unique username/email conflicts, provider-backed OTP delivery, unverified-login blocking, OTP verification/guess limits/resend cooldown, email and username login, stable and multi-device sessions, settings persistence/validation, history, REST ACK, private contact requests, privacy-setting gates, indistinguishable missing/ineligible-account responses, explicit request acceptance, ten-per-hour discovery throttling, user blocks, and malformed-envelope rejection."
+echo "API smoke passed: unique username/email conflicts, matching unverified-registration retry, provider-backed OTP delivery, unverified-login routing, OTP verification/guess limits/resend cooldown, email and username login, stable and multi-device sessions, settings persistence/validation, history, REST ACK, private contact requests, privacy-setting gates, indistinguishable missing/ineligible-account responses, explicit request acceptance, ten-per-hour discovery throttling, user blocks, and malformed-envelope rejection."

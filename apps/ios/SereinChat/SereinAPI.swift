@@ -41,7 +41,8 @@ struct SereinBlock: Decodable, Identifiable {
 }
 private struct SereinAccountReply: Decodable { let user: SereinUser; let device: SereinDevice }
 private struct SereinAuthReply: Decodable { let account: SereinAccountReply }
-private struct SereinErrorReply: Decodable { let error: String }
+private struct SereinVerificationMeta: Decodable { let required: Bool?; let verified: Bool?; let email: String? }
+private struct SereinErrorReply: Decodable { let error: String; let verification: SereinVerificationMeta? }
 private struct SereinMessageReply: Decodable { let message: String }
 
 private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
@@ -109,7 +110,14 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
             ])
             verificationRequired = true; verificationIdentity = cleanEmail; verificationEmail = cleanEmail
             errorMessage = "Check your email for a six-digit verification code."
-        } catch { errorMessage = error.localizedDescription }
+        } catch {
+            let ns = error as NSError
+            if ns.userInfo["verificationRequired"] as? Bool == true,
+               let address = ns.userInfo["verificationEmail"] as? String {
+                verificationRequired = true; verificationEmail = address; verificationIdentity = address
+            }
+            errorMessage = error.localizedDescription
+        }
     }
     func verifyEmail(code: String, email: String) async {
         busy = true; errorMessage = nil
@@ -145,11 +153,10 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
             await refreshAccountData()
         } catch {
             let ns = error as NSError
-            if path == "/api/v1/auth/login", ns.code == 403 {
-                let identity = (values["identity"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                verificationRequired = true; verificationIdentity = identity
-                verificationEmail = identity.contains("@") ? identity : ""
-                errorMessage = "Email verification is required. Request a code and enter the account email address."
+            if path == "/api/v1/auth/login", ns.userInfo["verificationRequired"] as? Bool == true {
+                let address = (ns.userInfo["verificationEmail"] as? String ?? "").lowercased()
+                verificationRequired = true; verificationIdentity = address; verificationEmail = address
+                errorMessage = error.localizedDescription
             } else { errorMessage = error.localizedDescription }
         }
     }
@@ -250,8 +257,14 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200..<300).contains(http.statusCode) else {
             if http.statusCode == 401, let cookies = HTTPCookieStorage.shared.cookies(for: root) { cookies.filter { $0.name == "serein_session" }.forEach { HTTPCookieStorage.shared.deleteCookie($0) } }
-            let detail = (try? JSONDecoder().decode(SereinErrorReply.self, from: data).error) ?? "API request failed (\(http.statusCode))."
-            throw NSError(domain: "SereinAPI", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: detail])
+            let reply = try? JSONDecoder().decode(SereinErrorReply.self, from: data)
+            let detail = reply?.error ?? "API request failed (\(http.statusCode))."
+            var info: [String: Any] = [NSLocalizedDescriptionKey: detail]
+            if reply?.verification?.required == true {
+                info["verificationRequired"] = true
+                info["verificationEmail"] = reply?.verification?.email ?? ""
+            }
+            throw NSError(domain: "SereinAPI", code: http.statusCode, userInfo: info)
         }
         return data
     }

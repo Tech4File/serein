@@ -61,10 +61,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = PgPoolOptions::new().max_connections(20).connect(&database_url).await?;
     initialize_schema(&db).await?;
     let cookie_secure = env::var("COOKIE_SECURE").map(|v| v != "false").unwrap_or(true);
-    let allowed_origins = env::var("ALLOWED_WEB_ORIGINS").unwrap_or_else(|_| "http://localhost:8080".into()).split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect::<Vec<_>>();
-    let cors_origins = allowed_origins.iter().filter_map(|origin| HeaderValue::try_from(origin.as_str()).ok()).collect::<Vec<_>>();
+    let allowed_origins = env::var("ALLOWED_WEB_ORIGINS").unwrap_or_else(|_| "http://localhost:8080".into())
+        .split(',').map(str::trim).filter(|value|!value.is_empty())
+        .map(normalize_web_origin).collect::<Result<Vec<_>,_>>().map_err(std::io::Error::other)?;
+    if allowed_origins.is_empty(){return Err(std::io::Error::other("ALLOWED_WEB_ORIGINS must contain at least one trusted origin").into());}
+    let cors_origins = allowed_origins.iter().map(|origin|HeaderValue::try_from(origin.as_str()))
+        .collect::<Result<Vec<_>,_>>()?;
     let cors = CorsLayer::new().allow_origin(AllowOrigin::list(cors_origins)).allow_methods([Method::GET,Method::POST,Method::PUT,Method::DELETE,Method::OPTIONS]).allow_headers(Any).allow_credentials(true);
     let mailer = Arc::new(mail::Mailer::from_env().map_err(std::io::Error::other)?);
+    info!(provider=mailer.provider_name(),"email delivery configuration loaded");
     let cleanup_db=db.clone();
     tokio::spawn(async move {
         let mut interval=tokio::time::interval(Duration::from_secs(60));
@@ -95,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/transfers/:transfer_id/chunks/:index", put(upload_transfer_chunk).get(download_transfer_chunk))
         .route("/api/v1/transfers/:transfer_id/ack", post(ack_encrypted_transfer)).route("/api/v1/transfers/:transfer_id", delete(abort_encrypted_transfer))
         .route("/v1/ws", get(ws_handler)).fallback_service(ServeDir::new("../frontend/web").append_index_html_on_directories(true))
-        .layer(cors).layer(TraceLayer::new_for_http()).layer(middleware::from_fn_with_state(state.clone(),security_headers)).with_state(state);
+        .layer(TraceLayer::new_for_http()).layer(middleware::from_fn_with_state(state.clone(),security_headers)).layer(cors).with_state(state);
     let listen_addr = env::var("LISTEN_ADDR").or_else(|_| env::var("PORT").map(|port| format!("0.0.0.0:{port}"))).unwrap_or_else(|_| "0.0.0.0:8080".into());
     let addr: SocketAddr = listen_addr.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -157,10 +162,25 @@ async fn initialize_schema(db: &PgPool) -> Result<(), sqlx::Error> {
     for statement in statements { sqlx::query(statement).execute(db).await?; }
     Ok(())
 }
+fn normalize_web_origin(raw:&str)->Result<String,String>{
+    let url=reqwest::Url::parse(raw.trim()).map_err(|_|"ALLOWED_WEB_ORIGINS entries must be valid origins".to_owned())?;
+    let host=url.host_str().ok_or_else(||"ALLOWED_WEB_ORIGINS entries must include a host".to_owned())?;
+    let local_http=url.scheme()=="http"&&matches!(host,"localhost"|"127.0.0.1"|"[::1]"|"::1");
+    if !(url.scheme()=="https"||local_http)||!url.username().is_empty()||url.password().is_some()
+        ||url.path()!="/"||url.query().is_some()||url.fragment().is_some(){
+        return Err("ALLOWED_WEB_ORIGINS must contain HTTPS origins (HTTP only for localhost), without paths or credentials".into());
+    }
+    Ok(url.origin().ascii_serialization())
+}
+
 async fn security_headers(State(state):State<AppState>,request:Request,next:Next)->Response{
     if let Some(origin)=request.headers().get(header::ORIGIN){
-        let allowed=origin.to_str().ok().is_some_and(|origin|state.allowed_origins.iter().any(|allowed|allowed==origin));
-        if !allowed{return api_error(StatusCode::FORBIDDEN,"request origin is not allowed");}
+        let allowed=origin.to_str().ok().and_then(|value|normalize_web_origin(value).ok())
+            .is_some_and(|origin|state.allowed_origins.iter().any(|allowed|allowed==&origin));
+        if !allowed{
+            warn!(origin=%origin.to_str().unwrap_or("<invalid>"),"rejected request from an origin not listed in ALLOWED_WEB_ORIGINS");
+            return api_error(StatusCode::FORBIDDEN,"request origin is not allowed");
+        }
     }
     let mut response=next.run(request).await;
     let headers=response.headers_mut();
@@ -173,6 +193,9 @@ async fn security_headers(State(state):State<AppState>,request:Request,next:Next
     response
 }
 fn api_error(status: StatusCode, message: &'static str) -> Response { (status, Json(ErrorBody { error: message.into() })).into_response() }
+fn verification_response(status:StatusCode,email:&str,message:&'static str,delivery:&'static str)->Response{
+    (status,Json(serde_json::json!({"error":message,"verification":{"required":true,"verified":false,"email":email,"delivery":delivery}}))).into_response()
+}
 fn account_unique_conflict(constraint: Option<&str>) -> Option<&'static str> {
     match constraint {
         Some("accounts_username_key") => Some("That username is already taken. Choose another username."),
@@ -187,6 +210,15 @@ fn valid_theme(value:&str)->bool{serein_core::valid_theme(value)}
 fn valid_font_scale(value:&str)->bool{serein_core::valid_font_scale(value)}
 fn valid_username(value: &str) -> bool { serein_core::valid_username(value) }
 fn valid_email(value: &str) -> bool { serein_core::valid_email(value) }
+fn registration_password_requirements(password:&str)->[bool;5]{
+    [
+        password.chars().count()>=8,
+        password.bytes().any(|b|b.is_ascii_uppercase()),
+        password.bytes().any(|b|b.is_ascii_lowercase()),
+        password.bytes().any(|b|b.is_ascii_digit()),
+        password.len()<=1024,
+    ]
+}
 fn cookie_value(headers:&HeaderMap)->Option<String>{let raw=headers.get(header::COOKIE)?.to_str().ok()?;raw.split(';').filter_map(|p|p.trim().split_once('=')).find_map(|(k,v)|(k==COOKIE_NAME&&!v.is_empty()).then(||v.to_string()))}
 fn token_hash(token:&str)->Vec<u8>{Sha256::digest(token.as_bytes()).to_vec()}
 fn new_token()->String{let mut bytes=[0u8;32];OsRng.fill_bytes(&mut bytes);URL_SAFE_NO_PAD.encode(bytes)}
@@ -211,21 +243,66 @@ async fn create_device_session(db:&PgPool,user_id:Uuid,device_name:&str,requeste
     let token=new_token();let hash=token_hash(&token);sqlx::query("INSERT INTO auth_sessions(token_hash,user_id,device_id,expires_at) VALUES($1,$2,$3,now()+make_interval(secs => $4::double precision))").bind(&hash).bind(user_id).bind(device_id).bind(SESSION_SECONDS as f64).execute(&mut *tx).await?;tx.commit().await?;Ok((device_id,token))
 }
 async fn register(State(state):State<AppState>,Json(input):Json<RegisterInput>)->Response{
+    let username=normalise_username(&input.username);
+    let email=input.email.trim().to_ascii_lowercase();
+    let display=input.display_name.trim();
+    if !valid_username(&username){return api_error(StatusCode::BAD_REQUEST,"username must be 3–32 lowercase letters, digits, dots, dashes, or underscores");}
+    if !valid_email(&email){return api_error(StatusCode::BAD_REQUEST,"enter a valid email address");}
+    if !(2..=48).contains(&display.chars().count()){return api_error(StatusCode::BAD_REQUEST,"display name must be 2–48 characters");}
+
+    let existing=match sqlx::query_as::<_,(Uuid,String,String,String,bool)>(
+        "SELECT id,username,email,password_hash,email_verified FROM accounts WHERE username=$1 OR email=$2 ORDER BY id"
+    ).bind(&username).bind(&email).fetch_all(&state.db).await{
+        Ok(rows)=>rows,
+        Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"account registration is temporarily unavailable"),
+    };
+    if !existing.is_empty(){
+        if existing.len()==1{
+            let (user_id,stored_username,stored_email,password_hash,verified)=&existing[0];
+            let same_account=stored_username==&username&&stored_email==&email;
+            let password_matches=PasswordHash::new(password_hash).ok()
+                .is_some_and(|parsed|Argon2::default().verify_password(input.password.as_bytes(),&parsed).is_ok());
+            if same_account&&!verified&&password_matches{
+                match ensure_verification_challenge(&state.db,&state.mailer,*user_id,stored_email).await{
+                    Ok(())=>return verification_response(StatusCode::ACCEPTED,stored_email,"This account needs email verification. Check your inbox or resend the code after the short wait.","email"),
+                    Err(error) if error=="cooldown"||error=="send_limit"=>return verification_response(StatusCode::ACCEPTED,stored_email,"This account needs email verification. Check your inbox or wait briefly before requesting another code.","email"),
+                    Err(error)=>{
+                        warn!(provider=state.mailer.provider_name(),failure=otp_failure_kind(&error),provider_status=otp_provider_status(&error),"verification delivery could not be prepared for an existing unverified account");
+                        return verification_response(StatusCode::SERVICE_UNAVAILABLE,stored_email,"Your account is saved but a verification code is not currently available. Try again shortly.","unavailable");
+                    }
+                }
+            }
+        }
+        let message=if existing.iter().any(|row|row.1==username){
+            account_unique_conflict(Some("accounts_username_key")).unwrap()
+        }else{
+            account_unique_conflict(Some("accounts_email_key")).unwrap()
+        };
+        return api_error(StatusCode::CONFLICT,message);
+    }
+
     if !state.mailer.is_enabled(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"email verification is not configured");}
-    let username=normalise_username(&input.username);let email=input.email.trim().to_ascii_lowercase();let display=input.display_name.trim();
-    if !valid_username(&username){return api_error(StatusCode::BAD_REQUEST,"username must be 3–32 lowercase letters, digits, dots, dashes, or underscores");}if !valid_email(&email){return api_error(StatusCode::BAD_REQUEST,"enter a valid email address");}if !(2..=48).contains(&display.chars().count()){return api_error(StatusCode::BAD_REQUEST,"display name must be 2–48 characters");}if input.password.chars().count()<8{return api_error(StatusCode::BAD_REQUEST,"password must contain at least 8 characters");}if input.password.len()>1024{return api_error(StatusCode::BAD_REQUEST,"password must be no more than 1024 UTF-8 bytes");}
-    let salt=SaltString::generate(&mut OsRng);let password_hash=match Argon2::default().hash_password(input.password.as_bytes(),&salt){Ok(h)=>h.to_string(),Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"could not create account")};
+    let [pw_length,pw_upper,pw_lower,pw_digit,pw_bytes]=registration_password_requirements(&input.password);
+    if !pw_length{return api_error(StatusCode::BAD_REQUEST,"password must contain at least 8 characters");}
+    if !pw_bytes{return api_error(StatusCode::BAD_REQUEST,"password must be no more than 1024 UTF-8 bytes");}
+    if !(pw_upper&&pw_lower&&pw_digit){return api_error(StatusCode::BAD_REQUEST,"password must include an uppercase letter, a lowercase letter, and a number");}
+    let salt=SaltString::generate(&mut OsRng);
+    let password_hash=match Argon2::default().hash_password(input.password.as_bytes(),&salt){
+        Ok(hash)=>hash.to_string(),
+        Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"could not create account"),
+    };
     let user_id=Uuid::new_v4();
-    if let Err(error)=sqlx::query("INSERT INTO accounts(id,username,email,display_name,password_hash,email_verified) VALUES($1,$2,$3,$4,$5,FALSE)").bind(user_id).bind(&username).bind(&email).bind(display).bind(password_hash).execute(&state.db).await {
-        if let Some(message)=account_unique_conflict(error.as_database_error().and_then(|db_error|db_error.constraint())) { return api_error(StatusCode::CONFLICT,message); }
-        warn!(error=%error,"account registration insert failed");
+    if let Err(error)=sqlx::query("INSERT INTO accounts(id,username,email,display_name,password_hash,email_verified) VALUES($1,$2,$3,$4,$5,FALSE)")
+        .bind(user_id).bind(&username).bind(&email).bind(display).bind(password_hash).execute(&state.db).await{
+        if let Some(message)=account_unique_conflict(error.as_database_error().and_then(|db_error|db_error.constraint())){return api_error(StatusCode::CONFLICT,message);}
+        warn!("account registration insert failed");
         return api_error(StatusCode::SERVICE_UNAVAILABLE,"account registration is temporarily unavailable");
     }
-    if let Err(error)=issue_verification_code(&state.db,&state.mailer,user_id,&email,false).await {
-        warn!(user_id=%user_id,error=%error,"registration verification email failed");
-        return api_error(StatusCode::SERVICE_UNAVAILABLE,"account created but verification email could not be sent; use resend verification after a short wait");
+    if let Err(error)=issue_verification_code(&state.db,&state.mailer,user_id,&email,false).await{
+        warn!(provider=state.mailer.provider_name(),failure=otp_failure_kind(&error),provider_status=otp_provider_status(&error),"verification email delivery failed after account creation");
+        return verification_response(StatusCode::SERVICE_UNAVAILABLE,&email,"Your account is saved but the verification code could not be sent. Try resending shortly.","unavailable");
     }
-    (StatusCode::ACCEPTED,Json(serde_json::json!({"verification":{"required":true,"verified":false,"delivery":"email"},"message":"Check your email for a verification code."}))).into_response()
+    (StatusCode::ACCEPTED,Json(serde_json::json!({"verification":{"required":true,"verified":false,"delivery":"email","email":email},"message":"Check your email for a verification code."}))).into_response()
 }
 
 async fn verify_email(State(state):State<AppState>,Json(input):Json<VerifyEmailInput>)->Response{
@@ -260,11 +337,11 @@ async fn verify_email(State(state):State<AppState>,Json(input):Json<VerifyEmailI
 async fn resend_verification(State(state):State<AppState>,Json(input):Json<ResendVerificationInput>)->Response{
     let identity=input.identity.trim().to_ascii_lowercase();
     if identity.is_empty(){return api_error(StatusCode::BAD_REQUEST,"enter your email or username");}
-    if !state.mailer.is_enabled(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"email verification is not configured");}
+    if !state.mailer.is_enabled(){warn!("verification resend blocked because email delivery is disabled");return api_error(StatusCode::SERVICE_UNAVAILABLE,"email verification is not configured");}
     let account=match sqlx::query_as::<_,(Uuid,bool,String)>("SELECT id,email_verified,email FROM accounts WHERE email=$1 OR username=$1").bind(&identity).fetch_optional(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"verification service unavailable")};
     if let Some((user_id,false,email))=account{
         if let Err(error)=issue_verification_code(&state.db,&state.mailer,user_id,&email,true).await{
-            warn!(user_id=%user_id,error=%error,"verification resend failed");
+            warn!(provider=state.mailer.provider_name(),failure=otp_failure_kind(&error),provider_status=otp_provider_status(&error),"verification resend failed");
             if error=="cooldown"||error=="send_limit"{return api_error(StatusCode::TOO_MANY_REQUESTS,"please wait before requesting another code");}
             return api_error(StatusCode::SERVICE_UNAVAILABLE,"verification email could not be sent");
         }
@@ -290,13 +367,39 @@ async fn issue_verification_code(db:&PgPool,mailer:&mail::Mailer,user_id:Uuid,em
     };
     sqlx::query("INSERT INTO email_verification_challenges(user_id,code_hash,expires_at,resend_after,attempt_count,send_count,window_started_at) VALUES($1,$2,now()+interval '10 minutes',now()+interval '60 seconds',0,$3,now()) ON CONFLICT(user_id) DO UPDATE SET code_hash=EXCLUDED.code_hash,expires_at=EXCLUDED.expires_at,resend_after=EXCLUDED.resend_after,attempt_count=0,send_count=$3,window_started_at=CASE WHEN email_verification_challenges.window_started_at<=now()-interval '24 hours' THEN now() ELSE email_verification_challenges.window_started_at END").bind(user_id).bind(code_hash).bind(send_count).execute(&mut *tx).await.map_err(|e|format!("OTP save failed: {e}"))?;
     tx.commit().await.map_err(|e|format!("OTP commit failed: {e}"))?;
-    mailer.send_otp(email,&code).await
+    mailer.send_otp(email,&code).await?;
+    info!(provider=mailer.provider_name(),"verification email accepted by configured provider");
+    Ok(())
+}
+
+async fn ensure_verification_challenge(db:&PgPool,mailer:&mail::Mailer,user_id:Uuid,email:&str)->Result<(),String>{
+    let (exists,active)=sqlx::query_as::<_,(bool,bool)>("SELECT EXISTS(SELECT 1 FROM email_verification_challenges WHERE user_id=$1),EXISTS(SELECT 1 FROM email_verification_challenges WHERE user_id=$1 AND expires_at>now())")
+        .bind(user_id).fetch_one(db).await.map_err(|_|"verification challenge lookup failed".to_owned())?;
+    if active{return Ok(());}
+    issue_verification_code(db,mailer,user_id,email,exists).await
+}
+
+fn otp_provider_status(error:&str)->Option<u16>{error.strip_prefix("mail API returned HTTP ").and_then(|value|value.split_whitespace().next()).and_then(|value|value.parse().ok())}
+
+fn otp_failure_kind(error:&str)->&'static str{
+    if error=="cooldown"{"cooldown"}
+    else if error=="send_limit"{"send_limit"}
+    else if error.starts_with("mail API")||error=="SMTP delivery failed"||error=="Email delivery is not configured"||error=="email delivery is not configured"{"provider_delivery"}
+    else{"challenge_storage_or_generation"}
 }
 
 async fn login(State(state):State<AppState>,Json(input):Json<LoginInput>)->Response{
-    let identity=input.identity.trim().to_ascii_lowercase();if identity.is_empty()||input.password.is_empty(){return api_error(StatusCode::BAD_REQUEST,"enter your username/email and password");}if input.password.len()>1024{return api_error(StatusCode::BAD_REQUEST,"password must be no more than 1024 UTF-8 bytes");}
+    let identity=input.identity.trim().to_ascii_lowercase();if identity.is_empty()||input.password.is_empty(){return api_error(StatusCode::BAD_REQUEST,"enter your username/email and password");}
     let row=match sqlx::query_as::<_,(Uuid,String,String,String,String,bool)>("SELECT id,username,email,display_name,password_hash,email_verified FROM accounts WHERE username=$1 OR email=$1").bind(&identity).fetch_optional(&state.db).await{Ok(row)=>row,Err(err)=>{warn!(error=%err,"login lookup failed");return api_error(StatusCode::SERVICE_UNAVAILABLE,"account service unavailable");}};
-    let Some((user_id,username,email,display_name,password_hash,email_verified))=row else{return api_error(StatusCode::UNAUTHORIZED,"invalid username/email or password")};let parsed=match PasswordHash::new(&password_hash){Ok(p)=>p,Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"stored credential could not be verified")};if Argon2::default().verify_password(input.password.as_bytes(),&parsed).is_err(){return api_error(StatusCode::UNAUTHORIZED,"invalid username/email or password");}if !email_verified{return api_error(StatusCode::FORBIDDEN,"verify your email before signing in; request a new verification code if needed");}
+    let Some((user_id,username,email,display_name,password_hash,email_verified))=row else{return api_error(StatusCode::UNAUTHORIZED,"invalid username/email or password")};let parsed=match PasswordHash::new(&password_hash){Ok(p)=>p,Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"stored credential could not be verified")};if Argon2::default().verify_password(input.password.as_bytes(),&parsed).is_err(){return api_error(StatusCode::UNAUTHORIZED,"invalid username/email or password");}if !email_verified{
+        let (message,delivery)=match ensure_verification_challenge(&state.db,&state.mailer,user_id,&email).await{
+            Ok(())=>("Email verification is required. Check your inbox for the code.","email"),
+            Err(error) if error=="cooldown"=>("Email verification is required. A code was recently requested; wait briefly before resending.","email"),
+            Err(error) if error=="send_limit"=>("Email verification is required. The resend limit was reached; try again later.","limited"),
+            Err(error)=>{warn!(provider=state.mailer.provider_name(),failure=otp_failure_kind(&error),provider_status=otp_provider_status(&error),"verification email could not be prepared after unverified sign-in");("Email verification is required, but code delivery is currently unavailable. Try again shortly.","unavailable")}
+        };
+        return verification_response(StatusCode::FORBIDDEN,&email,message,delivery);
+    }
     let label=input.device_name.as_deref().unwrap_or("Web browser").trim();let label=if label.is_empty(){"Web browser"}else{label};let(device_id,token)=match create_device_session(&state.db,user_id,label,input.device_id).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not create session")};let ctx=AuthContext{user_id,username,email,display_name,email_verified,device_id,device_name:label.into(),session_hash:token_hash(&token)};
     let mut response=Json(serde_json::json!({"account":auth_reply(&ctx),"verification":{"required":true,"verified":email_verified}})).into_response();attach_session_cookie(&mut response,&token,state.cookie_secure);response
 }
@@ -652,7 +755,12 @@ async fn revoke_other_devices(State(state):State<AppState>,headers:HeaderMap)->R
     Json(serde_json::json!({"ok":true,"history_retained":true})).into_response()
 }
 async fn ws_handler(State(state):State<AppState>,headers:HeaderMap,ws:WebSocketUpgrade)->Response{
-    if let Some(origin)=headers.get(header::ORIGIN).and_then(|v|v.to_str().ok()){if !state.allowed_origins.iter().any(|a|a==origin){return api_error(StatusCode::FORBIDDEN,"web origin is not allowed");}}let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};ws.max_message_size(100*1024).max_frame_size(100*1024).on_upgrade(move|socket|handle_socket(socket,state,ctx)).into_response()
+    if let Some(origin)=headers.get(header::ORIGIN).and_then(|v|v.to_str().ok()){
+        let allowed=normalize_web_origin(origin).ok().is_some_and(|value|state.allowed_origins.iter().any(|item|item==&value));
+        if !allowed{warn!(origin=%origin,"rejected websocket origin not listed in ALLOWED_WEB_ORIGINS");return api_error(StatusCode::FORBIDDEN,"web origin is not allowed");}
+    }
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    ws.max_message_size(100*1024).max_frame_size(100*1024).on_upgrade(move|socket|handle_socket(socket,state,ctx)).into_response()
 }
 async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
     if state.peers.len()>=MAX_LIVE_CONNECTIONS&&!state.peers.contains_key(&ctx.device_id){warn!("live connection cap reached");return;}let(mut ws_tx,mut ws_rx)=socket.split();let(out_tx,mut out_rx)=mpsc::channel::<String>(128);let connection_id=Uuid::new_v4();state.peers.insert(ctx.device_id,Peer{connection_id,tx:out_tx.clone()});let _=sqlx::query("UPDATE devices SET last_seen_at=now() WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL").bind(ctx.device_id).bind(ctx.user_id).execute(&state.db).await;
@@ -692,7 +800,7 @@ async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
 
 #[cfg(test)]
 mod tests {
-    use super::{account_unique_conflict, history_page_limit, normalise_username, token_hash, valid_ciphertext_parts, valid_email, valid_font_scale, valid_theme, valid_username};
+    use super::{account_unique_conflict, history_page_limit, normalise_username, normalize_web_origin, registration_password_requirements, token_hash, valid_ciphertext_parts, valid_email, valid_font_scale, valid_theme, valid_username};
     #[test] fn duplicate_username_and_email_return_distinct_safe_messages(){assert!(account_unique_conflict(Some("accounts_username_key")).unwrap().contains("username"));assert!(account_unique_conflict(Some("accounts_email_key")).unwrap().contains("email"));assert!(account_unique_conflict(Some("unrelated_constraint")).is_none());}
     #[test] fn username_normalisation_is_ascii_lowercase(){assert_eq!(normalise_username("  Alice_7 "),"alice_7");}
     #[test] fn username_validation_rejects_short_and_unsafe_values(){assert!(valid_username("alice.7"));assert!(!valid_username("ab"));assert!(!valid_username("bad name"));assert!(!valid_username("Upper"));}
@@ -701,4 +809,6 @@ mod tests {
     #[test] fn history_page_size_is_defaulted_and_bounded(){assert_eq!(history_page_limit(None),100);assert_eq!(history_page_limit(Some(0)),1);assert_eq!(history_page_limit(Some(500)),200);}
     #[test] fn account_setting_values_are_allowlisted(){assert!(valid_theme("dark"));assert!(!valid_theme("ultraviolet"));assert!(valid_font_scale("large"));assert!(!valid_font_scale("huge"));}
     #[test] fn ciphertext_envelopes_require_gcm_iv_and_tag(){assert!(valid_ciphertext_parts("AAAAAAAAAAAAAAAA","AAAAAAAAAAAAAAAAAAAAAA=="));assert!(!valid_ciphertext_parts("short","AAAAAAAAAAAAAAAAAAAAAA=="));assert!(!valid_ciphertext_parts("AAAAAAAAAAAAAAAA","AA=="));}
+    #[test] fn registration_password_policy_requires_length_case_digit_and_byte_limit(){assert_eq!(registration_password_requirements("Serein123"),[true,true,true,true,true]);assert_eq!(registration_password_requirements("password1"),[true,false,true,true,true]);assert_eq!(registration_password_requirements("PASSWORD1"),[true,true,false,true,true]);assert_eq!(registration_password_requirements("Password"),[true,true,true,false,true]);assert_eq!(registration_password_requirements("Abc123"),[false,true,true,true,true]);assert!(!registration_password_requirements(&format!("{}Aa1", "x".repeat(1022)))[4]);}
+    #[test] fn web_origins_are_exact_https_origins_and_local_http_only(){assert_eq!(normalize_web_origin("https://web.example.org/" ).unwrap(),"https://web.example.org");assert_eq!(normalize_web_origin("https://web.example.org:8443").unwrap(),"https://web.example.org:8443");assert!(normalize_web_origin("https://web.example.org/path").is_err());assert!(normalize_web_origin("http://web.example.org").is_err());assert_eq!(normalize_web_origin("http://localhost:8080").unwrap(),"http://localhost:8080");}
 }

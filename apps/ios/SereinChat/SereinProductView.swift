@@ -26,29 +26,42 @@ private struct SereinNativeAuthView: View {
     @State private var email = ""
     @State private var password = ""
     @State private var passwordVisible = false
-    @State private var otpCode = ""
+    @State private var otpDigits = Array(repeating: "", count: 6)
+    @State private var verifyingOtp = false
+    @FocusState private var focusedOtp: Int?
     var body: some View {
         ZStack {
             LinearGradient(colors: [Color(uiColor: .systemBackground), SereinPalette.paleMint.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack { SereinAvatar(name: "Serein", size: 42); VStack(alignment: .leading) { Text("Serein").font(.system(size: 20, weight: .bold, design: .rounded)); Text("SEREIN ACCOUNT").font(.system(size: 8, weight: .bold)).tracking(1.1).foregroundStyle(.secondary) }; Spacer() }
-                    VStack(alignment: .leading, spacing: 7) { SereinSectionLabel(title: "ACCOUNT"); Text(registering ? "Create your account" : "Welcome back").font(.system(size: 29, weight: .bold, design: .rounded)); Text("Connect to your Serein API over HTTPS.").font(.system(size: 12)).foregroundStyle(.secondary) }
+                    VStack(alignment: .leading, spacing: 7) { SereinSectionLabel(title: api.verificationRequired ? "EMAIL VERIFICATION" : "ACCOUNT"); Text(api.verificationRequired ? "Verify your email" : (registering ? "Create your account" : "Welcome back")).font(.system(size: 29, weight: .bold, design: .rounded)); Text(api.verificationRequired ? "Enter the six-digit code sent to your inbox." : "Connect to your Serein API over HTTPS.").font(.system(size: 12)).foregroundStyle(.secondary) }
                     SereinCard {
                         VStack(spacing: 13) {
-                            TextField("https://api.your-domain.example", text: $api.apiBase).textInputAutocapitalization(.never).keyboardType(.URL).autocorrectionDisabled().padding(12).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
                             if api.verificationRequired {
-                                VStack(spacing: 13) {
-                                    Text("Verify your email").font(.system(size: 20, weight: .bold, design: .rounded)).frame(maxWidth: .infinity, alignment: .leading)
-                                    Text("Enter the six-digit code emailed to your account. Codes expire after ten minutes.").font(.system(size: 11)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                                    input("Email address", text: $api.verificationEmail, icon: "envelope")
-                                    HStack { Image(systemName: "number").foregroundStyle(.secondary); TextField("Six-digit code", text: $otpCode).keyboardType(.numberPad).textContentType(.oneTimeCode).textInputAutocapitalization(.never) }.padding(12).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
-                                    Button { Task { await api.verifyEmail(code: otpCode, email: api.verificationEmail) } } label: { HStack { Spacer(); Text(api.busy ? "Verifying…" : "Verify email"); Spacer(); Image(systemName: "arrow.right") } }.buttonStyle(SereinPrimaryButtonStyle()).disabled(api.busy || api.verificationEmail.isEmpty || otpCode.count != 6)
-                                    input("Account email or username", text: $api.verificationIdentity, icon: "person")
-                                    Button("Resend verification code") { Task { await api.resendVerification(identity: api.verificationIdentity) } }.disabled(api.busy || api.verificationIdentity.isEmpty)
-                                    Button("Back to sign in") { api.verificationRequired = false; registering = false; otpCode = "" }.font(.system(size: 12))
-                                }
+                                VStack(spacing: 15) {
+                                    Text("A code was sent to \(api.verificationEmail)").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).lineLimit(2)
+                                    HStack(spacing: 8) {
+                                        ForEach(0..<6, id: \.self) { index in
+                                            TextField("", text: Binding(get: { otpDigits[index] }, set: { setOtpDigit(index, value: $0) }))
+                                                .keyboardType(.numberPad).textContentType(index == 0 ? .oneTimeCode : nil).textInputAutocapitalization(.never)
+                                                .font(.system(size: 20, weight: .semibold, design: .monospaced)).multilineTextAlignment(.center)
+                                                .focused($focusedOtp, equals: index).frame(maxWidth: .infinity).frame(height: 43)
+                                                .overlay(alignment: .bottom) { Rectangle().fill(focusedOtp == index ? SereinPalette.green : Color.secondary.opacity(0.35)).frame(height: 2) }
+                                                .accessibilityLabel("Code digit \(index + 1)")
+                                        }
+                                    }
+                                    Button { verifyOtp() } label: {
+                                        HStack { Spacer(); if verifyingOtp || api.busy { ProgressView().tint(.white) }; Text(verifyingOtp || api.busy ? "Verifying…" : (otpDigits.joined().count == 6 ? "Verify email" : "Enter the six-digit code")); Spacer(); if !(verifyingOtp || api.busy) { Image(systemName: "arrow.right") } }
+                                    }.buttonStyle(SereinPrimaryButtonStyle()).disabled(api.busy || verifyingOtp || api.verificationEmail.isEmpty || otpDigits.joined().count != 6)
+                                    HStack {
+                                        Button("Resend code") { Task { await api.resendVerification(identity: api.verificationEmail) } }.disabled(api.busy || verifyingOtp || api.verificationEmail.isEmpty)
+                                        Spacer()
+                                        Button("← Back to sign in") { api.verificationRequired = false; api.verificationEmail = ""; api.verificationIdentity = ""; registering = false; otpDigits = Array(repeating: "", count: 6) }.font(.system(size: 11, weight: .medium))
+                                    }.font(.system(size: 11))
+                                }.onAppear { focusedOtp = 0 }
                             } else {
+                                TextField("https://api.your-domain.example", text: $api.apiBase).textInputAutocapitalization(.never).keyboardType(.URL).autocorrectionDisabled().padding(12).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
                                 HStack(spacing: 6) { modeButton("Sign in", active: !registering) { withAnimation(.easeInOut(duration: 0.2)) { registering = false } }; modeButton("Create account", active: registering) { withAnimation(.easeInOut(duration: 0.2)) { registering = true } } }
                                 if registering {
                                     input("Display name", text: $displayName, icon: "person")
@@ -60,23 +73,47 @@ private struct SereinNativeAuthView: View {
                                     VStack(alignment: .leading, spacing: 6) {
                                         Text("Password requirements").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
                                         requirement("At least 8 characters", met: password.unicodeScalars.count >= 8)
+                                        requirement("At least one uppercase letter (A–Z)", met: passwordHasUppercase)
+                                        requirement("At least one lowercase letter (a–z)", met: passwordHasLowercase)
+                                        requirement("At least one number (0–9)", met: passwordHasNumber)
                                         requirement("No more than 1024 UTF-8 bytes", met: password.utf8.count <= 1024)
                                     }.padding(11).frame(maxWidth: .infinity, alignment: .leading).background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10)).transition(.opacity.combined(with: .move(edge: .top)))
                                     Text("New accounts must verify their email before signing in. A code is sent by the server after registration.").font(.system(size: 10)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 Button { Task { if registering { await api.register(username: username, email: email, displayName: displayName, password: password) } else { await api.signIn(identity: username, password: password) } } } label: {
                                     HStack { Spacer(); Text(api.busy ? "Connecting…" : (registering ? "Create account" : "Sign in")); Spacer(); Image(systemName: "arrow.right") }
-                                }.buttonStyle(SereinPrimaryButtonStyle()).disabled(api.busy || (registering && (password.unicodeScalars.count < 8 || password.utf8.count > 1024)) || username.isEmpty).animation(.easeInOut(duration: 0.2), value: registering)
+                                }.buttonStyle(SereinPrimaryButtonStyle()).disabled(api.busy || (registering && !validRegistrationPassword) || username.isEmpty).animation(.easeInOut(duration: 0.2), value: registering)
                             }
                         }
                     }
-                    Text("Account and device settings use the API. Native message encryption and chat history are not connected yet; this screen will not fake a successful chat.").font(.system(size: 10)).foregroundStyle(.secondary)
+                    if !api.verificationRequired { Text("Account and device settings use the API. Native message encryption and chat history are not connected yet; this screen will not fake a successful chat.").font(.system(size: 10)).foregroundStyle(.secondary) }
                 }.padding(22).frame(maxWidth: 540).frame(maxWidth: .infinity)
             }
         }
     }
     private func input(_ title: String, text: Binding<String>, icon: String) -> some View {
         HStack { Image(systemName: icon).foregroundStyle(.secondary); TextField(title, text: text).textInputAutocapitalization(.never).autocorrectionDisabled() }.padding(12).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
+    }
+    private var passwordHasUppercase: Bool { password.unicodeScalars.contains { $0.value >= 65 && $0.value <= 90 } }
+    private var passwordHasLowercase: Bool { password.unicodeScalars.contains { $0.value >= 97 && $0.value <= 122 } }
+    private var passwordHasNumber: Bool { password.unicodeScalars.contains { $0.value >= 48 && $0.value <= 57 } }
+    private var validRegistrationPassword: Bool { password.unicodeScalars.count >= 8 && passwordHasUppercase && passwordHasLowercase && passwordHasNumber && password.utf8.count <= 1024 }
+    private func setOtpDigit(_ index: Int, value: String) {
+        let digits = value.filter { $0.isASCII && $0.isNumber }
+        if digits.count > 1 {
+            let code = Array(digits.prefix(6)).map { String($0) }
+            otpDigits = code + Array(repeating: "", count: max(0, 6 - code.count))
+            focusedOtp = code.count < 6 ? code.count : nil
+        } else {
+            otpDigits[index] = digits.isEmpty ? "" : String(digits.prefix(1))
+            if !otpDigits[index].isEmpty { focusedOtp = index < 5 ? index + 1 : nil }
+        }
+        if otpDigits.joined().count == 6 && !api.busy && !verifyingOtp { verifyOtp() }
+    }
+    private func verifyOtp() {
+        guard otpDigits.joined().count == 6, !api.verificationEmail.isEmpty, !api.busy, !verifyingOtp else { return }
+        verifyingOtp = true
+        Task { await api.verifyEmail(code: otpDigits.joined(), email: api.verificationEmail); verifyingOtp = false }
     }
     private func requirement(_ title: String, met: Bool) -> some View {
         Label(title, systemImage: met ? "checkmark.circle.fill" : "circle").font(.system(size: 10)).foregroundStyle(met ? SereinPalette.green : Color.secondary)

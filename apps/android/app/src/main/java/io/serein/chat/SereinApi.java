@@ -112,8 +112,8 @@ final class SereinApi {
                 InputStream stream = code >= 200 && code < 400 ? connection.getInputStream() : connection.getErrorStream();
                 String text = stream == null ? "{}" : readFully(stream);
                 Object parsed = text.isEmpty() ? new JSONObject() : new org.json.JSONTokener(text).nextValue();
+                result = parsed;
                 if (code < 200 || code >= 300) error = parsed instanceof JSONObject ? ((JSONObject) parsed).optString("error", "API request failed (" + code + ")") : "API request failed (" + code + ")";
-                else result = parsed;
             } catch (Exception e) { error = e.getMessage() == null ? "Could not reach the Serein API." : e.getMessage(); }
             finally { if (connection != null) connection.disconnect(); }
             Object finalResult = result; String finalError = error;

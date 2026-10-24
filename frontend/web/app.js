@@ -9,7 +9,7 @@
     sendButton:$('sendButton'), toast:$('toast'),
   };
   const enc = new TextEncoder(), dec = new TextDecoder();
-  const state = { socket:null, secret:null, user:null, device:null, name:'', identity:'', relay:'', contacts:[], devices:[], contactRequests:[], blocks:[], selected:null, authMode:'signin', filter:'all', messages:{}, toastTimer:0, localDb:null, localKey:null, seenIds:new Set(), pendingSends:new Map(), processingIds:new Set(), heartbeatTimer:0, reconnectTimer:0, reconnectAttempt:0, signingOut:false, settings:{theme:'system',font_scale:'standard',reduce_motion:false,notifications:false,presence_visibility:'contacts',allow_contact_requests:true,discoverable_by_email:false}, syncingSettings:false };
+  const state = { socket:null, secret:null, user:null, device:null, name:'', identity:'', relay:'', contacts:[], devices:[], contactRequests:[], blocks:[], selected:null, authMode:'signin', filter:'all', messages:{}, verificationEmail:'', verificationBusy:false, toastTimer:0, localDb:null, localKey:null, seenIds:new Set(), pendingSends:new Map(), processingIds:new Set(), heartbeatTimer:0, reconnectTimer:0, reconnectAttempt:0, signingOut:false, settings:{theme:'system',font_scale:'standard',reduce_motion:false,notifications:false,presence_visibility:'contacts',allow_contact_requests:true,discoverable_by_email:false}, syncingSettings:false };
   const THEME_KEY='serein.theme.v1';
   const b64 = (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer)));
   const fromB64 = (value) => Uint8Array.from(atob(value), ch => ch.charCodeAt(0));
@@ -58,8 +58,8 @@
   async function setLocalMeta(name,value){if(!state.localDb)return;const tx=state.localDb.transaction('meta','readwrite');tx.objectStore('meta').put({key:localMetaKey(name),value});await idbDone(tx);}
   async function api(path,options={}){
     const headers=new Headers(options.headers||{});if(options.body&&!headers.has('Content-Type'))headers.set('Content-Type','application/json');
-    const url=secureApiUrl(path);let response;try{response=await fetch(url,{...options,headers,credentials:'include',redirect:'error'});}catch{throw new Error('Cannot reach the account API. Check the configured HTTPS API URL and hosting origin.');}
-    const body=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(body.error||`API request failed (${response.status}).`);error.status=response.status;throw error;}return body;
+    const url=secureApiUrl(path);let response;try{response=await fetch(url,{...options,headers,credentials:'include',redirect:'error'});}catch{throw new Error('Could not reach the account service. If the web app and API use different origins, ALLOWED_WEB_ORIGINS must include this page’s exact origin (scheme, host, and port).');}
+    const body=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(body.error||`API request failed (${response.status}).`);error.status=response.status;error.verification=body.verification;throw error;}return body;
   }
   async function refreshContacts(){
     const rows=await api('/api/v1/contacts');const meta=contactMeta();
@@ -125,10 +125,9 @@
   function scheduleReconnect(){if(state.reconnectTimer||state.signingOut||!state.user||!state.relay)return;const delay=Math.min(30000,1000*(2**Math.min(state.reconnectAttempt++,5)));state.reconnectTimer=setTimeout(async()=>{state.reconnectTimer=0;try{const socket=await openSocket(state.relay);state.reconnectAttempt=0;attachSocket(socket);await refreshContacts();await refreshContactRequests();await refreshBlocks();await refreshDevices();await loadLocalTimeline();await syncServerHistory();await resendPendingMessages();toast('Reconnected and synced stored messages.');}catch(error){console.warn('Reconnect attempt failed',error);scheduleReconnect();}},delay);}
   function updateAuthValidation(){
     const reg=state.authMode==='register',password=$('accountPassword').value,confirm=$('confirmPassword').value;
-    const lengthOk=[...password].length>=8,bytesOk=enc.encode(password).length<=1024;
+    const lengthOk=[...password].length>=8,upperOk=/[A-Z]/.test(password),lowerOk=/[a-z]/.test(password),digitOk=/[0-9]/.test(password),bytesOk=enc.encode(password).length<=1024;
     $('passwordRequirements').classList.toggle('visible',reg);
-    $('passwordRequirements').querySelector('[data-password-rule="length"]').classList.toggle('satisfied',lengthOk);
-    $('passwordRequirements').querySelector('[data-password-rule="bytes"]').classList.toggle('satisfied',bytesOk);
+    for(const [rule,ok] of Object.entries({length:lengthOk,upper:upperOk,lower:lowerOk,digit:digitOk,bytes:bytesOk}))$('passwordRequirements').querySelector(`[data-password-rule="${rule}"]`).classList.toggle('satisfied',ok);
     const feedback=$('confirmPasswordFeedback');feedback.classList.remove('match','mismatch');
     if(reg&&confirm){const matches=password===confirm;feedback.textContent=matches?'Passwords match':'Passwords do not match';feedback.classList.add(matches?'match':'mismatch');}
     else feedback.textContent='';
@@ -136,19 +135,63 @@
     const identity=clean($('loginIdentity').value,120),username=$('regHandle').value.trim(),name=$('regName').value.trim(),email=$('regEmail');
     const signinFeedback=$('signinFeedback');signinFeedback.textContent=reg?'':(!identity||!password?'Enter both your email or username and password.':'Ready to sign in. Credentials are checked when you submit.');
     const usernameOk=/^[a-z0-9_.-]{3,32}$/.test(username.toLowerCase());
-    const regValid=!!name&&usernameOk&&!!email.value.trim()&&email.validity.valid&&lengthOk&&bytesOk&&!!confirm&&confirm===password;
+    const regValid=!!name&&usernameOk&&!!email.value.trim()&&email.validity.valid&&lengthOk&&upperOk&&lowerOk&&digitOk&&bytesOk&&!!confirm&&confirm===password;
     $('authSubmit').disabled=!!$('authSubmit').dataset.busy||!(reg?regValid:(!!identity&&password.length>0));
-    $('accountPassword').setAttribute('aria-invalid',String(reg&&password.length>0&&(!lengthOk||!bytesOk)));
+    $('accountPassword').setAttribute('aria-invalid',String(reg&&password.length>0&&(!lengthOk||!upperOk||!lowerOk||!digitOk||!bytesOk)));
     $('confirmPassword').setAttribute('aria-invalid',String(reg&&confirm.length>0&&confirm!==password));
   }
   function authMode(mode){state.authMode=mode;const reg=mode==='register';$('signinTab').classList.toggle('active',!reg);$('registerTab').classList.toggle('active',reg);$('registerFields').classList.toggle('hidden',!reg);$('signinFields').classList.toggle('hidden',reg);$('confirmPasswordWrap').classList.toggle('hidden',!reg);$('authTitle').textContent=reg?'Create your account':'Sign in';$('authSubtitle').textContent=reg?'A profile for the people you choose.':'Continue to your conversations.';$('authSubmit').innerHTML=reg?'Create account <span>→</span>':'Sign in <span>→</span>';updateAuthValidation();}
-  function showVerification(identity,email=''){
-    $('authForm').classList.add('hidden');$('authTabs').classList.add('hidden');$('authNotice').classList.add('hidden');$('relaySetup').classList.add('hidden');$('verificationPanel').classList.remove('hidden');
-    $('resendIdentity').value=identity||'';$('verifyEmail').value=email||(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity)?identity:'');$('otpCode').value='';
-    if($('verifyEmail').value)$('otpCode').focus();else $('resendIdentity').focus();
+  function maskedEmail(email){
+    const [local,domain='']=(email||'').split('@');
+    if(!local||!domain)return 'your email address';
+    return `${local.slice(0,1)}${'•'.repeat(Math.min(4,Math.max(2,local.length-1)))}@${domain}`;
   }
-  function showRelaySetup(){ $('authForm').classList.add('hidden');$('authTabs').classList.add('hidden');$('authNotice').classList.add('hidden');$('verificationPanel').classList.add('hidden');$('relaySetup').classList.remove('hidden');$('relayUrl').value=API_BASE;$('passphrase').focus();}
-  function backToAuth(){ state.authMode='signin';$('verificationPanel').classList.add('hidden');$('relaySetup').classList.add('hidden');$('authForm').classList.remove('hidden');$('authTabs').classList.remove('hidden');$('authNotice').classList.remove('hidden');authMode(state.authMode); }
+  function verificationCode(){return [...document.querySelectorAll('.otp-digit')].map(input=>input.value).join('');}
+  function verificationMessage(text='',kind=''){
+    const node=$('verificationMessage');node.textContent=text;node.classList.remove('error','success');if(kind)node.classList.add(kind);
+  }
+  function updateVerificationButton(){
+    const button=$('verifySubmit'),code=verificationCode(),busy=state.verificationBusy;
+    button.disabled=busy||code.length!==6;button.classList.toggle('loading',busy);button.setAttribute('aria-busy',String(busy));
+    $('verifySpinner').classList.toggle('hidden',!busy);
+    $('verifySubmitLabel').textContent=busy?'Verifying…':code.length===6?'Verify email':'Enter the six-digit code';
+  }
+  function showVerification(email,message='',kind='success'){
+    state.verificationEmail=clean(email,120).toLowerCase();state.verificationBusy=false;
+    $('authTitle').textContent='Verify your email';$('authSubtitle').textContent='Enter the six-digit code sent to your inbox.';
+    $('authForm').classList.add('hidden');$('authTabs').classList.add('hidden');$('authNotice').classList.add('hidden');$('relaySetup').classList.add('hidden');
+    $('verificationPanel').classList.remove('hidden');$('verificationAddress').textContent=maskedEmail(state.verificationEmail);
+    document.querySelectorAll('.otp-digit').forEach(input=>{input.value='';input.removeAttribute('aria-invalid');});
+    verificationMessage(message,message?kind:'');updateVerificationButton();
+    document.querySelector('.otp-digit')?.focus();
+  }
+  function handleOtpKeydown(event){
+    const inputs=[...document.querySelectorAll('.otp-digit')],index=inputs.indexOf(event.currentTarget);
+    if((event.key==='Backspace'&&!event.currentTarget.value&&index>0)||event.key==='ArrowLeft'&&index>0){event.preventDefault();inputs[index-1].focus();}
+    else if(event.key==='ArrowRight'&&index<inputs.length-1){event.preventDefault();inputs[index+1].focus();}
+  }
+  function handleOtpInput(event){
+    const inputs=[...document.querySelectorAll('.otp-digit')],input=event.currentTarget,index=inputs.indexOf(input);
+    const digits=input.value.replace(/[^0-9]/g,'').slice(0,6);
+    if(digits.length>1){inputs.forEach((field,i)=>{field.value=digits[i]||'';});inputs[Math.min(digits.length,5)]?.focus();}
+    else{input.value=digits.slice(0,1);if(digits&&index<inputs.length-1)inputs[index+1].focus();}
+    if(digits)verificationMessage('');updateVerificationButton();
+    if(verificationCode().length===6)verifyOtp();
+  }
+  async function verifyOtp(){
+    if(state.verificationBusy||$('verificationPanel').classList.contains('hidden'))return;
+    const email=state.verificationEmail,code=verificationCode();
+    if(!email){verificationMessage('The account email is missing. Return to sign-in and try again.','error');return;}
+    if(code.length!==6)return;
+    state.verificationBusy=true;updateVerificationButton();verificationMessage('Checking your code securely…');
+    try{
+      const result=await api('/api/v1/auth/verify-email',{method:'POST',body:JSON.stringify({email,code,device_name:'Serein Web',device_id:persistentDeviceId()})});
+      await acceptAccount(result);
+    }catch(error){verificationMessage(error.message,'error');document.querySelector('.otp-digit')?.focus();}
+    finally{state.verificationBusy=false;if(!$('verificationPanel').classList.contains('hidden'))updateVerificationButton();}
+  }
+  function showRelaySetup(){state.verificationEmail='';$('authForm').classList.add('hidden');$('authTabs').classList.add('hidden');$('authNotice').classList.add('hidden');$('verificationPanel').classList.add('hidden');$('relaySetup').classList.remove('hidden');$('relayUrl').value=API_BASE;$('passphrase').focus();}
+  function backToAuth(){state.authMode='signin';state.verificationEmail='';state.verificationBusy=false;$('verificationPanel').classList.add('hidden');$('relaySetup').classList.add('hidden');$('authForm').classList.remove('hidden');$('authTabs').classList.remove('hidden');$('authNotice').classList.remove('hidden');authMode(state.authMode);$('loginIdentity').focus();}
   async function acceptAccount(result){
     const account=result.account;if(!account?.user||!account?.device)throw new Error('Account service returned an incomplete session.');
     state.user=account.user;state.device=account.device;localStorage.setItem('serein.stable-device-id.v1',account.device.id);state.name=account.user.display_name;state.identity=account.user.username;
@@ -158,14 +201,20 @@
   async function handleAuthSubmit(event){event.preventDefault();const password=$('accountPassword').value;const button=$('authSubmit');button.dataset.busy='true';button.disabled=true;button.textContent='Please wait…';let registrationEmail='';
     try{let result;if(state.authMode==='register'){
         const name=clean($('regName').value,48),username=clean($('regHandle').value,32).toLowerCase(),email=clean($('regEmail').value,120).toLowerCase(),confirm=$('confirmPassword').value;registrationEmail=email;
-        if(!name||!username||!email){toast('Complete your name, username, and email.');return;}if([...password].length<8){toast('Use at least 8 characters for your password.');return;}if(enc.encode(password).length>1024){toast('Password must be no more than 1024 UTF-8 bytes.');return;}await window.SereinCore?.ready;if(window.SereinCore&&!window.SereinCore.validUsername(username)){toast('Use 3–32 lowercase letters, numbers, dots, dashes, or underscores for the username.');return;}if(password!==confirm){toast('Passwords do not match.');return;}
+        if(!name||!username||!email){toast('Complete your name, username, and email.');return;}if([...password].length<8){toast('Use at least 8 characters for your password.');return;}if(enc.encode(password).length>1024){toast('Password must be no more than 1024 UTF-8 bytes.');return;}if(!/[A-Z]/.test(password)||!/[a-z]/.test(password)||!/[0-9]/.test(password)){toast('Add at least one uppercase letter, one lowercase letter, and one number.');return;}await window.SereinCore?.ready;if(window.SereinCore&&!window.SereinCore.validUsername(username)){toast('Use 3–32 lowercase letters, numbers, dots, dashes, or underscores for the username.');return;}if(password!==confirm){toast('Passwords do not match.');return;}
         result=await api('/api/v1/auth/register',{method:'POST',body:JSON.stringify({username,email,display_name:name,password})});
-        showVerification(email,email);toast(result.message||'Check your email for a verification code.');return;
+        showVerification(result.verification?.email||email,result.message||'A verification code was sent to your inbox.');return;
       }
       const identity=clean($('loginIdentity').value,120);if(!identity){toast('Enter your email or username.');return;}result=await api('/api/v1/auth/login',{method:'POST',body:JSON.stringify({identity,password,device_name:'Serein Web',device_id:persistentDeviceId()})});await acceptAccount(result);
-    }catch(error){if(error.status===403){showVerification(clean($('loginIdentity').value,120));toast('Your email needs verification. Request a code, then enter it here.');}else if(state.authMode==='register'&&error.message.toLowerCase().includes('account created but verification')){showVerification(registrationEmail,registrationEmail);toast(error.message);}else toast(error.message);}finally{button.dataset.busy='';button.innerHTML=state.authMode==='register'?'Create account <span>→</span>':'Sign in <span>→</span>';updateAuthValidation();}}
-  async function handleVerificationSubmit(event){event.preventDefault();const email=clean($('verifyEmail').value,120).toLowerCase(),code=$('otpCode').value.trim();if(!email||!/^[0-9]{6}$/.test(code)){toast('Enter the email address and six-digit code.');return;}const button=$('verificationForm').querySelector('button[type="submit"]');button.disabled=true;button.textContent='Verifying…';try{const result=await api('/api/v1/auth/verify-email',{method:'POST',body:JSON.stringify({email,code,device_name:'Serein Web',device_id:persistentDeviceId()})});await acceptAccount(result);}catch(error){toast(error.message);}finally{button.disabled=false;button.innerHTML='Verify email <span>→</span>';}}
-  async function handleResendCode(){const identity=clean($('resendIdentity').value,120).toLowerCase();if(!identity){toast('Enter the account email or username.');return;}const button=$('resendCode');button.disabled=true;try{const result=await api('/api/v1/auth/resend-verification',{method:'POST',body:JSON.stringify({identity})});toast(result.message||'If the account needs verification, a code will be sent.');}catch(error){toast(error.message);}finally{button.disabled=false;}}
+    }catch(error){if(error.verification?.required){showVerification(error.verification.email||registrationEmail,error.message,'error');}else if(error.status===403){const identity=clean($('loginIdentity').value,120);showVerification(identity.includes('@')?identity:'',error.message,'error');}else toast(error.message);}finally{button.dataset.busy='';button.innerHTML=state.authMode==='register'?'Create account <span>→</span>':'Sign in <span>→</span>';updateAuthValidation();}}
+  async function handleVerificationSubmit(event){event.preventDefault();await verifyOtp();}
+  async function handleResendCode(){
+    if(!state.verificationEmail){verificationMessage('The account email is missing. Return to sign-in and try again.','error');return;}
+    const button=$('resendCode');button.disabled=true;const oldText=button.textContent;button.textContent='Sending…';verificationMessage('Requesting a new code…');
+    try{const result=await api('/api/v1/auth/resend-verification',{method:'POST',body:JSON.stringify({identity:state.verificationEmail})});verificationMessage(result.message||'If this account needs verification, a code will be sent.', 'success');}
+    catch(error){verificationMessage(error.message,'error');}
+    finally{button.disabled=false;button.textContent=oldText;}
+  }
   async function handleConnect(event){event.preventDefault();const secret=$('passphrase').value,relay=clean($('relayUrl').value,300);if(secret.length<12){toast('Use a passphrase of at least 12 characters.');return;}if(!state.user||!state.device){toast('Sign in or create an account first.');return;}if(!state.localKey){try{await initializeLocalStore();}catch(error){toast(`Encrypted local storage is required: ${error.message}`);return;}}
     const button=el.connectForm.querySelector('button[type="submit"]');button.disabled=true;button.textContent='Connecting…';state.signingOut=false;
     try{state.secret=secret;state.relay=relay;const socket=await openSocket(relay);attachSocket(socket);
@@ -189,7 +238,7 @@
   async function terminateOthers(){try{await api('/api/v1/devices/revoke-others',{method:'POST',body:'{}'});await refreshDevices();toast('Other device sessions were revoked.');}catch(error){toast(error.message);}}
   async function disconnect(){state.signingOut=true;clearTimeout(state.reconnectTimer);state.reconnectTimer=0;clearInterval(state.heartbeatTimer);let serverRevoked=false;try{await api('/api/v1/auth/logout',{method:'POST',body:'{}'});serverRevoked=true;}catch{}state.socket?.close(1000,'user sign out');state.socket=null;state.secret=null;state.user=null;state.device=null;state.localKey=null;state.selected=null;state.contacts=[];state.contactRequests=[];state.blocks=[];state.devices=[];state.messages={};state.seenIds.clear();state.pendingSends.clear();el.login.classList.remove('hidden');el.app.classList.add('hidden');el.app.classList.remove('chat-open');$('authForm').classList.remove('hidden');$('authTabs').classList.remove('hidden');$('authNotice').classList.remove('hidden');$('verificationPanel').classList.add('hidden');$('relaySetup').classList.add('hidden');el.connectForm.reset();$('conversation').classList.add('hidden');$('settings').classList.add('hidden');toast(serverRevoked?'Signed out. Local encrypted message history remains on this device.':'Signed out locally; server session revocation could not be confirmed.');}
   async function restoreSession(){try{const account=await api('/api/v1/me');state.user=account.user;state.device=account.device;localStorage.setItem('serein.stable-device-id.v1',account.device.id);state.name=account.user.display_name;state.identity=account.user.username;try{await initializeLocalStore();}catch(error){toast(`Local encrypted storage unavailable: ${error.message}`);}await loadAccountSettings();showRelaySetup();}catch{/* No valid session; show sign-in. */}}
-  function init(){loadTheme();$('authTheme').addEventListener('change',e=>setTheme(e.target.value));$('signinTab').addEventListener('click',()=>authMode('signin'));$('registerTab').addEventListener('click',()=>authMode('register'));el.authForm.addEventListener('submit',handleAuthSubmit);el.connectForm.addEventListener('submit',handleConnect);['accountPassword','confirmPassword','regName','regHandle','regEmail','loginIdentity'].forEach(id=>$(id).addEventListener('input',updateAuthValidation));document.querySelectorAll('[data-toggle-password]').forEach(button=>button.addEventListener('click',()=>{const input=$(button.dataset.togglePassword),revealed=input.type==='password';input.type=revealed?'text':'password';button.setAttribute('aria-pressed',String(revealed));button.setAttribute('aria-label',`${revealed?'Hide':'Show'} ${button.dataset.togglePassword==='confirmPassword'?'confirmation password':button.dataset.togglePassword==='passphrase'?'passphrase':'password'}`);input.focus();}));updateAuthValidation();
+  function init(){loadTheme();$('authTheme').addEventListener('change',e=>setTheme(e.target.value));$('signinTab').addEventListener('click',()=>authMode('signin'));$('registerTab').addEventListener('click',()=>authMode('register'));el.authForm.addEventListener('submit',handleAuthSubmit);el.connectForm.addEventListener('submit',handleConnect);['accountPassword','confirmPassword','regName','regHandle','regEmail','loginIdentity'].forEach(id=>$(id).addEventListener('input',updateAuthValidation));document.querySelectorAll('[data-toggle-password]').forEach(button=>button.addEventListener('click',()=>{const input=$(button.dataset.togglePassword),revealed=input.type==='password';input.type=revealed?'text':'password';button.setAttribute('aria-pressed',String(revealed));button.setAttribute('aria-label',`${revealed?'Hide':'Show'} ${button.dataset.togglePassword==='confirmPassword'?'confirmation password':button.dataset.togglePassword==='passphrase'?'passphrase':'password'}`);input.focus();}));updateAuthValidation();document.querySelectorAll('.otp-digit').forEach(input=>{input.addEventListener('input',handleOtpInput);input.addEventListener('keydown',handleOtpKeydown);input.addEventListener('focus',()=>input.select());});
     $('verificationForm').addEventListener('submit',handleVerificationSubmit);$('resendCode').addEventListener('click',handleResendCode);$('backToVerificationAuth').addEventListener('click',backToAuth);$('backToAuth').addEventListener('click',backToAuth);
     $('addContact').addEventListener('click',()=>{el.contactForm.reset();el.contactDialog.showModal();});$('emptyAdd').addEventListener('click',()=>{el.contactForm.reset();el.contactDialog.showModal();});$('newChat').addEventListener('click',()=>{el.contactForm.reset();el.contactDialog.showModal();});el.contactForm.addEventListener('submit',addContact);$('requestsOpen').addEventListener('click',()=>{ $('requestDialog').showModal();refreshContactRequests().catch(e=>toast(e.message)); });$('requestClose').addEventListener('click',()=> $('requestDialog').close());$('manageBlocks').addEventListener('click',()=>{ $('blockDialog').showModal();refreshBlocks().catch(e=>toast(e.message)); });$('blockClose').addEventListener('click',()=> $('blockDialog').close());$('blockContact').addEventListener('click',blockSelectedAccount);
     $('search').addEventListener('input',e=>renderContacts(e.target.value));document.querySelectorAll('.filter-chip').forEach(b=>b.addEventListener('click',()=>{state.filter=b.dataset.filter;document.querySelectorAll('.filter-chip').forEach(x=>x.classList.toggle('active',x===b));renderContacts($('search').value);}));
