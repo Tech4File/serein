@@ -5,6 +5,7 @@ __pycache__/
 /frontend/web/serein_core.wasm
 /build/
 /dist/
+/serein-source.zip
 /out/
 /coverage/
 /node_modules/

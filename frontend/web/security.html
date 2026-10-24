@@ -2,37 +2,59 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#f4f6f8">
-  <title>Security status · Serein</title>
-  <link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="style.css">
+  <meta name="theme-color" content="#f4f6f8"><meta name="description" content="Live Serein security and implementation status">
+  <title>Security progress · Serein</title>
   <style>
-    body{min-height:100vh;background:var(--bg);color:var(--text);display:grid;place-items:center;padding:24px}
-    .security-page{width:min(760px,100%)}.security-head{display:flex;align-items:center;gap:13px;margin-bottom:20px}
-    .security-head .brand-icon{width:42px;height:42px;display:grid;place-items:center;border-radius:14px;background:var(--accent);color:#fff;font-size:25px;font-weight:800}
-    .security-head .eyebrow{margin:0 0 3px}.security-head h1{margin:0;font-size:26px;letter-spacing:-.04em}
-    .security-card{padding:clamp(20px,5vw,34px);border:1px solid var(--border);border-radius:18px;background:var(--surface);box-shadow:0 16px 50px #16252b0c}
-    .security-state{display:inline-flex;align-items:center;gap:8px;padding:7px 10px;border-radius:999px;background:var(--notice);color:var(--notice-text);font-size:11px;font-weight:700}
-    .security-state:before{content:"";width:7px;height:7px;border-radius:50%;background:#c28c35}
-    .security-card h2{font-size:18px;margin:20px 0 9px}.security-card p,.security-card li{color:var(--muted);font-size:13px;line-height:1.7}
-    .security-card ul{padding-left:20px}.security-card li+li{margin-top:5px}.security-card a{color:var(--accent);font-size:12px;text-decoration:none}
+    :root{color-scheme:light dark;--bg:#f3f6f5;--surface:#fff;--text:#17252a;--muted:#637278;--line:#e0e7e5;--accent:#247765;--good:#217654;--warn:#956313;--bad:#a63c3c;--soft:#f7e9e6}
+    @media(prefers-color-scheme:dark){:root{--bg:#101717;--surface:#192222;--text:#edf3f2;--muted:#a6b4b2;--line:#33403f;--accent:#78c8ae;--good:#79d4a6;--warn:#f0ca72;--bad:#ff9b94;--soft:#382423}}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;padding:28px}
+    main{width:min(790px,100%)}header{display:flex;align-items:center;gap:13px;margin-bottom:20px}.brand{width:44px;height:44px;border-radius:15px;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:25px;font-weight:800}.eyebrow{color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.16em;margin:0 0 3px}h1{font-size:25px;letter-spacing:-.04em;margin:0}h2{font-size:17px;margin:0 0 6px}p{margin:0}
+    .card{background:var(--surface);border:1px solid var(--line);border-radius:17px;overflow:hidden;box-shadow:0 16px 50px #12251f0c;margin-bottom:14px}.top{display:flex;align-items:center;gap:13px;padding:20px 22px;border-bottom:1px solid var(--line)}.dot{width:11px;height:11px;flex:none;border-radius:50%;background:var(--warn);box-shadow:0 0 0 5px color-mix(in srgb,var(--warn) 13%,transparent)}.top[data-state="ok"] .dot{background:var(--good);box-shadow:0 0 0 5px color-mix(in srgb,var(--good) 13%,transparent)}.top[data-state="error"] .dot{background:var(--bad);box-shadow:0 0 0 5px color-mix(in srgb,var(--bad) 13%,transparent)}.top small{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+    .alert{margin:17px 20px;padding:14px 15px;border:1px solid color-mix(in srgb,var(--bad) 25%,var(--line));border-radius:12px;background:var(--soft);color:var(--text);font-size:13px}.alert b{display:block;margin-bottom:3px}.section-title{padding:17px 21px 5px;color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.13em}.rows{padding:0 21px 8px}.row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:13px 0;border-bottom:1px solid var(--line)}.row:last-child{border:0}.row b{display:block;font-size:13px}.row small{display:block;color:var(--muted);font-size:11px;margin-top:2px}.pill{flex:none;display:inline-flex;align-items:center;border-radius:99px;padding:5px 9px;background:color-mix(in srgb,var(--warn) 13%,transparent);color:var(--warn);font-size:10px;font-weight:750;white-space:nowrap}.pill.good{background:color-mix(in srgb,var(--good) 13%,transparent);color:var(--good)}.pill.bad{background:color-mix(in srgb,var(--bad) 13%,transparent);color:var(--bad)}.pill.unknown{background:color-mix(in srgb,var(--muted) 12%,transparent);color:var(--muted)}
+    .note{padding:15px 21px;background:color-mix(in srgb,var(--bg) 72%,var(--surface));color:var(--muted);font-size:11px}.actions{display:flex;align-items:center;gap:12px;margin-top:14px}.button{border:1px solid var(--line);border-radius:10px;padding:9px 13px;background:var(--surface);color:var(--text);font:inherit;font-size:12px;cursor:pointer}.button:hover{border-color:var(--accent)}a{color:var(--accent);font-size:12px;text-decoration:none}.actions span{color:var(--muted);font-size:11px}
+    @media(max-width:520px){body{padding:16px}.top{padding:17px}.alert{margin:14px}.rows{padding-left:15px;padding-right:15px}.row{align-items:flex-start}.pill{margin-top:1px}}
   </style>
 </head>
 <body>
-  <main class="security-page">
-    <header class="security-head"><div class="brand-icon">s</div><div><p class="eyebrow">SEREIN · SECURITY</p><h1>Security status</h1></div></header>
-    <section class="security-card">
-      <span class="security-state">Not suitable for sensitive conversations</span>
-      <h2>What is currently protected</h2>
-      <p>Encrypted messaging is disabled in this build. Device-generated identity/session keys, authenticated key exchange, rotation, and forward secrecy are not implemented or independently reviewed. A legacy shared-passphrase prototype is not part of the account flow and must not be treated as end-to-end protection.</p>
-      <ul>
-        <li>There is no verified device identity, ratchet, or forward secrecy.</li>
-        <li>Room and device identifiers are routing metadata, not authentication credentials.</li>
-        <li>The Android and iOS clients provide account access, but their native message delivery and encryption are not implemented.</li>
-        <li>HTTPS protects network transport when correctly configured; it is distinct from end-to-end encryption.</li>
-      </ul>
-      <p>Do not use this service for sensitive communications. A production release requires a maintained, audited end-to-end protocol, secure device-key handling, authenticated sessions, TLS, rate limits, bounded retention, and independent review.</p>
-      <a href="/">← Back to Serein</a>
+  <main>
+    <header><div class="brand">s</div><div><p class="eyebrow">SEREIN · IMPLEMENTATION STATUS</p><h1>Security progress</h1></div></header>
+    <section class="card" aria-live="polite">
+      <div id="summary" class="top" data-state="loading"><i class="dot"></i><div><h2 id="overall">Checking selected server…</h2><small id="checkedAt">Statuses refresh automatically every 30 seconds.</small></div></div>
+      <div class="alert"><b>Web encrypted messaging is active; independent review is pending.</b> Verify every recipient-device fingerprint through a separate trusted channel. Android/iOS message clients are not connected, and the current static ECDH design has no forward secrecy or automated key recovery.</div>
+      <div class="section-title">SHARED APPLICATION CORE</div>
+      <div class="rows">
+        <div class="row"><div><b>Rust core in backend</b><small>Shared validation and domain primitives are used by the API.</small></div><span id="core-backend" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Rust core in web</b><small>Browser uses the WASM build for supported shared rules.</small></div><span id="core-web" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Rust core in Android</b><small>JNI/NDK import and native conformance tests.</small></div><span id="core-android" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Rust core in iOS</b><small>C/Swift import and device/simulator conformance tests.</small></div><span id="core-ios" class="pill unknown">Checking</span></div>
+      </div>
+      <div class="section-title">END-TO-END ENCRYPTION — WEB CLIENT ACTIVE; REVIEW PENDING</div>
+      <div class="rows">
+        <div class="row"><div><b>User-defined three-layer design</b><small>In development; not independently reviewed. The username is an identity label, never a secret.</small></div><span id="e2ee-protocol" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Public device-key directory</b><small>Authenticated account/device binding; private keys are never uploaded.</small></div><span id="e2ee-key-directory" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Browser ECDH device-key enrollment</b><small>WebCrypto non-extractable private key stored locally; hardware backing is not guaranteed.</small></div><span id="e2ee-web-enrollment" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Per-device-pair conversation-key derivation</b><small>The web client derives per-account/device keys with ECDH and HKDF and uses them for per-device message envelopes.</small></div><span id="e2ee-shared-key" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Authenticated device identity and key-change verification</b><small>Users compare full fingerprints out-of-band and explicitly pin them locally; key changes require re-verification. Automatic key signatures, rotation, recovery, and native multi-device key enrollment remain incomplete.</small></div><span id="e2ee-keys" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Client-side message encryption and decryption</b><small>WebCrypto encrypt/decrypt is wired to browser message send/receive and durable opaque-ciphertext delivery; native Android/iOS implementations are absent.</small></div><span id="e2ee-client" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Forward secrecy and recovery behavior</b><small>Protocol-level lifecycle, rotation, and multi-device semantics.</small></div><span id="e2ee-forward" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Message send and receive</b><small>Web client uses authenticated ciphertext envelopes; native client delivery is not integrated.</small></div><span id="e2ee-delivery" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Independent security review</b><small>Required before any E2EE or sensitive-use claim.</small></div><span id="e2ee-review" class="pill unknown">Checking</span></div>
+      </div>
+      <div class="section-title">ENCRYPTED FILE TRANSFER</div>
+      <div class="rows">
+        <div class="row"><div><b>Web encrypted upload/download</b><small>Implemented in source; not live-tested or independently reviewed. Per-device manifests and chunk AEAD.</small></div><span id="transfer-web" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Native transfer clients</b><small>Android/iOS clients do not yet send or decrypt attachments.</small></div><span id="transfer-native" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Media preview</b><small>Browser-native image/audio/video preview only where the browser supports the declared MIME/codec; otherwise save to a compatible app.</small></div><span id="transfer-preview" class="pill unknown">Checking</span></div>
+      </div>
+      <div class="section-title">AUDIO / VIDEO CALLING</div>
+      <div class="rows">
+        <div class="row"><div><b>Permission preflight</b><small>Microphone/camera explanation and Retry flow; permissions alone never start a call.</small></div><span id="call-permissions" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Encrypted QUIC call transport and signaling</b><small>Not implemented. No call can be connected; the existing QUIC echo experiment is not a call service.</small></div><span id="call-quic" class="pill unknown">Checking</span></div>
+      </div>
+      <div class="note">This page reads the capability declaration from your selected Serein server. It is an implementation-status report, not a cryptographic audit or proof of security. HTTPS/TLS is transport protection and is not end-to-end encryption.</div>
     </section>
+    <div class="actions"><button id="refresh" class="button" type="button">Refresh now</button><span id="source">Capability check not completed.</span><a href="/">Return to Serein</a></div>
   </main>
+  <script src="/config.js"></script><script src="/security.js"></script>
 </body>
 </html>

@@ -43,7 +43,7 @@ private struct SereinAccountReply: Decodable { let user: SereinUser; let device:
 private struct SereinAuthReply: Decodable { let account: SereinAccountReply }
 private struct SereinVerificationMeta: Decodable { let required: Bool?; let verified: Bool?; let email: String? }
 private struct SereinErrorReply: Decodable { let error: String; let verification: SereinVerificationMeta?; let retry_after_seconds: Int? }
-private struct SereinMessageReply: Decodable { let message: String }
+private struct SereinMessageReply: Decodable { let message: String; let retry_after_seconds: Int? }
 
 private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
@@ -65,11 +65,12 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     @Published var allowContactRequests = true
     @Published var discoverableByEmail = false
     @Published var theme = "system"
-    @Published var fontScale = "standard"
+    @Published var fontScale = "system"
     @Published var reduceMotion = false
     @Published var notifications = false
     @Published var busy = false
     @Published var errorMessage: String?
+    @Published var statusMessage: String?
     @Published var connectionStatus = "Not checked"
     @Published var connectionDetails = ""
     @Published var connectionTestedOrigin = ""
@@ -147,7 +148,7 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         ])
     }
     func register(username: String, email: String, displayName: String, password: String) async {
-        busy = true; errorMessage = nil
+        busy = true; errorMessage = nil; statusMessage = nil
         defer { busy = false }
         let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         do {
@@ -158,7 +159,7 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
                 "password": password
             ])
             verificationRequired = true; verificationIdentity = cleanEmail; verificationEmail = cleanEmail
-            errorMessage = "Check your email for a six-digit verification code."
+            statusMessage = "Check your email for a six-digit verification code."
         } catch {
             let ns = error as NSError
             if ns.userInfo["verificationRequired"] as? Bool == true,
@@ -169,7 +170,7 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         }
     }
     func verifyEmail(code: String, email: String) async {
-        busy = true; errorMessage = nil
+        busy = true; errorMessage = nil; statusMessage = nil
         defer { busy = false }
         do {
             let data = try await request("/api/v1/auth/verify-email", method: "POST", values: ["email": email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), "code": code, "device_name": "Serein iOS", "device_id": deviceID])
@@ -181,12 +182,12 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         } catch { errorMessage = error.localizedDescription }
     }
     func resendVerification(identity: String) async -> Int? {
-        busy = true; errorMessage = nil
+        busy = true; errorMessage = nil; statusMessage = nil
         defer { busy = false }
         do {
             let data = try await request("/api/v1/auth/resend-verification", method: "POST", values: ["identity": identity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()])
             let reply = try JSONDecoder().decode(SereinMessageReply.self, from: data)
-            errorMessage = reply.message; return nil
+            statusMessage = reply.message; return reply.retry_after_seconds ?? 60
         } catch {
             let ns = error as NSError; errorMessage = error.localizedDescription
             return ns.userInfo["retryAfterSeconds"] as? Int
@@ -195,7 +196,7 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     private var deviceID: String { defaults.string(forKey: "serein.device-id") ?? UUID().uuidString.lowercased() }
 
     private func authenticate(path: String, values: [String: Any]) async {
-        busy = true; errorMessage = nil
+        busy = true; errorMessage = nil; statusMessage = nil
         defer { busy = false }
         do {
             let data = try await request(path, method: "POST", values: values)
@@ -235,7 +236,8 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
             devices = try JSONDecoder().decode([SereinDevice].self, from: d)
             let prefs = try JSONSerialization.jsonObject(with: s) as? [String: Any] ?? [:]
             theme = ["system", "light", "dark"].contains(prefs["theme"] as? String ?? "") ? (prefs["theme"] as? String ?? "system") : "system"
-            fontScale = (prefs["font_scale"] as? String) == "large" ? "large" : "standard"
+            let savedScale = prefs["font_scale"] as? String ?? "system"
+            fontScale = ["system", "standard", "large", "extra_large"].contains(savedScale) ? (savedScale == "standard" ? "system" : savedScale) : "system"
             reduceMotion = prefs["reduce_motion"] as? Bool ?? false
             notifications = prefs["notifications"] as? Bool ?? false
             presenceVisibility = (prefs["presence_visibility"] as? String) == "nobody" ? "nobody" : "contacts"
@@ -243,6 +245,15 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
             discoverableByEmail = prefs["discoverable_by_email"] as? Bool ?? false
             errorMessage = nil
         } catch { errorMessage = error.localizedDescription }
+    }
+    func contactsData() async throws -> Data { try await request("/api/v1/contacts") }
+    func registerDeviceKey(_ publicJWK: [String: String]) async throws -> [String: Any] {
+        let data = try await request("/api/v1/device-key", method: "PUT", values: ["algorithm": "ECDH-P256", "public_key": publicJWK])
+        return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+    }
+    func contactDeviceKeys(_ contactID: String) async throws -> [String: Any] {
+        let data = try await request("/api/v1/contacts/\(contactID)/device-keys")
+        return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
     }
     func messageHistory(afterCreatedAt: String? = nil, afterID: String? = nil) async throws -> Data {
         var components = URLComponents(); components.path = "/api/v1/messages"
@@ -254,6 +265,44 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     func acknowledgeMessage(_ id: String) async throws { _ = try await request("/api/v1/messages/\(id)/ack", method: "POST", values: [:]) }
     func sendEncryptedEnvelope(id: String, to deviceID: String, iv: String, ciphertext: String) async throws {
         _ = try await request("/api/v1/messages", method: "POST", values: ["id": id, "to": deviceID, "iv": iv, "ciphertext": ciphertext])
+    }
+    func transfersData() async throws -> Data { try await request("/api/v1/transfers") }
+    func createTransfer(_ values: [String: Any]) async throws { _ = try await request("/api/v1/transfers", method: "POST", values: values) }
+    func acknowledgeTransfer(_ id: String) async throws { _ = try await request("/api/v1/transfers/\(id)/ack", method: "POST", values: [:]) }
+    func abortTransfer(_ id: String) async throws { _ = try await request("/api/v1/transfers/\(id)", method: "DELETE") }
+    func uploadTransferChunk(_ id: String, index: Int, ciphertext: Data, digest: String) async throws {
+        _ = try await transferRequest("/api/v1/transfers/\(id)/chunks/\(index)", method: "PUT", body: ciphertext, headers: ["Content-Type": "application/octet-stream", "X-Chunk-SHA256": digest])
+    }
+    func downloadTransferChunk(_ id: String, index: Int) async throws -> (Data, String) {
+        let (data, response) = try await transferRequest("/api/v1/transfers/\(id)/chunks/\(index)", method: "GET", body: nil, headers: ["Accept": "application/octet-stream"])
+        guard let digest = response.value(forHTTPHeaderField: "X-Chunk-SHA256"), digest.count == 64 else { throw URLError(.cannotDecodeContentData) }
+        return (data, digest.lowercased())
+    }
+    private func transferRequest(_ path: String, method: String, body: Data?, headers: [String: String]) async throws -> (Data, HTTPURLResponse) {
+        let base = apiBase.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let root = URL(string: base), root.scheme?.lowercased() == "https", root.host != nil, root.user == nil, root.password == nil, root.query == nil, root.fragment == nil,
+              let url = URL(string: path, relativeTo: root) else { throw URLError(.badURL) }
+        var request = URLRequest(url: url); request.httpMethod = method; request.timeoutInterval = 40
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
+        request.httpBody = body
+        let (stream, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        let maximum = 512 * 1024
+        if let length = http.value(forHTTPHeaderField: "Content-Length"), let declared = Int(length), declared > maximum {
+            throw NSError(domain: "SereinTransfer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Transfer chunk exceeded its response size limit."])
+        }
+        var data = Data()
+        if let length = http.value(forHTTPHeaderField: "Content-Length"), let declared = Int(length), declared > 0 { data.reserveCapacity(min(declared, maximum)) }
+        for try await byte in stream {
+            guard data.count < maximum else { throw NSError(domain: "SereinTransfer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Transfer chunk exceeded its response size limit."]) }
+            data.append(byte)
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let reply = try? JSONDecoder().decode(SereinErrorReply.self, from: data)
+            throw NSError(domain: "SereinTransfer", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: reply?.error ?? "Transfer request failed (\(http.statusCode))."])
+        }
+        return (data, http)
     }
     func addContact(identity: String) async {
         do { let data = try await request("/api/v1/contact-requests", method: "POST", values: ["identity": identity]); let reply = try JSONDecoder().decode(SereinMessageReply.self, from: data); errorMessage = reply.message; await refreshAccountData() }
@@ -292,10 +341,15 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         do { _ = try await request("/api/v1/devices/revoke-others", method: "POST", values: [:]); await refreshAccountData() }
         catch { errorMessage = error.localizedDescription }
     }
-    func signOut() async {
-        do { _ = try await request("/api/v1/auth/logout", method: "POST", values: [:]) }
+    func signOut() async -> Bool {
+        var serverRevoked = false
+        do { _ = try await request("/api/v1/auth/logout", method: "POST", values: [:]); serverRevoked = true }
         catch { errorMessage = error.localizedDescription }
+        if let root = URL(string: apiBase), let cookies = HTTPCookieStorage.shared.cookies(for: root) {
+            cookies.filter { $0.name == "serein_session" }.forEach { HTTPCookieStorage.shared.deleteCookie($0) }
+        }
         user = nil; currentDevice = nil; contacts = []; contactRequests = []; blocks = []; devices = []
+        return serverRevoked
     }
     private func request(_ path: String, method: String = "GET", values: [String: Any]? = nil) async throws -> Data {
         let base = apiBase.trimmingCharacters(in: CharacterSet(charactersIn: "/"))

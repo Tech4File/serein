@@ -36,6 +36,10 @@ jobs:
           node --check frontend/web/app.js
           node --check frontend/web/config.js
           node --check frontend/web/core-bridge.js
+          node --check frontend/web/device-crypto.js
+          node --check frontend/web/message-limits.js
+          node --check frontend/web/security.js
+          node --test frontend/web/tests/*.test.cjs
           node --check frontend/web/components/serein-ui.js
           python3 - <<'PY'
           from pathlib import Path
@@ -100,10 +104,10 @@ jobs:
 
   ios-simulator:
     needs: version-consistency
-    # Run the Xcode 16.4 simulator build on a fixed x64 runner and capture the
-    # native crash report. The reported process is xcodebuild itself (not a
-    # Swift diagnostic); the failure occurs immediately after result-bundle
-    # setup, so preflight project resolution and omit xcresult generation here.
+    # Run the Xcode 16.4 simulator build on a fixed x64 runner and capture native
+    # diagnostics. Do not use xcodebuild -showBuildSettings here: that diagnostic
+    # invocation segfaulted on the runner before compilation. The real build below
+    # uses an explicit generic simulator destination and is the authoritative check.
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -120,7 +124,6 @@ jobs:
         run: |
           set -euo pipefail
           xcodebuild -list -project apps/ios/SereinChat.xcodeproj 2>&1 | tee "$RUNNER_TEMP/xcode-list.log"
-          xcodebuild -project apps/ios/SereinChat.xcodeproj -scheme SereinChat -sdk iphonesimulator -configuration Release -showBuildSettings > "$RUNNER_TEMP/xcode-build-settings.log"
       - name: Build iOS simulator app
         run: |
           set -uo pipefail
@@ -128,7 +131,6 @@ jobs:
           xcodebuild \
             -project apps/ios/SereinChat.xcodeproj \
             -scheme SereinChat \
-            -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -configuration Release \
             -jobs 1 \
@@ -147,7 +149,6 @@ jobs:
           find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \( -iname 'xcodebuild*' -o -iname 'swift-frontend*' -o -iname 'swift*' \) -mtime -1 -exec cp {} "$RUNNER_TEMP/ios-diagnostics/" \; 2>/dev/null || true
           cp "$RUNNER_TEMP/xcodebuild.log" "$RUNNER_TEMP/ios-diagnostics/" 2>/dev/null || true
           cp "$RUNNER_TEMP/xcode-list.log" "$RUNNER_TEMP/ios-diagnostics/" 2>/dev/null || true
-          cp "$RUNNER_TEMP/xcode-build-settings.log" "$RUNNER_TEMP/ios-diagnostics/" 2>/dev/null || true
       - name: Upload iOS crash diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

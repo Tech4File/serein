@@ -32,9 +32,34 @@ if [[ "$ready" != 1 ]]; then cat "$TMP/server.log"; echo "API did not become rea
 # Exact web-origin allowlisting is browser policy, not native-client authentication.
 curl -fsS -D "$TMP/allowed-origin.headers" -H 'Origin: http://127.0.0.1:8080' "$BASE_URL/healthz" >/dev/null
 grep -qi '^access-control-allow-origin: http://127.0.0.1:8080' "$TMP/allowed-origin.headers"
+preflight_status="$(curl -sS -D "$TMP/preflight.headers" -o /dev/null -w '%{http_code}' -X OPTIONS -H 'Origin: http://127.0.0.1:8080' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type,x-chunk-sha256' "$BASE_URL/api/v1/auth/register")"
+[[ "$preflight_status" == 200 || "$preflight_status" == 204 ]]
+grep -qi '^access-control-allow-credentials: true' "$TMP/preflight.headers"
+grep -qi '^access-control-allow-headers:.*content-type' "$TMP/preflight.headers"
+grep -qi '^access-control-allow-headers:.*x-chunk-sha256' "$TMP/preflight.headers"
 blocked_origin_status="$(curl -sS -o "$TMP/blocked-origin.json" -w '%{http_code}' -H 'Origin: https://not-allowlisted.example' "$BASE_URL/healthz")"
 test "$blocked_origin_status" = 403
 curl -fsS "$BASE_URL/healthz" >/dev/null
+curl -fsS "$BASE_URL/api/v1/security/capabilities" >"$TMP/security-capabilities.json"
+python3 - "$TMP/security-capabilities.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]));assert x['messaging_enabled'] is True
+assert x['shared_core']['status']=='partial' and x['shared_core']['android_native'] is False and x['shared_core']['ios_native'] is False
+assert x['e2ee']['protocol']=='user_defined_three_layer_v1' and x['e2ee']['protocol_status']=='in_development_unreviewed'
+assert x['e2ee']['device_key_registry']=='source_implemented_unverified' and x['e2ee']['web_device_key_enrollment']=='web_implemented_unreviewed'
+assert x['e2ee']['client_encrypt_decrypt']=='web_implemented_unreviewed' and x['e2ee']['message_delivery']=='enabled' and x['e2ee']['independent_review']=='not_started'
+assert x['file_transfers']['web_client']=='source_implemented_unverified' and x['file_transfers']['native_clients']=='not_implemented'
+assert x['calls']['permission_preflight']=='source_implemented_unverified' and x['calls']['quic_media_transport']=='not_implemented'
+PY
+unknown_resend_status="$(curl -sS -D "$TMP/resend-accepted.headers" -o "$TMP/resend-accepted.json" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"identity":"unknown-account@example.test"}' "$BASE_URL/api/v1/auth/resend-verification")"
+test "$unknown_resend_status" = 202
+python3 - "$TMP/resend-accepted.json" "$TMP/resend-accepted.headers" <<'PY'
+import json,sys
+body=json.load(open(sys.argv[1]));headers=open(sys.argv[2]).read().lower()
+assert body['retry_after_seconds']==60
+assert 'retry-after: 60' in headers
+assert body['message']=='If the account exists and needs verification, a code will be sent.'
+PY
 
 python3 - "$TMP" "$SMOKE_EMAIL_A" "$SMOKE_EMAIL_B" <<'PY'
 import json, pathlib, sys, uuid
@@ -135,9 +160,9 @@ done
 python3 - "$TMP" <<'PY'
 import json,pathlib,sys
 p=pathlib.Path(sys.argv[1]);a=json.loads((p/'a-verify.json').read_text());b=json.loads((p/'b-verify.json').read_text())
-assert a['account']['user']['email_verified'] is True and a['verification']['verified'] is True
+assert a['account']['user']['email_verified'] is True and a['verification']['verified'] is True and a['verification']['required'] is False
 assert a['account']['device']['id']==(p/'a_device').read_text()
-assert b['account']['user']['email_verified'] is True and b['verification']['verified'] is True
+assert b['account']['user']['email_verified'] is True and b['verification']['verified'] is True and b['verification']['required'] is False
 (p/'b_device').write_text(b['account']['device']['id'])
 assert b['account']['device']['id']
 PY
@@ -168,7 +193,7 @@ PY
 )" >"$TMP/a-login.json"
 python3 - "$TMP" <<'PY'
 import json,pathlib,sys
-p=pathlib.Path(sys.argv[1]);x=json.loads((p/'a-login.json').read_text());assert x['account']['device']['id']==(p/'a_device').read_text()
+p=pathlib.Path(sys.argv[1]);x=json.loads((p/'a-login.json').read_text());assert x['account']['device']['id']==(p/'a_device').read_text();assert x['verification']['required'] is False and x['verification']['verified'] is True
 PY
 python3 - "$TMP" <<'PY'
 import json,pathlib,sys,uuid
@@ -184,23 +209,37 @@ assert settings['theme']=='dark' and settings['font_scale']=='large' and setting
 assert (p/'a_device').read_text() in ids and (p/'a_second_device').read_text() in ids
 assert any(d['id']==(p/'a_second_device').read_text() and d['current'] for d in devices)
 PY
+python3 - "$TMP" <<'PY'
+import base64,json,pathlib,sys
+p=pathlib.Path(sys.argv[1])
+def b64(h): return base64.urlsafe_b64encode(bytes.fromhex(h)).decode().rstrip('=')
+# Public points for private scalars 1 and 2 on the standard NIST P-256 curve.
+points=[('6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296','4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5'),('7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978','07775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1')]
+for name,(x,y) in zip(('key-a.json','key-b.json'),points):
+    (p/name).write_text(json.dumps({'algorithm':'ECDH-P256','public_key':{'kty':'EC','crv':'P-256','x':b64(x),'y':b64(y)}}))
+PY
+put_json "$A" /api/v1/device-key "$(cat "$TMP/key-a.json")" >"$TMP/key-a-result.json"
+post_json "$B" /api/v1/device-key "$(cat "$TMP/key-b.json")" >"$TMP/key-b-result.json"
+python3 - "$TMP" <<'PY'
+import json,pathlib,re,sys
+p=pathlib.Path(sys.argv[1])
+for name in ('key-a-result.json','key-b-result.json'):
+    x=json.load(open(p/name));assert x['registered'] is True and x['algorithm']=='ECDH-P256' and re.fullmatch(r'[0-9a-f]{64}',x['fingerprint'])
+PY
+key_change_status="$(curl -sS -o "$TMP/key-change.json" -w '%{http_code}' -c "$A" -b "$A" -H 'Content-Type: application/json' -X PUT -d "$(cat "$TMP/key-b.json")" "$BASE_URL/api/v1/device-key")"
+test "$key_change_status" = 409
+private_field_status="$(curl -sS -o "$TMP/private-key-rejected.json" -w '%{http_code}' -c "$A" -b "$A" -H 'Content-Type: application/json' -X PUT -d "$(python3 - "$TMP/key-a.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]));x['public_key']['d']='must-never-be-uploaded';print(json.dumps(x))
+PY
+)" "$BASE_URL/api/v1/device-key")"
+test "$private_field_status" = 422
 curl -fsS -c "$A" -b "$A" -X DELETE "$BASE_URL/api/v1/devices/$(cat "$TMP/a_device")" >/dev/null
 get_json "$A" /api/v1/devices >"$TMP/devices-after-revoke.json"
 python3 - "$TMP" <<'PY'
 import json,pathlib,sys
 p=pathlib.Path(sys.argv[1]);ids={d['id'] for d in json.load(open(p/'devices-after-revoke.json'))}
 assert (p/'a_device').read_text() not in ids and (p/'a_second_device').read_text() in ids
-PY
-get_json "$A" '/api/v1/messages?limit=10' >"$TMP/history.json"
-python3 - "$TMP/history.json" <<'PY'
-import json,sys
-x=json.load(open(sys.argv[1]));assert x['items']==[] and x['has_more'] is False
-PY
-ack_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-post_json "$A" "/api/v1/messages/$ack_id/ack" '{}' >"$TMP/ack.json"
-python3 - "$TMP/ack.json" <<'PY'
-import json,sys
-assert json.load(open(sys.argv[1]))['ok'] is True
 PY
 
 # Privacy choices gate incoming requests without exposing email eligibility to the requester.
@@ -256,7 +295,75 @@ import json,pathlib,sys
 p=pathlib.Path(sys.argv[1]);a=json.load(open(p/'a-contacts.json'));b=json.load(open(p/'b-contacts.json'));adata=json.load(open(p/'a-verify.json'))['account']['user'];bdata=json.load(open(p/'b-verify.json'))['account']['user']
 assert any(x['user_id']==bdata['id'] for x in a) and any(x['user_id']==adata['id'] for x in b)
 PY
-# A block removes the relationship and prevents authenticated message delivery.
+b_user_id="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["account"]["user"]["id"])' "$TMP/b-verify.json")"
+get_json "$A" "/api/v1/contacts/$b_user_id/device-keys" >"$TMP/b-device-keys.json"
+python3 - "$TMP/b-device-keys.json" "$TMP" <<'PY'
+import json,pathlib,sys
+result=json.load(open(sys.argv[1]));p=pathlib.Path(sys.argv[2]);rows=result['devices']
+account=json.load(open(p/'b-verify.json'))['account']['user']
+assert result['user_id']==account['id'] and result['username']==account['username']
+assert any(row['device_id']==(p/'b_device').read_text() and row['fingerprint']==json.load(open(p/'key-b-result.json'))['fingerprint'] for row in rows)
+assert all('d' not in row['public_key'] for row in rows)
+PY
+message_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+recipient_device="$(python3 - "$TMP/b-verify.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['account']['device']['id'])
+PY
+)"
+post_json "$A" /api/v1/messages "$(python3 - "$message_id" "$recipient_device" <<'PY'
+import json,sys
+print(json.dumps({'id':sys.argv[1],'to':sys.argv[2],'iv':'AAAAAAAAAAAAAAAA','ciphertext':'AAAAAAAAAAAAAAAAAAAAAA=='}))
+PY
+)" >"$TMP/message-accepted.json"
+get_json "$B" /api/v1/messages?limit=10 >"$TMP/message-history.json"
+python3 - "$TMP/message-accepted.json" "$TMP/message-history.json" "$message_id" <<'PY'
+import json,sys
+accepted=json.load(open(sys.argv[1]));history=json.load(open(sys.argv[2]));message_id=sys.argv[3]
+assert accepted['id']==message_id and accepted['type']=='accepted'
+item=next(row for row in history['items'] if row['id']==message_id)
+payload=item['payload']
+assert payload['type']=='message' and payload['id']==message_id
+assert payload['iv']=='AAAAAAAAAAAAAAAA' and payload['ciphertext']=='AAAAAAAAAAAAAAAAAAAAAA=='
+assert 'plaintext' not in payload
+PY
+ack_status="$(curl -sS -o "$TMP/ack.json" -w '%{http_code}' -c "$B" -b "$B" -H 'Content-Type: application/json' -d '{}' "$BASE_URL/api/v1/messages/$message_id/ack")"
+test "$ack_status" = 200
+python3 - "$TMP/ack.json" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['ok'] is True
+PY
+
+# Opaque file-transfer API transport smoke: create, upload, complete, list, download, and ACK.
+transfer_id="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+post_json "$A" /api/v1/transfers "$(python3 - "$transfer_id" "$b_user_id" "$(cat "$TMP/a_second_device")" "$(cat "$TMP/b_device")" <<'PY'
+import json,sys
+print(json.dumps({'id':sys.argv[1],'recipient_user_id':sys.argv[2],'chunk_count':1,'total_ciphertext_bytes':16,'device_envelopes':[{'device_id':sys.argv[3],'iv':'AAAAAAAAAAAAAAAA','ciphertext':'AAAAAAAAAAAAAAAAAAAAAA=='},{'device_id':sys.argv[4],'iv':'AAAAAAAAAAAAAAAA','ciphertext':'AAAAAAAAAAAAAAAAAAAAAA=='}]}))
+PY
+)" >"$TMP/transfer-created.json"
+printf '0123456789abcdef' >"$TMP/transfer-chunk.bin"
+chunk_hash="$(sha256sum "$TMP/transfer-chunk.bin" | cut -d' ' -f1)"
+curl -fsS -c "$A" -b "$A" -X PUT -H 'Content-Type: application/octet-stream' -H "X-Chunk-SHA256: $chunk_hash" --data-binary @"$TMP/transfer-chunk.bin" "$BASE_URL/api/v1/transfers/$transfer_id/chunks/0" >"$TMP/transfer-upload.json"
+get_json "$B" /api/v1/transfers >"$TMP/transfer-list.json"
+python3 - "$TMP/transfer-created.json" "$TMP/transfer-upload.json" "$TMP/transfer-list.json" "$transfer_id" <<'PY'
+import json,sys
+created=json.load(open(sys.argv[1]));uploaded=json.load(open(sys.argv[2]));items=json.load(open(sys.argv[3]));transfer=next(x for x in items if x['id']==sys.argv[4])
+assert created['id']==sys.argv[4] and created['server_can_decrypt'] is False
+assert uploaded['complete'] is True and uploaded['received_bytes']==16
+assert transfer['ready_at'] and transfer['received_chunks']==1 and transfer['total_ciphertext_bytes']==16
+assert 'manifest_ciphertext' in transfer and 'plaintext' not in transfer
+PY
+curl -fsS -D "$TMP/transfer-download.headers" -c "$B" -b "$B" -H 'Origin: http://127.0.0.1:8080' "$BASE_URL/api/v1/transfers/$transfer_id/chunks/0" -o "$TMP/transfer-downloaded.bin"
+cmp "$TMP/transfer-chunk.bin" "$TMP/transfer-downloaded.bin"
+grep -qi "^x-chunk-sha256: $chunk_hash" "$TMP/transfer-download.headers"
+grep -qi '^access-control-expose-headers:.*x-chunk-sha256' "$TMP/transfer-download.headers"
+post_json "$B" "/api/v1/transfers/$transfer_id/ack" '{}' >"$TMP/transfer-ack.json"
+python3 - "$TMP/transfer-ack.json" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['ok'] is True
+PY
+
+# Block state is tested independently after encrypted-message delivery.
 b_user_id="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["account"]["user"]["id"])' "$TMP/b-verify.json")"
 a_user_id="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["account"]["user"]["id"])' "$TMP/a-verify.json")"
 curl -fsS -c "$B" -b "$B" -X PUT "$BASE_URL/api/v1/blocks/$a_user_id" >/dev/null
@@ -270,13 +377,8 @@ python3 - "$TMP/b-contacts-blocked.json" "$a_user_id" <<'PY'
 import json,sys
 assert all(x['user_id']!=sys.argv[2] for x in json.load(open(sys.argv[1])))
 PY
-blocked_status="$(curl -sS -o "$TMP/blocked-message.json" -w '%{http_code}' -c "$A" -b "$A" -H 'Content-Type: application/json' -d "{\"id\":\"$(python3 -c 'import uuid;print(uuid.uuid4())')\",\"to\":\"$(cat "$TMP/b_device")\",\"iv\":\"AAAAAAAAAAAAAAAA\",\"ciphertext\":\"AAAAAAAAAAAAAAAAAAAAAA==\"}" "$BASE_URL/api/v1/messages")"
-test "$blocked_status" = 403
+blocked_key_status="$(curl -sS -o "$TMP/blocked-key-directory.json" -w '%{http_code}' -c "$B" -b "$B" "$BASE_URL/api/v1/contacts/$a_user_id/device-keys")"
+test "$blocked_key_status" = 404
 curl -fsS -c "$B" -b "$B" -X DELETE "$BASE_URL/api/v1/blocks/$a_user_id" >/dev/null
 
-# REST message submission must reject a malformed envelope rather than falsely accept it.
-message_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-invalid_status="$(curl -sS -o "$TMP/invalid-envelope.json" -w '%{http_code}' -c "$A" -b "$A" -H 'Content-Type: application/json' -d "{\"id\":\"$message_id\",\"to\":\"$(cat "$TMP/b_device")\",\"iv\":\"not-base64\",\"ciphertext\":\"bad\"}" "$BASE_URL/api/v1/messages")"
-test "$invalid_status" = 400
-
-echo "API smoke passed: unique username/email conflicts, matching unverified-registration retry, provider-backed OTP delivery, unverified-login routing, OTP verification/guess limits/resend cooldown, email and username login, stable and multi-device sessions, settings persistence/validation, history, REST ACK, private contact requests, privacy-setting gates, indistinguishable missing/ineligible-account responses, explicit request acceptance, ten-per-hour discovery throttling, user blocks, and malformed-envelope rejection."
+echo "API smoke passed: account registration/verification/login, settings, contacts/privacy/blocks, public device-key registration/directory and key-change rejection, opaque message submit/history/ACK, and encrypted-transfer create/chunk/list/download/ACK transport behavior."

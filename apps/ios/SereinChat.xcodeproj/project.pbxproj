@@ -11,6 +11,10 @@
 		A10000000000000000000015 /* SereinAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* SereinAPI.swift */; };
 		A10000000000000000000017 /* SereinProductView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* SereinProductView.swift */; };
 		A10000000000000000000019 /* SereinTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000020 /* SereinTokens.swift */; };
+		A10000000000000000000021 /* SereinAttachmentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000022 /* SereinAttachmentStore.swift */; };
+		A10000000000000000000023 /* SereinDeviceCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000024 /* SereinDeviceCrypto.swift */; };
+		A10000000000000000000025 /* SereinLocalStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000026 /* SereinLocalStore.swift */; };
+		A10000000000000000000027 /* SereinChatEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000028 /* SereinChatEngine.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -19,6 +23,10 @@
 		A10000000000000000000016 /* SereinAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SereinAPI.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* SereinProductView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SereinProductView.swift; sourceTree = "<group>"; };
 		A10000000000000000000020 /* SereinTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SereinTokens.swift; sourceTree = "<group>"; };
+		A10000000000000000000022 /* SereinAttachmentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SereinAttachmentStore.swift; sourceTree = "<group>"; };
+		A10000000000000000000024 /* SereinDeviceCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SereinDeviceCrypto.swift; sourceTree = "<group>"; };
+		A10000000000000000000026 /* SereinLocalStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SereinLocalStore.swift; sourceTree = "<group>"; };
+		A10000000000000000000028 /* SereinChatEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SereinChatEngine.swift; sourceTree = "<group>"; };
 		A10000000000000000000003 /* SereinChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SereinChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -28,7 +36,7 @@
 
 /* Begin PBXGroup section */
 		A10000000000000000000005 = {isa = PBXGroup; children = (A10000000000000000000006 /* SereinChat */, A10000000000000000000007 /* Products */); sourceTree = "<group>"; };
-		A10000000000000000000006 /* SereinChat */ = {isa = PBXGroup; children = (A10000000000000000000002 /* SereinChatApp.swift */, A10000000000000000000012 /* SereinDesign.swift */, A10000000000000000000016 /* SereinAPI.swift */, A10000000000000000000018 /* SereinProductView.swift */, A10000000000000000000020 /* SereinTokens.swift */,); path = SereinChat; sourceTree = "<group>"; };
+		A10000000000000000000006 /* SereinChat */ = {isa = PBXGroup; children = (A10000000000000000000002 /* SereinChatApp.swift */, A10000000000000000000012 /* SereinDesign.swift */, A10000000000000000000016 /* SereinAPI.swift */, A10000000000000000000018 /* SereinProductView.swift */, A10000000000000000000020 /* SereinTokens.swift */, A10000000000000000000022 /* SereinAttachmentStore.swift */, A10000000000000000000024 /* SereinDeviceCrypto.swift */, A10000000000000000000026 /* SereinLocalStore.swift */, A10000000000000000000028 /* SereinChatEngine.swift */,); path = SereinChat; sourceTree = "<group>"; };
 		A10000000000000000000007 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000003 /* SereinChat.app */,); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
@@ -45,14 +53,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A1000000000000000000000A /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* SereinChatApp.swift in Sources */, A10000000000000000000013 /* SereinDesign.swift in Sources */, A10000000000000000000015 /* SereinAPI.swift in Sources */, A10000000000000000000017 /* SereinProductView.swift in Sources */, A10000000000000000000019 /* SereinTokens.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A1000000000000000000000A /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* SereinChatApp.swift in Sources */, A10000000000000000000013 /* SereinDesign.swift in Sources */, A10000000000000000000015 /* SereinAPI.swift in Sources */, A10000000000000000000017 /* SereinProductView.swift in Sources */, A10000000000000000000019 /* SereinTokens.swift in Sources */, A10000000000000000000021 /* SereinAttachmentStore.swift in Sources */, A10000000000000000000023 /* SereinDeviceCrypto.swift in Sources */, A10000000000000000000025 /* SereinLocalStore.swift in Sources */, A10000000000000000000027 /* SereinChatEngine.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
 		A1000000000000000000000E /* Debug project */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; IPHONEOS_DEPLOYMENT_TARGET = 15.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; }; name = Debug; };
 		A1000000000000000000000F /* Release project */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; IPHONEOS_DEPLOYMENT_TARGET = 15.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; }; name = Release; };
-		A10000000000000000000010 /* Debug target */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 4; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = Serein; INFOPLIST_KEY_SereinVersion = "0.4.0-dev.6"; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; IPHONEOS_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 0.4.0; PRODUCT_BUNDLE_IDENTIFIER = io.serein.chat; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
-		A10000000000000000000011 /* Release target */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 4; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = Serein; INFOPLIST_KEY_SereinVersion = "0.4.0-dev.6"; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; IPHONEOS_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 0.4.0; PRODUCT_BUNDLE_IDENTIFIER = io.serein.chat; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+		A10000000000000000000010 /* Debug target */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 5; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = Serein; INFOPLIST_KEY_UIFileSharingEnabled = YES; INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES; INFOPLIST_KEY_NSCameraUsageDescription = "Camera access is required to prepare an encrypted video call."; INFOPLIST_KEY_NSMicrophoneUsageDescription = "Microphone access is required to prepare an encrypted audio or video call."; INFOPLIST_KEY_SereinVersion = "0.4.0-dev.7"; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; IPHONEOS_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 0.4.0; PRODUCT_BUNDLE_IDENTIFIER = io.serein.chat; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
+		A10000000000000000000011 /* Release target */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 5; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = Serein; INFOPLIST_KEY_UIFileSharingEnabled = YES; INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES; INFOPLIST_KEY_NSCameraUsageDescription = "Camera access is required to prepare an encrypted video call."; INFOPLIST_KEY_NSMicrophoneUsageDescription = "Microphone access is required to prepare an encrypted audio or video call."; INFOPLIST_KEY_SereinVersion = "0.4.0-dev.7"; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; IPHONEOS_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 0.4.0; PRODUCT_BUNDLE_IDENTIFIER = io.serein.chat; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */

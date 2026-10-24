@@ -1,6 +1,6 @@
 [package]
 name = "serein-api"
-version = "0.4.0-dev.6"
+version = "0.4.0-dev.7"
 edition = "2021"
 rust-version = "1.85"
 
@@ -22,6 +22,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 # Email-only transports: SMTP/TLS and HTTPS API. Versions are intentionally exact;
-# Dependabot creates reviewed update PRs instead of silent floating upgrades.
+# dependency updates are manual and must be reviewed before upgrading.
 lettre = { version = "=0.11.23", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-native-tls"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls"] }

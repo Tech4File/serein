@@ -32,22 +32,23 @@ final class SereinUi {
     static int muted(Context c) { return isDark(c) ? DARK_MUTED : MUTED; }
     static int accent(Context c) { return isDark(c) ? DARK_GREEN : GREEN; }
     static int dp(Context c, float v) { return (int)(v * c.getResources().getDisplayMetrics().density + 0.5f); }
+    static float fontSize(Context c, float size) { String scale=c.getSharedPreferences("serein",0).getString("font_scale","system"); float factor="large".equals(scale)?1.15f:"extra_large".equals(scale)?1.30f:1f; return Math.max(10f,size*factor); }
     static GradientDrawable shape(Context c, int color, int radius) {
         GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(c, radius)); return d;
     }
     static LinearLayout column(Context c) { LinearLayout l = new LinearLayout(c); l.setOrientation(LinearLayout.VERTICAL); return l; }
     static LinearLayout row(Context c) { LinearLayout l = new LinearLayout(c); l.setOrientation(LinearLayout.HORIZONTAL); l.setGravity(Gravity.CENTER_VERTICAL); return l; }
     static TextView text(Context c, String value, float size, int color, boolean bold) {
-        TextView t = new TextView(c); t.setText(value); t.setTextSize(size); t.setTextColor(color); if (bold) t.setTypeface(Typeface.DEFAULT, Typeface.BOLD); return t;
+        TextView t = new TextView(c); t.setText(value); t.setTextSize(fontSize(c,size)); t.setTextColor(color); if (bold) t.setTypeface(Typeface.DEFAULT, Typeface.BOLD); return t;
     }
     static TextView label(Context c, String value) { TextView t=text(c,value,10,muted(c),true); t.setLetterSpacing(.12f); return t; }
     static Button button(Context c, String value, boolean primary) {
-        Button b = new Button(c); b.setText(value); b.setAllCaps(false); b.setTextSize(12); b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        Button b = new Button(c); b.setText(value); b.setAllCaps(false); b.setTextSize(fontSize(c,12)); b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         b.setTextColor(primary ? (isDark(c) ? 0xFF0B201A : WHITE) : text(c));
         b.setBackground(shape(c, primary ? accent(c) : surface(c), 12)); b.setPadding(dp(c,16),dp(c,8),dp(c,16),dp(c,8)); return b;
     }
     static EditText field(Context c, String hint, boolean password) {
-        EditText e = new EditText(c); e.setSingleLine(true); e.setTextSize(12); e.setHint(hint); e.setHintTextColor(muted(c)); e.setTextColor(text(c)); e.setPadding(dp(c,12),0,dp(c,12),0); e.setBackground(shape(c,surface(c),10));
+        EditText e = new EditText(c); e.setSingleLine(true); e.setTextSize(fontSize(c,12)); e.setHint(hint); e.setHintTextColor(muted(c)); e.setTextColor(text(c)); e.setPadding(dp(c,12),0,dp(c,12),0); e.setBackground(shape(c,surface(c),10));
         if (password) e.setInputType(129); return e;
     }
     static View divider(Context c) { View v = new View(c); v.setBackgroundColor(isDark(c)?SereinTokens.BORDER_DARK:SereinTokens.BORDER_LIGHT); return v; }

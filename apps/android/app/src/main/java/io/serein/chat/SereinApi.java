@@ -11,6 +11,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -89,6 +90,82 @@ final class SereinApi {
     void sendEncryptedEnvelope(String id, String deviceId, String iv, String ciphertext, Callback cb) {
         request("POST", "/api/v1/messages", json("id", id, "to", deviceId, "iv", iv, "ciphertext", ciphertext), cb);
     }
+
+    CompletableFuture<Object> future(String method, String path, JSONObject body) {
+        CompletableFuture<Object> result = new CompletableFuture<>();
+        request(method, path, body, (value, error) -> {
+            if (error != null) result.completeExceptionally(new java.io.IOException(error));
+            else result.complete(value);
+        });
+        return result;
+    }
+    CompletableFuture<Object> contactsFuture() { return future("GET", "/api/v1/contacts", null); }
+    CompletableFuture<JSONObject> deviceKeyDirectory(String contactId) {
+        return future("GET", "/api/v1/contacts/" + contactId + "/device-keys", null).thenApply(value -> (JSONObject) value);
+    }
+    CompletableFuture<JSONObject> enrollDeviceKey(JSONObject publicKey) {
+        JSONObject body = json("algorithm", "ECDH-P256");
+        try { body.put("public_key", publicKey); } catch (Exception ignored) { }
+        return future("PUT", "/api/v1/device-key", body).thenApply(value -> (JSONObject) value);
+    }
+    CompletableFuture<Object> historyPage(String afterCreatedAt, String afterId) {
+        String path="/api/v1/messages?limit=100";
+        if(afterCreatedAt!=null&&afterId!=null)try{path+="&after_created_at="+java.net.URLEncoder.encode(afterCreatedAt,"UTF-8")+"&after_id="+java.net.URLEncoder.encode(afterId,"UTF-8");}catch(Exception ignored){}
+        return future("GET", path, null);
+    }
+    CompletableFuture<Object> sendEnvelopeFuture(String id, String deviceId, String iv, String ciphertext) {
+        return future("POST", "/api/v1/messages", json("id", id, "to", deviceId, "iv", iv, "ciphertext", ciphertext));
+    }
+    CompletableFuture<Object> acknowledgeFuture(String id) { return future("POST", "/api/v1/messages/" + id + "/ack", new JSONObject()); }
+    CompletableFuture<Object> transfers() { return future("GET", "/api/v1/transfers", null); }
+    CompletableFuture<Object> createTransfer(JSONObject body) { return future("POST", "/api/v1/transfers", body); }
+    CompletableFuture<Object> acknowledgeTransfer(String id) { return future("POST", "/api/v1/transfers/" + id + "/ack", new JSONObject()); }
+    CompletableFuture<Object> abortTransfer(String id) { return future("DELETE", "/api/v1/transfers/" + id, null); }
+
+    static final class BinaryReply {
+        final byte[] bytes; final String sha256;
+        BinaryReply(byte[] bytes, String sha256) { this.bytes = bytes; this.sha256 = sha256; }
+    }
+    CompletableFuture<BinaryReply> transferChunk(String method, String transferId, int index, byte[] body, String digest) {
+        CompletableFuture<BinaryReply> result = new CompletableFuture<>();
+        worker.execute(() -> {
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL(baseUrl + "/api/v1/transfers/" + transferId + "/chunks/" + index);
+                if (!"https".equalsIgnoreCase(url.getProtocol())) throw new SecurityException("Refusing a non-HTTPS transfer request.");
+                connection = (HttpURLConnection) url.openConnection(); connection.setInstanceFollowRedirects(false);
+                connection.setRequestMethod(method); connection.setConnectTimeout(15000); connection.setReadTimeout(30000);
+                connection.setRequestProperty("Accept", "application/octet-stream");
+                String sessionToken = sessionVault.load(origin(url));
+                if (sessionToken != null && !sessionToken.isEmpty()) connection.setRequestProperty("Cookie", "serein_session=" + sessionToken);
+                if ("PUT".equals(method)) {
+                    connection.setDoOutput(true); connection.setRequestProperty("Content-Type", "application/octet-stream");
+                    connection.setRequestProperty("X-Chunk-SHA256", digest == null ? "" : digest);
+                    try (OutputStream out = connection.getOutputStream()) { out.write(body); }
+                }
+                int code = connection.getResponseCode();
+                if (code == 401) sessionVault.clear(); saveSessionCookie(connection.getHeaderField("Set-Cookie"), origin(url));
+                InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+                byte[] bytes = stream == null ? new byte[0] : readBytes(stream, 512 * 1024);
+                if (code < 200 || code >= 300) {
+                    String message = "Transfer request failed (" + code + ").";
+                    try { message = new JSONObject(new String(bytes, StandardCharsets.UTF_8)).optString("error", message); } catch (Exception ignored) { }
+                    throw new java.io.IOException(message);
+                }
+                result.complete(new BinaryReply(bytes, connection.getHeaderField("X-Chunk-SHA256")));
+            } catch (Exception error) {
+                result.completeExceptionally(new java.io.IOException(error.getMessage() == null ? "Could not complete the encrypted transfer." : error.getMessage()));
+            } finally { if (connection != null) connection.disconnect(); }
+        });
+        return result;
+    }
+    private static byte[] readBytes(InputStream stream, int maximum) throws Exception {
+        try (InputStream in = stream; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[16 * 1024]; int read;
+            while ((read = in.read(buffer)) != -1) { if (out.size() + read > maximum) throw new java.io.IOException("Transfer response exceeds the chunk size limit."); out.write(buffer, 0, read); }
+            return out.toByteArray();
+        }
+    }
     void saveSettings(JSONObject patch, Callback cb) { request("PUT", "/api/v1/settings", patch, cb); }
     void addContact(String identity, Callback cb) { request("POST", "/api/v1/contact-requests", json("identity", identity), cb); }
     void contactRequests(Callback cb) { request("GET", "/api/v1/contact-requests", null, cb); }
@@ -100,7 +177,7 @@ final class SereinApi {
     void removeContact(String id, Callback cb) { request("DELETE", "/api/v1/contacts/" + id, null, cb); }
     void revokeDevice(String id, Callback cb) { request("DELETE", "/api/v1/devices/" + id, null, cb); }
     void revokeOthers(Callback cb) { request("POST", "/api/v1/devices/revoke-others", new JSONObject(), cb); }
-    void logout(Callback cb) { request("POST", "/api/v1/auth/logout", new JSONObject(), cb); }
+    void logout(Callback cb) { request("POST", "/api/v1/auth/logout", new JSONObject(), (result,error)->{sessionVault.clear();cb.complete(result,error);}); }
 
     private static JSONObject json(String... pairs) {
         JSONObject value = new JSONObject();
@@ -137,7 +214,7 @@ final class SereinApi {
             main.post(() -> callback.complete(finalResult, finalError));
         });
     }
-    private static String origin(URL url) { int port=url.getPort()>=0?url.getPort():url.getDefaultPort();return url.getProtocol().toLowerCase()+"://"+url.getHost().toLowerCase()+":"+port; }
+    private static String origin(URL url) { int port=url.getPort()>=0?url.getPort():url.getDefaultPort();return url.getProtocol().toLowerCase(java.util.Locale.ROOT)+"://"+url.getHost().toLowerCase(java.util.Locale.ROOT)+":"+port; }
     private void saveSessionCookie(String setCookie, String requestOrigin) throws Exception {
         if (setCookie == null || !setCookie.startsWith("serein_session=")) return;
         String first = setCookie.split(";", 2)[0];

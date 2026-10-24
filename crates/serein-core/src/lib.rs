@@ -5,10 +5,15 @@
 use std::{slice, str};
 
 pub const MAX_CIPHERTEXT_CHARS: usize = 90_000;
+/// Shared composer limit, measured as Unicode scalar values across Rust and JS.
+pub const MAX_MESSAGE_CHARACTERS: usize = 4_000;
+pub const MESSAGE_COUNTER_WARNING_CHARACTERS: usize = MAX_MESSAGE_CHARACTERS * 9 / 10;
 pub const DEFAULT_HISTORY_PAGE: i64 = 100;
 pub const MAX_HISTORY_PAGE: i64 = 200;
 static VERSION_C: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
+pub fn message_character_count(value: &str) -> usize { value.chars().count() }
+pub fn truncate_message(value: &str) -> String { value.chars().take(MAX_MESSAGE_CHARACTERS).collect() }
 pub fn normalize_username(value: &str) -> String { value.trim().to_ascii_lowercase() }
 pub fn valid_username(value: &str) -> bool {
     (3..=32).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b,b'_'|b'.'|b'-'))
@@ -25,8 +30,45 @@ pub fn valid_email(value: &str) -> bool {
         && label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
         && label.bytes().all(|b| b.is_ascii_alphanumeric() || b==b'-'))
 }
+/// Registration-only password requirements. Sign-in must never call this policy.
+pub const PASSWORD_MIN_CODEPOINTS: usize = 8;
+pub const PASSWORD_MAX_UTF8_BYTES: usize = 1024;
+pub const PASSWORD_REQ_LENGTH: u8 = 1 << 0;
+pub const PASSWORD_REQ_ASCII_UPPER: u8 = 1 << 1;
+pub const PASSWORD_REQ_ASCII_LOWER: u8 = 1 << 2;
+pub const PASSWORD_REQ_ASCII_DIGIT: u8 = 1 << 3;
+pub const PASSWORD_REQ_UTF8_LIMIT: u8 = 1 << 4;
+pub const PASSWORD_REQ_ALL: u8 = PASSWORD_REQ_LENGTH | PASSWORD_REQ_ASCII_UPPER
+    | PASSWORD_REQ_ASCII_LOWER | PASSWORD_REQ_ASCII_DIGIT | PASSWORD_REQ_UTF8_LIMIT;
+
+pub fn registration_password_requirements(password: &str) -> [bool; 5] {
+    [
+        password.chars().count() >= PASSWORD_MIN_CODEPOINTS,
+        password.bytes().any(|b| b.is_ascii_uppercase()),
+        password.bytes().any(|b| b.is_ascii_lowercase()),
+        password.bytes().any(|b| b.is_ascii_digit()),
+        password.len() <= PASSWORD_MAX_UTF8_BYTES,
+    ]
+}
+
+pub fn registration_password_requirement_mask(password: &str) -> u8 {
+    registration_password_requirements(password).into_iter().enumerate()
+        .fold(0, |mask, (index, satisfied)| mask | if satisfied { 1 << index } else { 0 })
+}
+
+/// Return one bit per registration-password rule (see PASSWORD_REQ_* constants).
+/// Invalid UTF-8 and null input return zero; the caller owns the input buffer.
+/// # Safety
+/// For non-null `data`, the pointer must be readable for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn serein_core_registration_password_requirements(data: *const u8, len: usize) -> u8 {
+    if data.is_null() { return 0; }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    str::from_utf8(bytes).map(registration_password_requirement_mask).unwrap_or(0)
+}
+
 pub fn valid_theme(value: &str) -> bool { matches!(value,"system"|"light"|"dark") }
-pub fn valid_font_scale(value: &str) -> bool { matches!(value,"standard"|"large") }
+pub fn valid_font_scale(value: &str) -> bool { matches!(value,"system"|"standard"|"large"|"extra_large") }
 pub fn history_page_limit(requested: Option<i64>) -> i64 { requested.unwrap_or(DEFAULT_HISTORY_PAGE).clamp(1,MAX_HISTORY_PAGE) }
 
 /// Fixed datagram framing for an already-authenticated/encrypted payload.
@@ -177,6 +219,19 @@ pub fn valid_ciphertext_parts(iv: &str, ciphertext: &str) -> bool {
 /// C ABI used by first-party JNI, Swift/C, and wasm adapters. Input pointers must
 /// refer to `len` readable bytes for the duration of the call.
 #[no_mangle]
+pub extern "C" fn serein_core_max_message_characters() -> u32 { MAX_MESSAGE_CHARACTERS as u32 }
+#[no_mangle]
+pub extern "C" fn serein_core_message_warning_characters() -> u32 { MESSAGE_COUNTER_WARNING_CHARACTERS as u32 }
+/// Count Unicode scalar values in UTF-8 text. Returns `u32::MAX` for invalid input.
+/// A null pointer is accepted only for an empty string.
+#[no_mangle]
+pub unsafe extern "C" fn serein_core_message_character_count(data: *const u8, len: usize) -> u32 {
+    if data.is_null() { return if len == 0 { 0 } else { u32::MAX }; }
+    if len > MAX_MESSAGE_CHARACTERS.saturating_mul(4) { return u32::MAX; }
+    let bytes = unsafe { slice::from_raw_parts(data, len) };
+    str::from_utf8(bytes).map(|value| message_character_count(value) as u32).unwrap_or(u32::MAX)
+}
+#[no_mangle]
 pub unsafe extern "C" fn serein_core_validate_username(data: *const u8, len: usize) -> u8 {
     if data.is_null() || len>32 { return 0; }
     let bytes=unsafe { slice::from_raw_parts(data,len) };
@@ -215,6 +270,18 @@ pub unsafe extern "C" fn serein_core_dealloc(data: *mut u8, len: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn shared_message_character_limit_counts_unicode_scalars_and_truncates(){
+        let text="a😀e\u{301}";
+        assert_eq!(message_character_count(text),4);
+        assert_eq!(message_character_count(&"x".repeat(MAX_MESSAGE_CHARACTERS+1)),MAX_MESSAGE_CHARACTERS+1);
+        assert_eq!(truncate_message(&format!("{}Z","😀".repeat(MAX_MESSAGE_CHARACTERS))),"😀".repeat(MAX_MESSAGE_CHARACTERS));
+        assert_eq!(MESSAGE_COUNTER_WARNING_CHARACTERS,3_600);
+        assert_eq!(serein_core_max_message_characters(),4_000);
+        let bytes=text.as_bytes();
+        assert_eq!(unsafe{serein_core_message_character_count(bytes.as_ptr(),bytes.len())},4);
+        assert_eq!(unsafe{serein_core_message_character_count(std::ptr::null(),0)},0);
+        let invalid=[0xffu8];assert_eq!(unsafe{serein_core_message_character_count(invalid.as_ptr(),invalid.len())},u32::MAX);
+    }
     #[test] fn packet_encode_parse_round_trip_uses_fixed_big_endian_header() {
         let sender = [1u8; 16]; let receiver = [2u8; 16]; let payload = [9u8, 8, 7, 6];
         let mut output = [0u8; MAX_UDP_PACKET_LEN];
@@ -245,8 +312,24 @@ mod tests {
         assert_eq!(view.payload, unsafe { packet.as_ptr().add(PACKET_HEADER_LEN) });
     }
     #[test] fn username_normalization_and_policy_are_shared(){assert_eq!(normalize_username(" Alice_7 "),"alice_7");assert!(valid_username("alice.7"));assert!(!valid_username("Upper"));assert!(!valid_username("ab"));}
+    #[test] fn registration_password_policy_is_shared_and_counts_utf8_correctly(){
+        assert_eq!(registration_password_requirements("Serein123"),[true,true,true,true,true]);
+        assert_eq!(registration_password_requirements("password1"),[true,false,true,true,true]);
+        assert_eq!(registration_password_requirements("PASSWORD1"),[true,true,false,true,true]);
+        assert_eq!(registration_password_requirements("Password"),[true,true,true,false,true]);
+        assert_eq!(registration_password_requirements("Abc123"),[false,true,true,true,true]);
+        assert_eq!(registration_password_requirements("😀😀😀😀😀Aa1"),[true,true,true,true,true]);
+        assert_eq!(registration_password_requirements("A".to_owned()+&"a".repeat(1022)+"1"),[true,true,true,true,true]);
+        assert!(!registration_password_requirements(&("A".to_owned()+&"a".repeat(1023)+"1"))[4]);
+        assert_eq!(registration_password_requirement_mask("Serein123"),PASSWORD_REQ_ALL);
+        let bytes=b"Serein123";
+        assert_eq!(unsafe { serein_core_registration_password_requirements(bytes.as_ptr(),bytes.len()) },PASSWORD_REQ_ALL);
+        assert_eq!(unsafe { serein_core_registration_password_requirements(std::ptr::null(),0) },0);
+        let invalid=[0xffu8];
+        assert_eq!(unsafe { serein_core_registration_password_requirements(invalid.as_ptr(),invalid.len()) },0);
+    }
     #[test] fn email_policy_rejects_obvious_invalid_values(){assert!(valid_email("person+tag@example.org"));assert!(!valid_email("missing-at"));assert!(!valid_email("person@localhost"));assert!(!valid_email("person..name@example.org"));assert!(!valid_email("person@-example.org"));assert!(!valid_email("person\n@example.org"));assert!(!valid_email("a@b@c.org"));}
-    #[test] fn theme_and_font_values_are_allowlisted(){assert!(valid_theme("dark"));assert!(!valid_theme("ultraviolet"));assert!(valid_font_scale("large"));assert!(!valid_font_scale("huge"));}
+    #[test] fn theme_and_font_values_are_allowlisted(){assert!(valid_theme("dark"));assert!(!valid_theme("ultraviolet"));assert!(valid_font_scale("system"));assert!(valid_font_scale("large"));assert!(valid_font_scale("extra_large"));assert!(!valid_font_scale("huge"));}
     #[test] fn history_page_is_bounded(){assert_eq!(history_page_limit(None),100);assert_eq!(history_page_limit(Some(0)),1);assert_eq!(history_page_limit(Some(500)),200);}
     #[test] fn base64_lengths_and_padding_bits_are_checked(){assert_eq!(canonical_base64_len("AAAAAAAAAAAAAAAA"),Some(12));assert_eq!(canonical_base64_len("AAAAAAAAAAAAAAAAAAAAAA=="),Some(16));assert_eq!(canonical_base64_len("AA=="),Some(1));assert_eq!(canonical_base64_len("AB=="),None);assert_eq!(canonical_base64_len("not-base64"),None);}
     #[test] fn gcm_envelope_requires_twelve_byte_iv_and_tag(){assert!(valid_ciphertext_parts("AAAAAAAAAAAAAAAA","AAAAAAAAAAAAAAAAAAAAAA=="));assert!(!valid_ciphertext_parts("short","AAAAAAAAAAAAAAAAAAAAAA=="));assert!(!valid_ciphertext_parts("AAAAAAAAAAAAAAAA","AA=="));}
