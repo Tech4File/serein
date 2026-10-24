@@ -94,12 +94,18 @@ python3 - "$TMP/unverified-login.json" "$(python3 -c 'import json,sys;print(json
 import json,sys
 x=json.load(open(sys.argv[1]));assert x['verification']['required'] is True and x['verification']['email']==sys.argv[2]
 PY
-resend_status="$(curl -sS -o "$TMP/resend-cooldown.json" -w '%{http_code}' -H 'Content-Type: application/json' -d "$(python3 - "$TMP/a.json" <<'PY'
+resend_status="$(curl -sS -D "$TMP/resend-cooldown.headers" -o "$TMP/resend-cooldown.json" -w '%{http_code}' -H 'Content-Type: application/json' -d "$(python3 - "$TMP/a.json" <<'PY'
 import json,sys
 print(json.dumps({'identity':json.load(open(sys.argv[1]))['email']}))
 PY
 )" "$BASE_URL/api/v1/auth/resend-verification")"
 test "$resend_status" = 429
+python3 - "$TMP/resend-cooldown.json" "$TMP/resend-cooldown.headers" <<'PY'
+import json,sys
+body=json.load(open(sys.argv[1]));headers=open(sys.argv[2]).read().lower()
+assert 1<=body['retry_after_seconds']<=60
+assert f"retry-after: {body['retry_after_seconds']}" in headers
+PY
 otp_for(){
   local who="$1" email="$2" value
   if [[ "$who" == "a" && -n "${OTP_A:-}" ]]; then value="$OTP_A"

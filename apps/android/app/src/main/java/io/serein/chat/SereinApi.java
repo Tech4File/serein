@@ -30,12 +30,29 @@ final class SereinApi {
                 .getString("api_base", "https://api.example.invalid");
     }
     String baseUrl() { return baseUrl; }
-    void setBaseUrl(String value) {
+    String normalizeBaseUrl(String value) {
         String clean = value == null ? "" : value.trim().replaceAll("/+$", "");
-        try { URL parsed = new URL(clean); if (!"https".equalsIgnoreCase(parsed.getProtocol()) || parsed.getHost().isEmpty() || parsed.getUserInfo()!=null || parsed.getQuery()!=null || parsed.getRef()!=null) throw new IllegalArgumentException("Use a valid HTTPS API origin without embedded credentials or query values."); }
-        catch (java.net.MalformedURLException invalid) { throw new IllegalArgumentException("Enter a valid HTTPS API URL."); }
-        baseUrl = clean;
+        try { URL parsed = new URL(clean); if (!"https".equalsIgnoreCase(parsed.getProtocol()) || parsed.getHost().isEmpty() || parsed.getUserInfo()!=null || (parsed.getPath()!=null&&!parsed.getPath().isEmpty()&&!parsed.getPath().equals("/")) || parsed.getQuery()!=null || parsed.getRef()!=null) throw new IllegalArgumentException("Use an HTTPS server origin without a path, credentials, or query values."); }
+        catch (java.net.MalformedURLException invalid) { throw new IllegalArgumentException("Enter a valid HTTPS server origin."); }
+        return clean;
+    }
+    void setBaseUrl(String value) {
+        String clean=normalizeBaseUrl(value);baseUrl=clean;
         context.getSharedPreferences("serein", Context.MODE_PRIVATE).edit().putString("api_base", clean).apply();
+    }
+    void testConnection(String candidate, Callback cb) {
+        final String origin;
+        try { origin=normalizeBaseUrl(candidate); } catch (Exception e) { cb.complete(null,e.getMessage());return; }
+        worker.execute(() -> {
+            Object result=null;String error=null;HttpURLConnection connection=null;
+            try {
+                connection=(HttpURLConnection)new URL(origin+"/healthz").openConnection();connection.setRequestMethod("GET");connection.setConnectTimeout(8000);connection.setReadTimeout(10000);connection.setInstanceFollowRedirects(false);connection.setRequestProperty("Accept","application/json");
+                int code=connection.getResponseCode();InputStream stream=code>=200&&code<400?connection.getInputStream():connection.getErrorStream();String body=stream==null?"{}":readFully(stream);result=body.isEmpty()?new JSONObject():new org.json.JSONTokener(body).nextValue();
+                if((code<200||code>=300)&&code!=503)error="Server returned HTTP "+code+".";
+            } catch(Exception e) { error="Could not reach the server over HTTPS."; }
+            finally { if(connection!=null)connection.disconnect(); }
+            Object finalResult=result;String finalError=error;main.post(()->cb.complete(finalResult,finalError));
+        });
     }
     String stableDeviceId() {
         android.content.SharedPreferences p = context.getSharedPreferences("serein", Context.MODE_PRIVATE);

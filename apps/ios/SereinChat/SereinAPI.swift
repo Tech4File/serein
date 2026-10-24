@@ -42,7 +42,7 @@ struct SereinBlock: Decodable, Identifiable {
 private struct SereinAccountReply: Decodable { let user: SereinUser; let device: SereinDevice }
 private struct SereinAuthReply: Decodable { let account: SereinAccountReply }
 private struct SereinVerificationMeta: Decodable { let required: Bool?; let verified: Bool?; let email: String? }
-private struct SereinErrorReply: Decodable { let error: String; let verification: SereinVerificationMeta? }
+private struct SereinErrorReply: Decodable { let error: String; let verification: SereinVerificationMeta?; let retry_after_seconds: Int? }
 private struct SereinMessageReply: Decodable { let message: String }
 
 private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
@@ -70,6 +70,9 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     @Published var notifications = false
     @Published var busy = false
     @Published var errorMessage: String?
+    @Published var connectionStatus = "Not checked"
+    @Published var connectionDetails = ""
+    @Published var connectionTestedOrigin = ""
     @Published var apiBase: String {
         didSet { UserDefaults.standard.set(apiBase, forKey: "serein.api-base") }
     }
@@ -91,6 +94,52 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         Task { await restoreSession() }
     }
 
+    private func normalizedServerOrigin(_ value: String) throws -> String {
+        guard let components = URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              components.scheme?.lowercased() == "https", let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil, components.path.isEmpty || components.path == "/",
+              components.query == nil, components.fragment == nil else {
+            throw NSError(domain: "SereinConnection", code: 1, userInfo: [NSLocalizedDescriptionKey: "Use an HTTPS server origin without a path, credentials, or query values."])
+        }
+        var origin = "https://\(host)"
+        if let port = components.port { origin += ":\(port)" }
+        return origin
+    }
+    func setServerOrigin(_ value: String) throws {
+        let normalized = try normalizedServerOrigin(value)
+        if apiBase != normalized { verificationRequired = false; verificationIdentity = ""; verificationEmail = "" }
+        apiBase = normalized
+    }
+    func testServerConnection(_ value: String) async -> Bool {
+        let origin: String
+        do { origin = try normalizedServerOrigin(value) }
+        catch { connectionTestedOrigin = ""; connectionStatus = "Invalid server URL"; connectionDetails = error.localizedDescription; return false }
+        connectionTestedOrigin = ""
+        guard let root = URL(string: origin), let url = URL(string: "/healthz", relativeTo: root) else {
+            connectionStatus = "Invalid server URL"; connectionDetails = "Enter an HTTPS server origin."; return false
+        }
+        var config = URLSessionConfiguration.ephemeral; config.httpCookieStorage = nil; config.httpShouldSetCookies = false; config.urlCredentialStorage = nil
+        let probeSession = URLSession(configuration: config, delegate: SereinNoRedirectDelegate(), delegateQueue: nil)
+        defer { probeSession.finishTasksAndInvalidate() }
+        var request = URLRequest(url: url); request.httpMethod = "GET"; request.timeoutInterval = 10; request.cachePolicy = .reloadIgnoringLocalCacheData; request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await probeSession.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 503,
+                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let healthStatus = object["status"] as? String, ["ready", "degraded"].contains(healthStatus),
+                  let raw = object["components"] as? [String: Any] else {
+                connectionStatus = "Could not confirm server health"; connectionDetails = "The server returned an unexpected health response."; return false
+            }
+            func safe(_ key: String) -> String { let value = raw[key] as? String ?? "unknown"; return ["ready", "ok", "available", "unavailable", "degraded", "disabled", "configured", "not_configured", "unknown"].contains(value) ? value : "unknown" }
+            let ready = healthStatus == "ready" && http.statusCode == 200
+                connectionTestedOrigin = origin
+            connectionStatus = ready ? "Connected · ready" : "Reachable · degraded"
+            connectionDetails = "API: \(safe("api")) · Database: \(safe("database")) · Web: \(safe("frontend")) · Email: \(safe("email_delivery"))"
+            return true
+        } catch {
+            connectionStatus = "Not connected"; connectionDetails = "Could not reach the server over HTTPS."; return false
+        }
+    }
     func signIn(identity: String, password: String) async {
         await authenticate(path: "/api/v1/auth/login", values: [
             "identity": identity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
@@ -131,14 +180,17 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
             await refreshAccountData()
         } catch { errorMessage = error.localizedDescription }
     }
-    func resendVerification(identity: String) async {
+    func resendVerification(identity: String) async -> Int? {
         busy = true; errorMessage = nil
         defer { busy = false }
         do {
             let data = try await request("/api/v1/auth/resend-verification", method: "POST", values: ["identity": identity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()])
             let reply = try JSONDecoder().decode(SereinMessageReply.self, from: data)
-            errorMessage = reply.message
-        } catch { errorMessage = error.localizedDescription }
+            errorMessage = reply.message; return nil
+        } catch {
+            let ns = error as NSError; errorMessage = error.localizedDescription
+            return ns.userInfo["retryAfterSeconds"] as? Int
+        }
     }
     private var deviceID: String { defaults.string(forKey: "serein.device-id") ?? UUID().uuidString.lowercased() }
 
@@ -264,6 +316,7 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
                 info["verificationRequired"] = true
                 info["verificationEmail"] = reply?.verification?.email ?? ""
             }
+            if let retry = reply?.retry_after_seconds { info["retryAfterSeconds"] = retry }
             throw NSError(domain: "SereinAPI", code: http.statusCode, userInfo: info)
         }
         return data

@@ -100,10 +100,10 @@ jobs:
 
   ios-simulator:
     needs: version-consistency
-    # The arm64 macos-15 runner still segfaulted with Xcode 16.4 and a generic
-    # destination. Move this isolated build to the supported x64 macos-15 image,
-    # limit build parallelism, and retain crash diagnostics so the failing
-    # process (xcodebuild vs Swift frontend) can be identified if it recurs.
+    # Run the Xcode 16.4 simulator build on a fixed x64 runner and capture the
+    # native crash report. The reported process is xcodebuild itself (not a
+    # Swift diagnostic); the failure occurs immediately after result-bundle
+    # setup, so preflight project resolution and omit xcresult generation here.
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -116,6 +116,11 @@ jobs:
           uname -a
           xcodebuild -version
           xcodebuild -showsdks
+      - name: Preflight Xcode project resolution
+        run: |
+          set -euo pipefail
+          xcodebuild -list -project apps/ios/SereinChat.xcodeproj 2>&1 | tee "$RUNNER_TEMP/xcode-list.log"
+          xcodebuild -project apps/ios/SereinChat.xcodeproj -scheme SereinChat -sdk iphonesimulator -configuration Release -showBuildSettings > "$RUNNER_TEMP/xcode-build-settings.log"
       - name: Build iOS simulator app
         run: |
           set -uo pipefail
@@ -127,7 +132,6 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -configuration Release \
             -jobs 1 \
-            -resultBundlePath "$RUNNER_TEMP/Serein-iOS.xcresult" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             MARKETING_VERSION="$(cut -d- -f1 VERSION)" CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
             CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
@@ -142,7 +146,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/ios-diagnostics"
           find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \( -iname 'xcodebuild*' -o -iname 'swift-frontend*' -o -iname 'swift*' \) -mtime -1 -exec cp {} "$RUNNER_TEMP/ios-diagnostics/" \; 2>/dev/null || true
           cp "$RUNNER_TEMP/xcodebuild.log" "$RUNNER_TEMP/ios-diagnostics/" 2>/dev/null || true
-          cp -R "$RUNNER_TEMP/Serein-iOS.xcresult" "$RUNNER_TEMP/ios-diagnostics/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/xcode-list.log" "$RUNNER_TEMP/ios-diagnostics/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/xcode-build-settings.log" "$RUNNER_TEMP/ios-diagnostics/" 2>/dev/null || true
       - name: Upload iOS crash diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

@@ -60,3 +60,14 @@ dialog{width:min(410px,calc(100% - 28px));border:1px solid var(--border-strong);
 @media(max-width:390px){.otp-inputs{gap:7px}.otp-digit{height:45px!important;font-size:21px!important}}
 @media(prefers-reduced-motion:reduce){.otp-digit,.verify-spinner{transition:none;animation:none}}
 .reduce-motion .otp-digit,.reduce-motion .verify-spinner{transition:none;animation:none}
+
+/* Unified self-hosted server connection and version-aware welcome */
+.side-head-actions{display:flex;align-items:center;gap:6px}
+.connection-status{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-soft);font-size:11px;line-height:1.55;color:var(--muted)}
+.connection-status.pending{color:var(--text)}.connection-status.success{border-color:color-mix(in srgb,var(--accent) 36%,var(--border));color:var(--accent)}.connection-status.warning{color:#9a711b}.connection-status.error{color:#b44845}
+.connection-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+.whats-new-list{display:grid;gap:10px;padding-left:20px;color:var(--text);font-size:12px;line-height:1.55}
+#connectionDialog,#whatsNewDialog{width:min(480px,calc(100vw - 28px));max-width:480px;border:1px solid var(--border);border-radius:18px;background:var(--surface);color:var(--text);padding:22px;box-shadow:0 22px 70px rgba(0,0,0,.24)}
+#connectionDialog::backdrop,#whatsNewDialog::backdrop{background:rgba(11,21,18,.48);backdrop-filter:blur(3px)}
+#connectionDialog form{display:grid;gap:12px}#connectionDialog label{display:grid;gap:6px;font-size:11px;font-weight:650}#connectionDialog input{width:100%;min-height:42px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);padding:0 12px;font:inherit;font-size:12px}
+#authConnectionOpen{margin-left:auto;white-space:nowrap;font-size:9px}.settings-nav [data-section="connection"]{border-top:1px solid var(--border);margin-top:7px;padding-top:13px}

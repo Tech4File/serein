@@ -3,7 +3,14 @@ import SwiftUI
 struct SereinProductRootView: View {
     @StateObject private var api = SereinAPI()
     @AppStorage("serein.theme") private var theme = "system"
+    @AppStorage("serein.whats-new.version") private var lastWhatsNewVersion = ""
+    @State private var showingWhatsNew = false
     @State private var showingError = false
+    private var displayedAppVersion: String {
+        let version = Bundle.main.infoDictionary?["SereinVersion"] as? String ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        return build.map { "\(version) · build \($0)" } ?? version
+    }
     var body: some View {
         Group {
             if api.signedIn { SereinProductTabs(api: api) }
@@ -15,6 +22,29 @@ struct SereinProductRootView: View {
         .alert("Serein", isPresented: $showingError) {
             Button("OK", role: .cancel) { api.errorMessage = nil }
         } message: { Text(api.errorMessage ?? "") }
+        .onAppear { if lastWhatsNewVersion != displayedAppVersion { showingWhatsNew = true } }
+        .sheet(isPresented: $showingWhatsNew) { SereinWhatsNewView(version: displayedAppVersion, isFirstInstall: lastWhatsNewVersion.isEmpty) { lastWhatsNewVersion = displayedAppVersion; showingWhatsNew = false } }
+    }
+}
+
+private struct SereinWhatsNewView: View {
+    let version: String
+    let isFirstInstall: Bool
+    let onContinue: () -> Void
+    var body: some View {
+        NavigationView {
+            List {
+                Section { Text("Version \(version)").font(.system(size: 13, weight: .semibold)).foregroundStyle(SereinPalette.green) }
+                Section("Highlights") {
+                    Label("Email verification and stronger account safeguards", systemImage: "checkmark.shield")
+                    Label("Contact, privacy, and registered-device settings", systemImage: "person.2")
+                    Label("Check or change your self-hosted server connection", systemImage: "network")
+                    Label("Encrypted messaging remains disabled until reviewed device-key exchange is ready", systemImage: "lock.slash")
+                }
+            }.listStyle(.insetGrouped).navigationTitle(isFirstInstall ? "Welcome to Serein" : "What’s New")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Continue", action: onContinue) } }
+        }
+        .interactiveDismissDisabled()
     }
 }
 
@@ -28,13 +58,15 @@ private struct SereinNativeAuthView: View {
     @State private var passwordVisible = false
     @State private var otpDigits = Array(repeating: "", count: 6)
     @State private var verifyingOtp = false
+    @State private var resendSeconds = 0
+    @State private var showConnectionSettings = false
     @FocusState private var focusedOtp: Int?
     var body: some View {
         ZStack {
             LinearGradient(colors: [Color(uiColor: .systemBackground), SereinPalette.paleMint.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    HStack { SereinAvatar(name: "Serein", size: 42); VStack(alignment: .leading) { Text("Serein").font(.system(size: 20, weight: .bold, design: .rounded)); Text("SEREIN ACCOUNT").font(.system(size: 8, weight: .bold)).tracking(1.1).foregroundStyle(.secondary) }; Spacer() }
+                    HStack { SereinAvatar(name: "Serein", size: 42); VStack(alignment: .leading) { Text("Serein").font(.system(size: 20, weight: .bold, design: .rounded)); Text("SEREIN ACCOUNT").font(.system(size: 8, weight: .bold)).tracking(1.1).foregroundStyle(.secondary) }; Spacer(); Button { showConnectionSettings = true } label: { Label("Connection", systemImage: "network").font(.system(size: 10, weight: .semibold)) } }
                     VStack(alignment: .leading, spacing: 7) { SereinSectionLabel(title: api.verificationRequired ? "EMAIL VERIFICATION" : "ACCOUNT"); Text(api.verificationRequired ? "Verify your email" : (registering ? "Create your account" : "Welcome back")).font(.system(size: 29, weight: .bold, design: .rounded)); Text(api.verificationRequired ? "Enter the six-digit code sent to your inbox." : "Connect to your Serein API over HTTPS.").font(.system(size: 12)).foregroundStyle(.secondary) }
                     SereinCard {
                         VStack(spacing: 13) {
@@ -55,13 +87,13 @@ private struct SereinNativeAuthView: View {
                                         HStack { Spacer(); if verifyingOtp || api.busy { ProgressView().tint(.white) }; Text(verifyingOtp || api.busy ? "Verifying…" : (otpDigits.joined().count == 6 ? "Verify email" : "Enter the six-digit code")); Spacer(); if !(verifyingOtp || api.busy) { Image(systemName: "arrow.right") } }
                                     }.buttonStyle(SereinPrimaryButtonStyle()).disabled(api.busy || verifyingOtp || api.verificationEmail.isEmpty || otpDigits.joined().count != 6)
                                     HStack {
-                                        Button("Resend code") { Task { await api.resendVerification(identity: api.verificationEmail) } }.disabled(api.busy || verifyingOtp || api.verificationEmail.isEmpty)
+                                        Button(resendButtonTitle) { Task { if let seconds = await api.resendVerification(identity: api.verificationEmail) { startResendCooldown(seconds) } } }.disabled(api.busy || verifyingOtp || resendSeconds > 0 || api.verificationEmail.isEmpty)
                                         Spacer()
                                         Button("← Back to sign in") { api.verificationRequired = false; api.verificationEmail = ""; api.verificationIdentity = ""; registering = false; otpDigits = Array(repeating: "", count: 6) }.font(.system(size: 11, weight: .medium))
                                     }.font(.system(size: 11))
                                 }.onAppear { focusedOtp = 0 }
                             } else {
-                                TextField("https://api.your-domain.example", text: $api.apiBase).textInputAutocapitalization(.never).keyboardType(.URL).autocorrectionDisabled().padding(12).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
+                                Button { showConnectionSettings = true } label: { HStack { Image(systemName: "network"); VStack(alignment: .leading) { Text("Server connection").font(.system(size: 11, weight: .semibold)); Text(api.connectionStatus).font(.system(size: 9)).foregroundStyle(.secondary) }; Spacer(); Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)) }.foregroundStyle(SereinPalette.green).padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11)) }
                                 HStack(spacing: 6) { modeButton("Sign in", active: !registering) { withAnimation(.easeInOut(duration: 0.2)) { registering = false } }; modeButton("Create account", active: registering) { withAnimation(.easeInOut(duration: 0.2)) { registering = true } } }
                                 if registering {
                                     input("Display name", text: $displayName, icon: "person")
@@ -89,7 +121,7 @@ private struct SereinNativeAuthView: View {
                     if !api.verificationRequired { Text("Account and device settings use the API. Native message encryption and chat history are not connected yet; this screen will not fake a successful chat.").font(.system(size: 10)).foregroundStyle(.secondary) }
                 }.padding(22).frame(maxWidth: 540).frame(maxWidth: .infinity)
             }
-        }
+        }.sheet(isPresented: $showConnectionSettings) { SereinConnectionSettings(api: api) }
     }
     private func input(_ title: String, text: Binding<String>, icon: String) -> some View {
         HStack { Image(systemName: icon).foregroundStyle(.secondary); TextField(title, text: text).textInputAutocapitalization(.never).autocorrectionDisabled() }.padding(12).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
@@ -98,6 +130,17 @@ private struct SereinNativeAuthView: View {
     private var passwordHasLowercase: Bool { password.unicodeScalars.contains { $0.value >= 97 && $0.value <= 122 } }
     private var passwordHasNumber: Bool { password.unicodeScalars.contains { $0.value >= 48 && $0.value <= 57 } }
     private var validRegistrationPassword: Bool { password.unicodeScalars.count >= 8 && passwordHasUppercase && passwordHasLowercase && passwordHasNumber && password.utf8.count <= 1024 }
+    private var resendButtonTitle: String { resendSeconds > 0 ? String(format: "Resend in %02d:%02d", resendSeconds / 60, resendSeconds % 60) : "Resend code" }
+    private func startResendCooldown(_ seconds: Int) {
+        resendSeconds = max(1, min(seconds, 3600))
+        Task { @MainActor in
+            while resendSeconds > 0 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                resendSeconds = max(0, resendSeconds - 1)
+            }
+        }
+    }
     private func setOtpDigit(_ index: Int, value: String) {
         let digits = value.filter { $0.isASCII && $0.isNumber }
         if digits.count > 1 {
@@ -202,21 +245,24 @@ private struct SereinNativeCalls: View {
 private struct SereinNativeSettings: View {
     @ObservedObject var api: SereinAPI
     @State private var confirmRevokeOthers = false
+    @State private var showConnectionSettings = false
     var body: some View {
         NavigationView {
             List {
                 Section("Account") { if let user = api.user { SereinDetailRow(title: "Name", value: user.display_name); SereinDetailRow(title: "Username", value: "@\(user.username)"); SereinDetailRow(title: "Email", value: user.email); SereinDetailRow(title: "Verification", value: user.email_verified ? "Verified" : "Not verified") } }
+                Section("Connection") { SereinDetailRow(title: "Server origin", value: api.apiBase); SereinDetailRow(title: "Last checked", value: api.connectionTestedOrigin.isEmpty ? "Not checked" : api.connectionTestedOrigin); SereinDetailRow(title: "Status", value: api.connectionStatus); if !api.connectionDetails.isEmpty { Text(api.connectionDetails).font(.system(size: 10)).foregroundStyle(.secondary) }; Button("Manage connection") { showConnectionSettings = true } }
                 Section("Appearance") { Picker("Theme", selection: $api.theme) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }; Picker("Text size", selection: $api.fontScale) { Text("Standard").tag("standard"); Text("Large").tag("large") }; Toggle("Reduce motion", isOn: $api.reduceMotion); Toggle("Notifications preference", isOn: $api.notifications); Button("Save preferences") { Task { await api.savePreferences() } } }
                 Section("Privacy") { Picker("Online status", selection: $api.presenceVisibility) { Text("Contacts only").tag("contacts"); Text("Nobody").tag("nobody") }; Toggle("Allow contact requests", isOn: $api.allowContactRequests); Toggle("Find me by verified email", isOn: $api.discoverableByEmail); ForEach(api.blocks) { blocked in HStack { Text("@\(blocked.username)"); Spacer(); Button("Unblock") { Task { await api.unblock(blocked) } } } } }
                 Section("Registered devices") {
                     ForEach(api.devices) { device in HStack { VStack(alignment: .leading, spacing: 3) { Text(device.name).font(.system(size: 12, weight: .semibold)); Text(device.online == true ? "Online" : (device.last_seen_at ?? "Last active unavailable")).font(.system(size: 10)).foregroundStyle(.secondary) }; Spacer(); if device.current == true { Text("THIS DEVICE").font(.system(size: 8, weight: .bold)).foregroundStyle(SereinPalette.green) } else { Button("Revoke", role: .destructive) { Task { await api.revoke(device) } }.font(.system(size: 10)) } } }
                     Button("Revoke other devices", role: .destructive) { confirmRevokeOthers = true }
                 }
-                Section("Security status") { Text("The web client encrypts message text with AES-GCM using a shared passphrase, but this is not an audited end-to-end protocol. This native app does not yet encrypt or send messages.").font(.system(size: 11)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery and calls are not configured.").font(.system(size: 11)).foregroundStyle(.secondary) }
+                Section("Security status") { Text("Messaging is disabled across the current account flow. No conversation passphrase is requested; no reviewed device-key exchange, end-to-end message encryption, or native message delivery is implemented.").font(.system(size: 11)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery and calls are not configured.").font(.system(size: 11)).foregroundStyle(.secondary) }
                 Section { Button("Sign out", role: .destructive) { Task { await api.signOut() } } }
             }.listStyle(.insetGrouped).navigationTitle("Settings")
                 .task { await api.refreshAccountData() }
                 .confirmationDialog("Revoke other devices? Their local data cannot be remotely erased.", isPresented: $confirmRevokeOthers, titleVisibility: .visible) { Button("Revoke devices", role: .destructive) { Task { await api.revokeOthers() } } }
+                .sheet(isPresented: $showConnectionSettings) { SereinConnectionSettings(api: api) }
         }
         .onChange(of: api.theme) { _ in Task { await api.savePreferences() } }
         .onChange(of: api.fontScale) { _ in Task { await api.savePreferences() } }
@@ -225,6 +271,50 @@ private struct SereinNativeSettings: View {
         .onChange(of: api.presenceVisibility) { _ in Task { await api.savePreferences() } }
         .onChange(of: api.allowContactRequests) { _ in Task { await api.savePreferences() } }
         .onChange(of: api.discoverableByEmail) { _ in Task { await api.savePreferences() } }
+    }
+}
+
+private struct SereinConnectionSettings: View {
+    @ObservedObject var api: SereinAPI
+    @Environment(\.dismiss) private var dismiss
+    @State private var serverOrigin = ""
+    @State private var checking = false
+    @State private var showSwitchConfirmation = false
+    @State private var pendingOrigin = ""
+    @State private var localMessage = ""
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("Server") {
+                    TextField("https://serein.example.com", text: $serverOrigin).textInputAutocapitalization(.never).keyboardType(.URL).autocorrectionDisabled()
+                    Text("Enter only the HTTPS origin; paths, credentials, and query values are not accepted. Self-hosted servers are supported.").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Button { Task { checking = true; localMessage = ""; _ = await api.testServerConnection(serverOrigin); checking = false } } label: { HStack { if checking { ProgressView() }; Text(checking ? "Checking…" : "Check connection") } }.disabled(checking || serverOrigin.isEmpty)
+                    Text(api.connectionStatus).font(.system(size: 12, weight: .semibold))
+                    if !api.connectionDetails.isEmpty { Text(api.connectionDetails).font(.system(size: 10)).foregroundStyle(.secondary) }
+                    if !localMessage.isEmpty { Text(localMessage).font(.system(size: 10)).foregroundStyle(.red) }
+                }
+                Section { Button("Save server") { saveServer() }.disabled(checking) }
+            }
+            .navigationTitle("Connection")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
+            .confirmationDialog("Switch servers? You will be signed out of the current server.", isPresented: $showSwitchConfirmation, titleVisibility: .visible) {
+                Button("Sign out and switch", role: .destructive) { Task { await api.signOut(); do { try api.setServerOrigin(pendingOrigin); dismiss() } catch { localMessage = error.localizedDescription } } }
+                Button("Cancel", role: .cancel) { }
+            }
+            .onAppear { serverOrigin = api.apiBase }
+            .onChange(of: serverOrigin) { _ in localMessage = "" }
+        }
+    }
+    private func normalizedInput() -> String? {
+        guard let components = URLComponents(string: serverOrigin.trimmingCharacters(in: .whitespacesAndNewlines)), components.scheme?.lowercased() == "https", let host = components.host, !host.isEmpty, components.user == nil, components.password == nil, components.path.isEmpty || components.path == "/", components.query == nil, components.fragment == nil else { return nil }
+        return "https://\(host)" + (components.port.map { ":\($0)" } ?? "")
+    }
+    private func saveServer() {
+        guard let normalized = normalizedInput() else { localMessage = "Use an HTTPS server origin without a path, credentials, or query values."; return }
+        guard api.connectionTestedOrigin == normalized else { localMessage = "Check this server successfully before saving it."; return }
+        if api.signedIn && normalized != api.apiBase { pendingOrigin = normalized; showSwitchConfirmation = true; return }
+        do { try api.setServerOrigin(normalized); dismiss() } catch { localMessage = error.localizedDescription }
     }
 }
 

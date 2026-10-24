@@ -34,6 +34,11 @@ for relpath in product_manifests:
     package_version = manifest.get("package", {}).get("version")
     if package_version != version:
         sys.exit(f"{relpath}: package.version={package_version!r}; expected VERSION={version!r}")
+web_config = (ROOT / "frontend/web/config.js").read_text(encoding="utf-8")
+web_version = re.search(r"version\s*:\s*[\"']([^\"']+)[\"']", web_config)
+if not web_version or web_version.group(1) != version:
+    sys.exit(f"frontend/web/config.js version must match VERSION={version!r}")
+
 core_src = (ROOT / "crates/serein-core/src/lib.rs").read_text(encoding="utf-8")
 if 'concat!(env!("CARGO_PKG_VERSION"), "\\0")' not in core_src:
     sys.exit("Shared core C ABI version must be derived from CARGO_PKG_VERSION, not hard-coded")
@@ -51,6 +56,12 @@ if not marketing_versions or any(v.strip() != base_version for v in marketing_ve
         "iOS project MARKETING_VERSION must match the numeric X.Y.Z part of VERSION "
         f"({base_version}); found {marketing_versions!r}"
     )
+ios_whats_new_versions = re.findall(r"INFOPLIST_KEY_SereinVersion\s*=\s*[\"']?([^;\"']+)", ios_project)
+if not ios_whats_new_versions or any(v.strip() != version for v in ios_whats_new_versions):
+    sys.exit(f"iOS What's New version must match VERSION={version!r}; found {ios_whats_new_versions!r}")
+ios_build_numbers = re.findall(r"CURRENT_PROJECT_VERSION\s*=\s*([^;]+);", ios_project)
+if not ios_build_numbers or len(set(v.strip() for v in ios_build_numbers)) != 1:
+    sys.exit(f"iOS Debug/Release build numbers must be present and match; found {ios_build_numbers!r}")
 ios_floors = re.findall(r"IPHONEOS_DEPLOYMENT_TARGET\s*=\s*([^;]+);", ios_project)
 if not ios_floors or any(v.strip() != "15.0" for v in ios_floors):
     sys.exit(f"iOS deployment target must remain 15.0; found {ios_floors!r}")
@@ -83,7 +94,7 @@ if ref.startswith("refs/tags/v"):
         )
 
 print(
-    f"Version check passed: {version}; Cargo packages, Android, and iOS are aligned; "
+    f"Version check passed: {version}; Cargo, web, Android, and iOS version metadata are aligned; "
     "platform floors are Android API 26 / iOS 15.0."
 )
 if ref.startswith("refs/tags/"):

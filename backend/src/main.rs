@@ -196,6 +196,12 @@ fn api_error(status: StatusCode, message: &'static str) -> Response { (status, J
 fn verification_response(status:StatusCode,email:&str,message:&'static str,delivery:&'static str)->Response{
     (status,Json(serde_json::json!({"error":message,"verification":{"required":true,"verified":false,"email":email,"delivery":delivery}}))).into_response()
 }
+fn resend_cooldown_response(seconds:u64)->Response{
+    let retry=seconds.clamp(1,60);
+    let mut response=(StatusCode::TOO_MANY_REQUESTS,Json(serde_json::json!({"error":"please wait before requesting another code","retry_after_seconds":retry}))).into_response();
+    if let Ok(value)=HeaderValue::try_from(retry.to_string()){response.headers_mut().insert(header::RETRY_AFTER,value);}
+    response
+}
 fn account_unique_conflict(constraint: Option<&str>) -> Option<&'static str> {
     match constraint {
         Some("accounts_username_key") => Some("That username is already taken. Choose another username."),
@@ -265,7 +271,7 @@ async fn register(State(state):State<AppState>,Json(input):Json<RegisterInput>)-
             if same_account&&!verified&&password_matches{
                 match ensure_verification_challenge(&state.db,&state.mailer,*user_id,stored_email).await{
                     Ok(())=>return verification_response(StatusCode::ACCEPTED,stored_email,"This account needs email verification. Check your inbox or resend the code after the short wait.","email"),
-                    Err(error) if error=="cooldown"||error=="send_limit"=>return verification_response(StatusCode::ACCEPTED,stored_email,"This account needs email verification. Check your inbox or wait briefly before requesting another code.","email"),
+                    Err(error) if cooldown_seconds(&error).is_some()||error=="send_limit"=>return verification_response(StatusCode::ACCEPTED,stored_email,"This account needs email verification. Check your inbox or wait briefly before requesting another code.","email"),
                     Err(error)=>{
                         warn!(provider=state.mailer.provider_name(),failure=otp_failure_kind(&error),provider_status=otp_provider_status(&error),"verification delivery could not be prepared for an existing unverified account");
                         return verification_response(StatusCode::SERVICE_UNAVAILABLE,stored_email,"Your account is saved but a verification code is not currently available. Try again shortly.","unavailable");
@@ -342,7 +348,8 @@ async fn resend_verification(State(state):State<AppState>,Json(input):Json<Resen
     if let Some((user_id,false,email))=account{
         if let Err(error)=issue_verification_code(&state.db,&state.mailer,user_id,&email,true).await{
             warn!(provider=state.mailer.provider_name(),failure=otp_failure_kind(&error),provider_status=otp_provider_status(&error),"verification resend failed");
-            if error=="cooldown"||error=="send_limit"{return api_error(StatusCode::TOO_MANY_REQUESTS,"please wait before requesting another code");}
+            if let Some(seconds)=cooldown_seconds(&error){return resend_cooldown_response(seconds);}
+            if error=="send_limit"{return api_error(StatusCode::TOO_MANY_REQUESTS,"daily verification-code send limit reached; try again later");}
             return api_error(StatusCode::SERVICE_UNAVAILABLE,"verification email could not be sent");
         }
     }
@@ -355,12 +362,11 @@ async fn issue_verification_code(db:&PgPool,mailer:&mail::Mailer,user_id:Uuid,em
     let salt=SaltString::generate(&mut OsRng);let code_hash=Argon2::default().hash_password(code.as_bytes(),&salt).map_err(|e|format!("OTP hash failed: {e}"))?.to_string();
     let mut tx=db.begin().await.map_err(|e|format!("OTP transaction failed: {e}"))?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text),hashtext('email-verification'))").bind(user_id.to_string()).execute(&mut *tx).await.map_err(|e|format!("OTP lock failed: {e}"))?;
-    let old=sqlx::query_as::<_,(i16,bool,bool)>("SELECT send_count,window_started_at>now()-interval '24 hours',resend_after>now() FROM email_verification_challenges WHERE user_id=$1 FOR UPDATE").bind(user_id).fetch_optional(&mut *tx).await.map_err(|e|format!("OTP lookup failed: {e}"))?;
+    let old=sqlx::query_as::<_,(i16,bool,bool,i64)>("SELECT send_count,window_started_at>now()-interval '24 hours',resend_after>now(),GREATEST(1,CEIL(EXTRACT(EPOCH FROM (resend_after-now()))))::BIGINT FROM email_verification_challenges WHERE user_id=$1 FOR UPDATE").bind(user_id).fetch_optional(&mut *tx).await.map_err(|e|format!("OTP lookup failed: {e}"))?;
     let send_count=match old{
-        None if resend=>return Err("cooldown".into()),
         None=>1,
-        Some((count,active,waiting))=>{
-            if resend&&waiting{return Err("cooldown".into());}
+        Some((count,active,waiting,retry_after))=>{
+            if resend&&waiting{return Err(format!("cooldown:{retry_after}"));}
             if resend&&active&&count>=5{return Err("send_limit".into());}
             if active{count.saturating_add(1)}else{1}
         }
@@ -379,13 +385,20 @@ async fn ensure_verification_challenge(db:&PgPool,mailer:&mail::Mailer,user_id:U
     issue_verification_code(db,mailer,user_id,email,exists).await
 }
 
+fn cooldown_seconds(error:&str)->Option<u64>{error.strip_prefix("cooldown:").and_then(|value|value.parse().ok()).or_else(||(error=="cooldown").then_some(60))}
 fn otp_provider_status(error:&str)->Option<u16>{error.strip_prefix("mail API returned HTTP ").and_then(|value|value.split_whitespace().next()).and_then(|value|value.parse().ok())}
 
 fn otp_failure_kind(error:&str)->&'static str{
-    if error=="cooldown"{"cooldown"}
+    if cooldown_seconds(error).is_some(){"cooldown"}
     else if error=="send_limit"{"send_limit"}
     else if error.starts_with("mail API")||error=="SMTP delivery failed"||error=="Email delivery is not configured"||error=="email delivery is not configured"{"provider_delivery"}
-    else{"challenge_storage_or_generation"}
+    else if error.starts_with("OTP hash"){"challenge_hash_generation"}
+    else if error.starts_with("OTP transaction"){"challenge_db_begin"}
+    else if error.starts_with("OTP lock"){"challenge_db_lock"}
+    else if error.starts_with("OTP lookup")||error.starts_with("verification challenge lookup"){"challenge_db_lookup"}
+    else if error.starts_with("OTP save"){"challenge_db_write"}
+    else if error.starts_with("OTP commit"){"challenge_db_commit"}
+    else{"challenge_generation_or_delivery"}
 }
 
 async fn login(State(state):State<AppState>,Json(input):Json<LoginInput>)->Response{
@@ -394,7 +407,7 @@ async fn login(State(state):State<AppState>,Json(input):Json<LoginInput>)->Respo
     let Some((user_id,username,email,display_name,password_hash,email_verified))=row else{return api_error(StatusCode::UNAUTHORIZED,"invalid username/email or password")};let parsed=match PasswordHash::new(&password_hash){Ok(p)=>p,Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"stored credential could not be verified")};if Argon2::default().verify_password(input.password.as_bytes(),&parsed).is_err(){return api_error(StatusCode::UNAUTHORIZED,"invalid username/email or password");}if !email_verified{
         let (message,delivery)=match ensure_verification_challenge(&state.db,&state.mailer,user_id,&email).await{
             Ok(())=>("Email verification is required. Check your inbox for the code.","email"),
-            Err(error) if error=="cooldown"=>("Email verification is required. A code was recently requested; wait briefly before resending.","email"),
+            Err(error) if cooldown_seconds(&error).is_some()=>("Email verification is required. A code was recently requested; wait briefly before resending.","email"),
             Err(error) if error=="send_limit"=>("Email verification is required. The resend limit was reached; try again later.","limited"),
             Err(error)=>{warn!(provider=state.mailer.provider_name(),failure=otp_failure_kind(&error),provider_status=otp_provider_status(&error),"verification email could not be prepared after unverified sign-in");("Email verification is required, but code delivery is currently unavailable. Try again shortly.","unavailable")}
         };
@@ -800,7 +813,7 @@ async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
 
 #[cfg(test)]
 mod tests {
-    use super::{account_unique_conflict, history_page_limit, normalise_username, normalize_web_origin, registration_password_requirements, token_hash, valid_ciphertext_parts, valid_email, valid_font_scale, valid_theme, valid_username};
+    use super::{account_unique_conflict, cooldown_seconds, history_page_limit, normalise_username, normalize_web_origin, registration_password_requirements, token_hash, valid_ciphertext_parts, valid_email, valid_font_scale, valid_theme, valid_username};
     #[test] fn duplicate_username_and_email_return_distinct_safe_messages(){assert!(account_unique_conflict(Some("accounts_username_key")).unwrap().contains("username"));assert!(account_unique_conflict(Some("accounts_email_key")).unwrap().contains("email"));assert!(account_unique_conflict(Some("unrelated_constraint")).is_none());}
     #[test] fn username_normalisation_is_ascii_lowercase(){assert_eq!(normalise_username("  Alice_7 "),"alice_7");}
     #[test] fn username_validation_rejects_short_and_unsafe_values(){assert!(valid_username("alice.7"));assert!(!valid_username("ab"));assert!(!valid_username("bad name"));assert!(!valid_username("Upper"));}
@@ -810,5 +823,6 @@ mod tests {
     #[test] fn account_setting_values_are_allowlisted(){assert!(valid_theme("dark"));assert!(!valid_theme("ultraviolet"));assert!(valid_font_scale("large"));assert!(!valid_font_scale("huge"));}
     #[test] fn ciphertext_envelopes_require_gcm_iv_and_tag(){assert!(valid_ciphertext_parts("AAAAAAAAAAAAAAAA","AAAAAAAAAAAAAAAAAAAAAA=="));assert!(!valid_ciphertext_parts("short","AAAAAAAAAAAAAAAAAAAAAA=="));assert!(!valid_ciphertext_parts("AAAAAAAAAAAAAAAA","AA=="));}
     #[test] fn registration_password_policy_requires_length_case_digit_and_byte_limit(){assert_eq!(registration_password_requirements("Serein123"),[true,true,true,true,true]);assert_eq!(registration_password_requirements("password1"),[true,false,true,true,true]);assert_eq!(registration_password_requirements("PASSWORD1"),[true,true,false,true,true]);assert_eq!(registration_password_requirements("Password"),[true,true,true,false,true]);assert_eq!(registration_password_requirements("Abc123"),[false,true,true,true,true]);assert!(!registration_password_requirements(&format!("{}Aa1", "x".repeat(1022)))[4]);}
+    #[test] fn resend_cooldown_seconds_are_parsed_and_bounded_by_response(){assert_eq!(cooldown_seconds("cooldown:59"),Some(59));assert_eq!(cooldown_seconds("cooldown"),Some(60));assert_eq!(cooldown_seconds("send_limit"),None);}
     #[test] fn web_origins_are_exact_https_origins_and_local_http_only(){assert_eq!(normalize_web_origin("https://web.example.org/" ).unwrap(),"https://web.example.org");assert_eq!(normalize_web_origin("https://web.example.org:8443").unwrap(),"https://web.example.org:8443");assert!(normalize_web_origin("https://web.example.org/path").is_err());assert!(normalize_web_origin("http://web.example.org").is_err());assert_eq!(normalize_web_origin("http://localhost:8080").unwrap(),"http://localhost:8080");}
 }

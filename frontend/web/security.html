@@ -23,7 +23,7 @@
     <section class="security-card">
       <span class="security-state">Not suitable for sensitive conversations</span>
       <h2>What is currently protected</h2>
-      <p>The web client encrypts message text with AES-GCM before sending it to the relay. The passphrase is shared by conversation participants; this key setup is not a vetted identity protocol and has not received an independent security audit. The relay can still observe routing metadata.</p>
+      <p>Encrypted messaging is disabled in this build. Device-generated identity/session keys, authenticated key exchange, rotation, and forward secrecy are not implemented or independently reviewed. A legacy shared-passphrase prototype is not part of the account flow and must not be treated as end-to-end protection.</p>
       <ul>
         <li>There is no verified device identity, ratchet, or forward secrecy.</li>
         <li>Room and device identifiers are routing metadata, not authentication credentials.</li>
