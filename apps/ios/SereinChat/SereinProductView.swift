@@ -1,11 +1,25 @@
 import SwiftUI
 import UIKit
 import AVFoundation
+import UserNotifications
 import UniformTypeIdentifiers
+
+private struct SereinBackupDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.data] }
+    var bytes: Data
+    init(bytes: Data) { self.bytes = bytes }
+    init(configuration: ReadConfiguration) throws {
+        guard let contents = configuration.file.regularFileContents else { throw SereinBackupStore.BackupError.malformed }
+        bytes = contents
+    }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: bytes) }
+}
 
 struct SereinProductRootView: View {
     @StateObject private var api = SereinAPI()
     @Environment(\.dynamicTypeSize) private var systemDynamicTypeSize
+    @AppStorage("serein.restore-prompt-done") private var restorePromptDone = false
+    @State private var showingRestoreOnboarding = false
     @AppStorage("serein.theme") private var theme = "system"
     @AppStorage("serein.whats-new.version") private var lastWhatsNewVersion = ""
     @State private var showingWhatsNew = false
@@ -32,8 +46,17 @@ struct SereinProductRootView: View {
         .alert("Serein", isPresented: $showingError) {
             Button("OK", role: .cancel) { api.errorMessage = nil }
         } message: { Text(api.errorMessage ?? "") }
-        .onAppear { if lastWhatsNewVersion != displayedAppVersion { showingWhatsNew = true } }
-        .sheet(isPresented: $showingWhatsNew) { SereinWhatsNewView(version: displayedAppVersion, isFirstInstall: lastWhatsNewVersion.isEmpty) { lastWhatsNewVersion = displayedAppVersion; showingWhatsNew = false } }
+        .onAppear { if lastWhatsNewVersion != displayedAppVersion { showingWhatsNew = true } else { scheduleRestorePrompt() } }
+        .onChange(of: api.user?.id) { userID in if userID != nil { scheduleRestorePrompt() } }
+        .sheet(isPresented: $showingWhatsNew) { SereinWhatsNewView(version: displayedAppVersion, isFirstInstall: lastWhatsNewVersion.isEmpty) { lastWhatsNewVersion = displayedAppVersion; showingWhatsNew = false; scheduleRestorePrompt() } }
+        .sheet(isPresented: $showingRestoreOnboarding) { SereinBackupRestoreOnboarding(api: api) { restorePromptDone = true; showingRestoreOnboarding = false } }
+    }
+    @MainActor private func scheduleRestorePrompt() {
+        guard api.signedIn, !restorePromptDone else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            if showingWhatsNew { scheduleRestorePrompt(); return }
+            if api.signedIn && !restorePromptDone { showingRestoreOnboarding = true }
+        }
     }
 }
 
@@ -50,6 +73,7 @@ private struct SereinWhatsNewView: View {
                     Label("Contact, privacy, and registered-device settings", systemImage: "person.2")
                     Label("Check or change your self-hosted server connection", systemImage: "network")
                     Label("Native and web chats require explicit per-device fingerprint verification", systemImage: "lock.shield")
+                    Label("Notification permissions can be requested in Settings; sound is configurable", systemImage: "bell.badge")
                 }
             }.listStyle(.insetGrouped).navigationTitle(isFirstInstall ? "Welcome to Serein" : "What’s New")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Continue", action: onContinue) } }
@@ -197,11 +221,39 @@ private struct SereinNativeChats: View {
                 if api.contacts.isEmpty {
                     VStack(spacing: 12) { Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 36, relativeTo: .body)).foregroundStyle(SereinPalette.green); Text("No contacts yet").font(.system(size: 20, weight: .bold, relativeTo: .body)); Text("Add a username from Contacts, verify the device fingerprints, and start an encrypted conversation.").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(.horizontal, 28); Button("Refresh") { Task { await api.refreshAccountData() } } }
                 } else {
-                    List(api.contacts) { contact in NavigationLink(destination: SereinNativeConversation(api: api, contact: contact)) { HStack(spacing: 11) { SereinAvatar(name: contact.display_name, size: 42); VStack(alignment: .leading, spacing: 3) { Text(contact.display_name).font(.system(size: 13, weight: .semibold, relativeTo: .body)); Text("@\(contact.username) · \(contact.online ? "Online" : "Offline")").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Spacer(); Text("\(contact.devices.count) devices").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.tertiary) } } }
-                        .listStyle(.insetGrouped)
+                    List(api.contacts) { contact in
+                        NavigationLink(destination: SereinNativeConversation(api: api, contact: contact)) {
+                            HStack(spacing: 11) {
+                                SereinAvatar(name: contact.display_name, size: 42)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(contact.display_name).font(.system(size: 13, weight: .semibold, relativeTo: .body))
+                                    Text(contact.isDeleted ? "Deleted account · archived read-only chat" : "@\(contact.username) · \(contact.online ? "Online" : "Offline")").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if !contact.isDeleted { Text("\(contact.devices.count) devices").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.tertiary) }
+                            }
+                        }
+                    }.listStyle(.insetGrouped)
                 }
             }.navigationTitle("Chats").toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button { Task { await api.refreshAccountData() } } label: { Image(systemName: "arrow.clockwise") } } }
         }
+    }
+}
+
+private struct SereinConversationSystemEvent: View {
+    let text: String
+    let timestamp: String
+    private var formattedTimestamp: String {
+        let parser = ISO8601DateFormatter()
+        guard let date = parser.date(from: timestamp) else { return timestamp }
+        let formatter = DateFormatter(); formatter.dateStyle = .medium; formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+    var body: some View {
+        VStack(spacing: 4) { Text(text); Text(formattedTimestamp).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.tertiary) }
+            .font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            .padding(.horizontal, 14).padding(.vertical, 9).frame(maxWidth: .infinity)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -222,14 +274,15 @@ private struct SereinNativeConversation: View {
     var body: some View {
         VStack(spacing: 10) {
             HStack {
-                SereinStatusPill(title: "\(engine.activeDevices.count) active device(s) · \(contact.online ? "online" : "offline")")
+                SereinStatusPill(title: (contact.isDeleted || engine.archived) ? "Archived · read only" : "\(engine.activeDevices.count) active device(s) · \(contact.online ? "online" : "offline")")
                 Spacer()
-                Button { showKeys = true } label: { Label("Keys", systemImage: "key.horizontal").font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
+                if !contact.isDeleted && !engine.archived { Button { showKeys = true } label: { Label("Keys", systemImage: "key.horizontal").font(.system(size: 11, weight: .semibold, relativeTo: .body)) } }
             }
             Text(engine.status).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
+                        if let connected = contact.connected_at { SereinConversationSystemEvent(text: "You and \(engine.peerDisplayName.replacingOccurrences(of: " (Deleted User)", with: "")) are now friends.", timestamp: connected) }
                         ForEach(engine.messages) { message in
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(message.text).font(.system(size: 14, relativeTo: .body)).textSelection(.enabled)
@@ -252,24 +305,26 @@ private struct SereinNativeConversation: View {
                                 .background(message.mine ? SereinPalette.paleMint.opacity(0.7) : Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 13))
                                 .id(message.id)
                         }
+                        if (contact.isDeleted || engine.archived), let deleted = engine.deletedAt ?? contact.deleted_at { SereinConversationSystemEvent(text: "\(engine.peerDisplayName.replacingOccurrences(of: " (Deleted User)", with: "")) deleted his account. No new messages are allowed.", timestamp: deleted) }
                     }.padding(.vertical, 8)
                 }.onChange(of: engine.messages.count) { _ in if let last = engine.messages.last { proxy.scrollTo(last.id, anchor: .bottom) } }
             }
             HStack(alignment: .bottom, spacing: 8) {
                 Button { showFilePicker = true } label: { Image(systemName: "paperclip").font(.system(size: 19, relativeTo: .body)).frame(width: 38, height: 40) }
-                    .buttonStyle(.bordered).disabled(!engine.ready)
-                TextField("Write an encrypted message…", text: $draft).textFieldStyle(.roundedBorder).disabled(!engine.ready)
+                    .buttonStyle(.bordered).disabled(!engine.ready || contact.isDeleted || engine.archived)
+                TextField("Write an encrypted message…", text: $draft).textFieldStyle(.roundedBorder).disabled(!engine.ready || contact.isDeleted || engine.archived)
                 Button { let value = draft; draft = ""; Task { await engine.sendText(value) } } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 28, relativeTo: .body)) }
-                    .disabled(!engine.ready || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!engine.ready || contact.isDeleted || engine.archived || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding()
-        .navigationTitle(contact.display_name).navigationBarTitleDisplayMode(.inline)
-        .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button { Task { do { try await engine.refreshPeerKeys() } catch { } } } label: { Image(systemName: "arrow.clockwise") } } }
+        .navigationTitle(engine.peerDisplayName).navigationBarTitleDisplayMode(.inline)
+        .toolbar { if !contact.isDeleted && !engine.archived { ToolbarItem(placement: .navigationBarTrailing) { Button { Task { do { try await engine.refreshPeerKeys() } catch { } } } label: { Image(systemName: "arrow.clockwise") } } } }
         .task {
             if !engine.ready { await engine.initialize() }
+            guard !contact.isDeleted && !engine.archived else { return }
             var cycles = 0
-            while !Task.isCancelled {
+            while !Task.isCancelled && !engine.archived {
                 await engine.poll(); cycles += 1
                 if cycles % 12 == 0 { try? await engine.refreshPeerKeys() }
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -359,16 +414,49 @@ private struct SereinNativeContacts: View {
             List {
                 Section("Incoming requests") {
                     let incoming = api.contactRequests.filter { $0.direction == "incoming" }
-                    if incoming.isEmpty { Text("No pending requests.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
-                    ForEach(incoming) { request in HStack { VStack(alignment: .leading) { Text(request.display_name).font(.system(size: 12, weight: .semibold, relativeTo: .body)); Text("@\(request.username)").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Spacer(); Button("Accept") { Task { await api.acceptContactRequest(request) } }.font(.system(size: 10, weight: .semibold, relativeTo: .body)); Button("Decline", role: .destructive) { Task { await api.dismissContactRequest(request) } }.font(.system(size: 10, relativeTo: .body)) } }
+                    if incoming.isEmpty { Text("No incoming requests.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
+                    ForEach(incoming) { request in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(request.display_name).font(.system(size: 12, weight: .semibold, relativeTo: .body))
+                                Text("@\(request.username) · Received \(request.created_at)").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Accept") { Task { await api.acceptContactRequest(request) } }.font(.system(size: 10, weight: .semibold, relativeTo: .body))
+                            Button("Decline", role: .destructive) { Task { await api.dismissContactRequest(request) } }.font(.system(size: 10, relativeTo: .body))
+                        }
+                    }
+                }
+                Section("Sent requests") {
+                    let sent = api.contactRequests.filter { $0.direction == "sent" }
+                    if sent.isEmpty { Text("No outgoing requests.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
+                    ForEach(sent) { request in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(request.display_name).font(.system(size: 12, weight: .semibold, relativeTo: .body))
+                                Text("Request sent · awaiting acceptance · \(request.created_at)").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Cancel", role: .destructive) { Task { await api.dismissContactRequest(request) } }.font(.system(size: 10, relativeTo: .body))
+                        }
+                    }
                 }
                 Section("Contacts") {
-                    ForEach(api.contacts) { contact in HStack(spacing: 11) { SereinAvatar(name: contact.display_name); VStack(alignment: .leading) { Text(contact.display_name).font(.system(size: 13, weight: .semibold, relativeTo: .body)); Text("@\(contact.username) · \(contact.devices.count) device(s)").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) } }.swipeActions { Button("Remove", role: .destructive) { Task { await api.removeContact(contact) } }; Button("Block", role: .destructive) { blockTarget = contact; confirmBlock = true } }
+                    ForEach(api.contacts) { contact in
+                        HStack(spacing: 11) {
+                            SereinAvatar(name: contact.display_name)
+                            VStack(alignment: .leading) {
+                                Text(contact.display_name).font(.system(size: 13, weight: .semibold, relativeTo: .body))
+                                Text(contact.isDeleted ? "Deleted account · archived read-only chat" : "@\(contact.username) · \(contact.devices.count) device(s)").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                            }
+                        }
+                        .swipeActions { if !contact.isDeleted { Button("Remove", role: .destructive) { Task { await api.removeContact(contact) } }; Button("Block", role: .destructive) { blockTarget = contact; confirmBlock = true } } }
+                    }
                 }
             }
             .navigationTitle("Contacts")
             .toolbar { ToolbarItem(placement: .navigationBarLeading) { Button { Task { await api.refreshAccountData() } } label: { Image(systemName: "arrow.clockwise") } }; ToolbarItem(placement: .navigationBarTrailing) { Button { showAdd = true } label: { Image(systemName: "person.badge.plus") } } }
-            .alert("Request a connection", isPresented: $showAdd) { TextField("Username or verified email", text: $newIdentity); Button("Cancel", role: .cancel) { }; Button("Send request") { Task { await api.addContact(identity: newIdentity); newIdentity = "" } } } message: { Text("The other person must accept. The server response does not reveal whether an account matched.") }
+            .alert("Request a connection", isPresented: $showAdd) { TextField("Username or verified email", text: $newIdentity); Button("Cancel", role: .cancel) { }; Button("Send request") { Task { await api.addContact(identity: newIdentity); newIdentity = "" } } } message: { Text("The other person must accept. Sent and received requests show their timestamped pending status; acceptance creates a fresh conversation.") }
             .confirmationDialog("Block this account?", isPresented: $confirmBlock, titleVisibility: .visible) { if let target = blockTarget { Button("Block @\(target.username)", role: .destructive) { Task { await api.block(target) } } }; Button("Cancel", role: .cancel) { blockTarget = nil } } message: { Text("Blocking removes the contact link and prevents future requests and message delivery. Existing encrypted history remains stored.") }
         }
     }
@@ -425,31 +513,151 @@ private struct SereinNativeSettings: View {
     @ObservedObject var api: SereinAPI
     @State private var confirmRevokeOthers = false
     @State private var showConnectionSettings = false
+    @State private var showDeleteAccount = false
+    @State private var notificationStatus = "Checking notification permission…"
+    @State private var notificationsAuthorized = false
+    @State private var showingBackupExporter = false
+    @State private var creatingBackup = false
+    @State private var backupDocument = SereinBackupDocument(bytes: Data())
+    @State private var backupFilename = "serein-backup.srbk"
+    @State private var backupStatus = ""
+    @AppStorage("serein.notifications.sound") private var notificationSound = true
     var body: some View {
         NavigationView {
             List {
                 Section("Account") { if let user = api.user { SereinDetailRow(title: "Name", value: user.display_name); SereinDetailRow(title: "Username", value: "@\(user.username)"); SereinDetailRow(title: "Email", value: user.email); SereinDetailRow(title: "Verification", value: user.email_verified ? "Verified" : "Not verified") } }
                 Section("Connection") { SereinDetailRow(title: "Server origin", value: api.apiBase); SereinDetailRow(title: "Last checked", value: api.connectionTestedOrigin.isEmpty ? "Not checked" : api.connectionTestedOrigin); SereinDetailRow(title: "Status", value: api.connectionStatus); if !api.connectionDetails.isEmpty { Text(api.connectionDetails).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Button("Manage connection") { showConnectionSettings = true } }
-                Section("Appearance") { Picker("Theme", selection: $api.theme) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }; Picker("Text size", selection: $api.fontScale) { Text("System default").tag("system"); Text("Large").tag("large"); Text("Extra large").tag("extra_large") }; Toggle("Reduce motion", isOn: $api.reduceMotion); Toggle("Notifications preference", isOn: $api.notifications); Button("Save preferences") { Task { await api.savePreferences() } } }
+                Section("Appearance") { Picker("Theme", selection: $api.theme) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }; Picker("Text size", selection: $api.fontScale) { Text("System default").tag("system"); Text("Large").tag("large"); Text("Extra large").tag("extra_large") }; Toggle("Reduce motion", isOn: $api.reduceMotion); Button("Save preferences") { Task { await api.savePreferences() } } }
+                Section("Encrypted backups") {
+                    Text("Export a timestamped encrypted .srbk snapshot to a location you choose in Files. The stable account-identity key is used locally; the account password is not used. Messages and attachment references are included, but media bytes are not. Restore is only offered during initial authenticated setup; confirmed skip is final and no later Settings restore is available.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary)
+                    Button(creatingBackup ? "Preparing encrypted backup…" : "Create encrypted backup") { createEncryptedBackup() }.disabled(creatingBackup || api.user == nil)
+                    if !backupStatus.isEmpty { Text(backupStatus).font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
+                }
+                Section("Notifications") {
+                    Text("Permission is requested when you enable notifications. Serein can post a local notification when an open conversation syncs; background push delivery is not configured. Sound is a per-device preference and remains subject to iOS notification settings.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary)
+                    Text(notificationStatus).font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary)
+                    Button(api.notifications && notificationsAuthorized ? "Turn off notifications" : "Enable notifications") { Task { await toggleNotifications() } }
+                    if notificationStatus.contains("Settings") { Button("Open iOS Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } } }
+                    Toggle("Notification sound", isOn: $notificationSound).disabled(!api.notifications || !notificationsAuthorized)
+                }
                 Section("Privacy") { Picker("Online status", selection: $api.presenceVisibility) { Text("Contacts only").tag("contacts"); Text("Nobody").tag("nobody") }; Toggle("Allow contact requests", isOn: $api.allowContactRequests); Toggle("Find me by verified email", isOn: $api.discoverableByEmail); ForEach(api.blocks) { blocked in HStack { Text("@\(blocked.username)"); Spacer(); Button("Unblock") { Task { await api.unblock(blocked) } } } } }
                 Section("Registered devices") {
                     ForEach(api.devices) { device in HStack { VStack(alignment: .leading, spacing: 3) { Text(device.name).font(.system(size: 12, weight: .semibold, relativeTo: .body)); Text(device.online == true ? "Online" : (device.last_seen_at ?? "Last active unavailable")).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Spacer(); if device.current == true { Text("THIS DEVICE").font(.system(size: 10, weight: .bold, relativeTo: .body)).foregroundStyle(SereinPalette.green) } else { Button("Revoke", role: .destructive) { Task { await api.revoke(device) } }.font(.system(size: 10, relativeTo: .body)) } } }
                     Button("Revoke other devices", role: .destructive) { confirmRevokeOthers = true }
                 }
                 Section("Security status") { Text("Web and native chat use separate Layer 1/Layer 2 per-device P-256 ECDH key pairs, HKDF-SHA256, and nested AES-GCM after combined local fingerprint verification. Native private keys use Secure Enclave when available and otherwise Keychain-protected CryptoKit keys; local history uses a device-only Keychain key. This implementation has not been independently reviewed and does not provide forward secrecy, automatic key rotation/recovery, or background message delivery. Use test data only.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery and calls are not configured.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
+                Section("Danger zone") { Text("Account deletion removes server records, sessions, device keys, and this iPhone’s account-scoped local history. Contacts retain a read-only archived chat. Legacy downloads in shared Serein/Downloads cannot yet be attributed to this account and may remain; newer downloads are account-scoped.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Button("Permanently delete account", role: .destructive) { showDeleteAccount = true }.sheet(isPresented: $showDeleteAccount) { SereinDeleteAccountSheet(api: api) } }
                 Section { Button("Sign out", role: .destructive) { Task { _ = await api.signOut() } } }
             }.listStyle(.insetGrouped).navigationTitle("Settings")
-                .task { await api.refreshAccountData() }
+                .task { await api.refreshAccountData(); await refreshNotificationStatus() }
                 .confirmationDialog("Revoke other devices? Their local data cannot be remotely erased.", isPresented: $confirmRevokeOthers, titleVisibility: .visible) { Button("Revoke devices", role: .destructive) { Task { await api.revokeOthers() } } }
                 .sheet(isPresented: $showConnectionSettings) { SereinConnectionSettings(api: api) }
+                .fileExporter(isPresented: $showingBackupExporter, document: backupDocument, contentType: .data, defaultFilename: backupFilename) { result in
+                    creatingBackup = false
+                    backupDocument = SereinBackupDocument(bytes: Data())
+                    switch result {
+                    case .success: backupStatus = "Encrypted snapshot saved. Keep the file somewhere safe; media files were not packaged."
+                    case .failure(let error): backupStatus = "Backup export did not complete: \\(error.localizedDescription)"
+                    }
+                }
         }
         .onChange(of: api.theme) { _ in Task { await api.savePreferences() } }
         .onChange(of: api.fontScale) { _ in Task { await api.savePreferences() } }
         .onChange(of: api.reduceMotion) { _ in Task { await api.savePreferences() } }
-        .onChange(of: api.notifications) { _ in Task { await api.savePreferences() } }
         .onChange(of: api.presenceVisibility) { _ in Task { await api.savePreferences() } }
         .onChange(of: api.allowContactRequests) { _ in Task { await api.savePreferences() } }
         .onChange(of: api.discoverableByEmail) { _ in Task { await api.savePreferences() } }
+    }
+    @MainActor private func createEncryptedBackup() {
+        guard let user = api.user else { backupStatus = "Sign in before creating a backup."; return }
+        do {
+            let local = try SereinLocalStore(accountID: user.id)
+            let messages = local.backupMessages()
+            guard messages.count <= SereinBackupStore.maximumMessages else { throw SereinBackupStore.BackupError.tooLarge }
+            let contactRows: [[String: Any]] = api.contacts.filter { !$0.isDeleted }.map { ["user_id": $0.user_id, "username": $0.username, "display_name": $0.display_name] }
+            let snapshot: [String: Any] = ["snapshot_version": 1, "created_at": ISO8601DateFormatter().string(from: Date()), "messages": messages, "contacts": contactRows, "media": ["included": false, "policy": "references-only"]]
+            creatingBackup = true; backupStatus = "Preparing encrypted snapshot…"
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let result = try SereinBackupStore.create(accountID: user.id, username: user.username, snapshot: snapshot)
+                    DispatchQueue.main.async {
+                        guard api.user?.id == user.id else { creatingBackup = false; backupStatus = "Account changed before export completed. Try again while signed in."; return }
+                        backupDocument = SereinBackupDocument(bytes: result.bytes)
+                        backupFilename = result.filename
+                        backupStatus = "Choose a durable location in Files. The app will not overwrite an earlier snapshot."
+                        showingBackupExporter = true
+                    }
+                } catch { DispatchQueue.main.async { creatingBackup = false; backupStatus = error.localizedDescription } }
+            }
+        } catch { backupStatus = error.localizedDescription }
+    }
+
+    private func refreshNotificationStatus() async {
+        let status = await api.notificationAuthorizationStatus()
+        switch status {
+        case .authorized, .provisional, .ephemeral: notificationsAuthorized = true; notificationStatus = api.notifications ? "Permission allowed · notifications enabled" : "Permission allowed · notifications currently off"
+        case .denied: notificationsAuthorized = false; notificationStatus = "Permission denied · open iOS Settings to allow notifications"
+        case .notDetermined: notificationsAuthorized = false; notificationStatus = "Not requested yet · tap Enable notifications to ask iOS"
+        @unknown default: notificationsAuthorized = false; notificationStatus = "Notification permission status is unavailable"
+        }
+    }
+    private func toggleNotifications() async {
+        if api.notifications && notificationsAuthorized {
+            _ = await api.setNotificationsEnabled(false)
+            await refreshNotificationStatus()
+            return
+        }
+        let result = await api.setNotificationsEnabled(true)
+        if !result {
+            let current = await api.notificationAuthorizationStatus()
+            notificationStatus = current == .denied ? "Permission denied · open iOS Settings to allow notifications" : "Permission was not granted; no notifications will be posted"
+        } else { notificationStatus = "Permission allowed · notifications enabled" }
+    }
+}
+
+private struct SereinDeleteAccountSheet: View {
+    @ObservedObject var api: SereinAPI
+    @Environment(\.dismiss) private var dismiss
+    @State private var password = ""
+    @State private var phrase = ""
+    @State private var deleting = false
+    @State private var error = ""
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("Permanent deletion") {
+                    Text("This removes the account, server-side data, credentials, device keys and sessions. Contacts retain a read-only archived conversation; the username may later be registered as a new identity.")
+                    Text("Legacy downloaded attachments in shared Serein/Downloads may remain because they have no account label; newer downloads are account-scoped.").foregroundStyle(.secondary)
+                }
+                Section("Confirm") {
+                    SecureField("Current password", text: $password).textContentType(.password)
+                    TextField("Type DELETE", text: $phrase).textInputAutocapitalization(.characters).autocorrectionDisabled()
+                }
+                if !error.isEmpty { Section { Text(error).foregroundStyle(.red) } }
+            }
+            .navigationTitle("Delete account")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(deleting) }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(deleting ? "Deleting…" : "Delete", role: .destructive) {
+                        guard phrase == "DELETE", !password.isEmpty else { error = "Enter your current password and type DELETE exactly."; return }
+                        deleting = true
+                        let secret = password; password = ""
+                        Task {
+                            let result = await api.deleteAccount(password: secret)
+                            deleting = false
+                            if result.deleted {
+                                UserDefaults.standard.removeObject(forKey: "serein.restore-prompt-done")
+                                dismiss()
+                                if !result.localDataCleared { api.errorMessage = "Account deleted and sessions revoked, but some local history or keys could not be cleared. Remove Serein app data from this device." }
+                            } else { error = result.error ?? "Account deletion could not be completed." }
+                            password = ""
+                        }
+                    }.disabled(deleting || phrase != "DELETE" || password.isEmpty)
+                }
+            }
+        }
     }
 }
 

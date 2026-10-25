@@ -43,6 +43,7 @@ final class SereinChatEngine {
     private volatile SereinLocalStore local;
     private volatile String status="Preparing protected device keys…";
     private volatile boolean ready;
+    private volatile boolean notificationsArmed;
     private volatile String cursorTime, cursorId;
     private volatile boolean busy;
     private static final long MAX_CLEAR_BYTES=64L*1024L*1024L;
@@ -62,6 +63,7 @@ final class SereinChatEngine {
     private void notifyUi(){if(listener!=null)listener.changed();}
 
     CompletableFuture<Void> initialize(){
+        if(contact.optBoolean("deleted")){return CompletableFuture.runAsync(()->{try{if(userId.isEmpty()||contactId.isEmpty())throw new IllegalStateException("Archived conversation identity is unavailable.");local=new SereinLocalStore(context,userId);ready=true;status="Archived conversation · this account was deleted · read-only";notifyUi();}catch(Exception error){throw new java.util.concurrent.CompletionException(error);}});}
         return CompletableFuture.supplyAsync(()->{
             try{if(userId.isEmpty()||deviceId.isEmpty())throw new IllegalStateException("Signed-in device identity is unavailable.");SereinAttachmentStore.cleanTemporaryFiles(context);pair=SereinDeviceCrypto.loadOrCreate(context,userId,deviceId);layer2Pair=SereinDeviceCrypto.loadOrCreateLayer2(context,userId,deviceId);local=new SereinLocalStore(context,userId);return null;}
             catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
@@ -71,7 +73,7 @@ final class SereinChatEngine {
                 catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
             });}catch(Exception error){return failed(error);}
         }).thenComposeAsync(ignored->refreshPeers()).thenRunAsync(()->{
-            try{ready=true;status=peerStatus();notifyUi();retryPending();poll();}
+            try{ready=true;status=peerStatus();notifyUi();retryPending();poll().whenComplete((done,error)->notificationsArmed=true);}
             catch(Exception error){status="Local message history could not be opened.";notifyUi();}
         });
     }
@@ -80,12 +82,13 @@ final class SereinChatEngine {
         return api.contactsFuture().thenComposeAsync(value->{
             if(!(value instanceof JSONArray))return failed(new IllegalStateException("The accepted contact list could not be refreshed."));
             try {
-                boolean found=false;JSONArray contacts=(JSONArray)value;for(int i=0;i<contacts.length();i++){JSONObject latest=contacts.optJSONObject(i);if(latest!=null&&contactId.equals(latest.optString("user_id"))){synchronized(contact){contact.remove("devices");contact.remove("online");contact.put("devices",latest.optJSONArray("devices") == null?new JSONArray():latest.optJSONArray("devices"));contact.put("online",latest.optBoolean("online"));}found=true;break;}}
+                boolean found=false;JSONArray contacts=(JSONArray)value;for(int i=0;i<contacts.length();i++){JSONObject latest=contacts.optJSONObject(i);if(latest!=null&&contactId.equals(latest.optString("user_id"))){if(latest.optBoolean("deleted")){synchronized(contact){contact.put("deleted",true);contact.put("display_name",latest.optString("display_name",contact.optString("display_name")));contact.put("deleted_at",latest.optString("deleted_at",""));contact.put("connected_at",latest.optString("connected_at",""));contact.put("devices",new JSONArray());contact.put("online",false);}synchronized(this){peers.clear();}status="Archived conversation · this account was deleted · read-only";notifyUi();return CompletableFuture.completedFuture(new JSONObject().put("_deleted",true));}synchronized(contact){contact.put("display_name",latest.optString("display_name",contact.optString("display_name")));contact.put("connected_at",latest.optString("connected_at",contact.optString("connected_at","")));contact.remove("devices");contact.remove("online");contact.put("devices",latest.optJSONArray("devices") == null?new JSONArray():latest.optJSONArray("devices"));contact.put("online",latest.optBoolean("online"));}found=true;break;}}
                 if(!found)return failed(new IllegalStateException("This contact is no longer active."));
                 return api.deviceKeyDirectory(contactId);
             } catch(Exception error) { return failed(error); }
         }).thenAcceptAsync(directory->{
             try{
+                if(directory.optBoolean("_deleted"))return;
                 if(!contactId.equals(directory.optString("user_id"))||!contactUsername.equals(directory.optString("username")))throw new IllegalStateException("Device-key directory account did not match this contact.");
                 JSONArray activeRows=contact.optJSONArray("devices");final JSONArray active=activeRows==null?new JSONArray():activeRows;JSONArray publishedRows=directory.optJSONArray("devices");JSONArray published=publishedRows==null?new JSONArray():publishedRows;
                 Map<String,JSONObject> publishedById=new HashMap<>();for(int i=0;i<published.length();i++){JSONObject entry=published.optJSONObject(i);if(entry!=null)publishedById.put(entry.optString("device_id"),entry);}
@@ -176,7 +179,7 @@ final class SereinChatEngine {
                 String text=content.optString("text","");if(text.isEmpty()||text.codePointCount(0,text.length())>4000)throw new SecurityException("Encrypted message text exceeded the protocol limit.");
                 JSONObject message=new JSONObject().put("id",id).put("conversation_id",contactId).put("created_at",created).put("text",text).put("mine",false).put("sender",contactName).put("status","received");
                 if(content.has("attachment")){JSONObject attachment=validateAttachment(content.getJSONObject("attachment"));message.put("attachment",attachment);}
-                local.saveMessage(message);api.acknowledgeFuture(id);advance(created,id);status="Encrypted message received and stored on this device.";notifyUi();
+                local.saveMessage(message);if(notificationsArmed)SereinNotifications.showIncoming(context,context.getSharedPreferences("serein",Context.MODE_PRIVATE).getBoolean("notification_sound",true));api.acknowledgeFuture(id);advance(created,id);status="Encrypted message received and stored on this device.";notifyUi();
             }catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
         });
     }
@@ -193,7 +196,7 @@ final class SereinChatEngine {
             File temporary=null;byte[] contentKey=null,prefix=null;
             try{
                 String transferId=attachment.getString("transfer_id"),filename=attachment.getString("filename");long expected=attachment.getLong("size");
-                File existing=SereinAttachmentStore.existing(context,transferId,filename,expected);if(existing!=null)return existing;
+                File existing=SereinAttachmentStore.existing(context,userId,transferId,filename,expected);if(existing!=null)return existing;
                 Object listed=api.transfers().join();if(!(listed instanceof JSONArray))throw new IllegalStateException("Encrypted transfer list was unavailable.");
                 JSONObject transfer=null;JSONArray rows=(JSONArray)listed;for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&transferId.equals(row.optString("id"))){transfer=row;break;}}
                 if(transfer==null||transfer.isNull("ready_at"))throw new IllegalStateException("Encrypted transfer is incomplete, expired, or unavailable on this device.");
@@ -223,7 +226,7 @@ final class SereinChatEngine {
                     output.flush();output.getFD().sync();
                 }
                 if(clearBytes!=expected||temporary.length()!=expected)throw new SecurityException("Decrypted attachment size did not match its authenticated manifest.");
-                File saved;try(InputStream input=new FileInputStream(temporary)){saved=SereinAttachmentStore.save(context,transferId,filename,input,expected);}
+                File saved;try(InputStream input=new FileInputStream(temporary)){saved=SereinAttachmentStore.save(context,userId,transferId,filename,input,expected);}
                 api.acknowledgeTransfer(transferId).join();status="Download saved. Tap Open to hand it to a compatible app.";notifyUi();return saved;
             }catch(Throwable error){throw new java.util.concurrent.CompletionException(unwrap(error));}
             finally{if(contentKey!=null)Arrays.fill(contentKey,(byte)0);if(prefix!=null)Arrays.fill(prefix,(byte)0);if(temporary!=null)temporary.delete();}

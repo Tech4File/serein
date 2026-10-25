@@ -36,6 +36,8 @@ final class SereinLocalStore {
         }
         self.key = localKey
         if FileManager.default.fileExists(atPath: fileURL.path) {
+            let fileValues = try fileURL.resourceValues(forKeys: [.fileSizeKey])
+            guard (fileValues.fileSize ?? 0) <= SereinBackupStore.maximumBytes else { throw StoreError.historyUnavailable }
             let packed = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
             let sealed = try AES.GCM.SealedBox(combined: packed)
             let clear = try AES.GCM.open(sealed, using: localKey, authenticating: aad)
@@ -46,6 +48,13 @@ final class SereinLocalStore {
         } else { self.root = ["version": 1, "messages": [[String: Any]](), "trust": [String: String]()] }
     }
 
+    static func delete(accountID: String) throws {
+        guard UUID(uuidString: accountID) != nil,
+              let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { throw StoreError.storageUnavailable }
+        let file = support.appendingPathComponent("Serein", isDirectory: true).appendingPathComponent("history-\(accountID).bin")
+        if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        try SereinKeychain.delete(account: "local-store-v1:\(accountID)")
+    }
     func messages(for conversationID: String) -> [[String: Any]] {
         (root["messages"] as? [[String: Any]] ?? []).filter { $0["conversation_id"] as? String == conversationID }
     }
@@ -66,13 +75,50 @@ final class SereinLocalStore {
         var messages = root["messages"] as? [[String: Any]] ?? []
         messages.removeAll { $0["id"] as? String == id }
         messages.append(message)
-        if messages.count > 1000 { messages.removeFirst(messages.count - 1000) }
         root["messages"] = messages
         try flush()
     }
 
+    func backupMessages() -> [[String: Any]] {
+        root["messages"] as? [[String: Any]] ?? []
+    }
+
+    @discardableResult
+    func mergeBackupMessages(_ incoming: [[String: Any]]) throws -> Int {
+        guard incoming.count <= SereinBackupStore.maximumMessages else { throw StoreError.historyUnavailable }
+        var existing = root["messages"] as? [[String: Any]] ?? []
+        var seen = Set<String>(), incomingIDs = Set<String>()
+        for row in existing { if let id = row["id"] as? String { seen.insert(id) } }
+        var added = 0
+        for row in incoming {
+            guard let id = row["id"] as? String, !id.isEmpty, id.utf8.count <= 128,
+                  let conversation = row["conversation_id"] as? String, !conversation.isEmpty, conversation.utf8.count <= 128,
+                  let created = row["created_at"] as? String, created.utf8.count <= 128, Self.validTimestamp(created),
+                  let status = row["status"] as? String, ["pending", "accepted", "received"].contains(status),
+                  incomingIDs.insert(id).inserted else { throw StoreError.invalidMessage }
+            if seen.insert(id).inserted { existing.append(row); added += 1 }
+        }
+        existing.sort {
+            let left = $0["created_at"] as? String ?? ""
+            let right = $1["created_at"] as? String ?? ""
+            if left != right { return left < right }
+            return ($0["id"] as? String ?? "") < ($1["id"] as? String ?? "")
+        }
+        root["messages"] = existing
+        try flush()
+        return added
+    }
+
+    private static func validTimestamp(_ value: String) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        if formatter.date(from: value) != nil { return true }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: value) != nil
+    }
+
     private func flush() throws {
         let clear = try JSONSerialization.data(withJSONObject: root)
+        guard clear.count <= SereinBackupStore.maximumBytes else { throw StoreError.historyUnavailable }
         let sealed = try AES.GCM.seal(clear, using: key, authenticating: aad)
         guard let packed = sealed.combined else { throw StoreError.historyUnavailable }
         do {

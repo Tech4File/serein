@@ -62,6 +62,9 @@ final class SereinChatEngine: ObservableObject {
     @Published private(set) var ready = false
     @Published private(set) var busy = false
     @Published private(set) var activeDevices: [SereinDevice] = []
+    @Published private(set) var archived = false
+    @Published private(set) var deletedAt: String?
+    @Published private(set) var peerDisplayName: String
 
     private let api: SereinAPI
     private let contact: SereinContact
@@ -71,13 +74,14 @@ final class SereinChatEngine: ObservableObject {
     private var cursorTime: String?
     private var cursorID: String?
     private var pollRunning = false
+    private var notificationsArmed = false
     private let chunkCipherBytes = 256 * 1024
     private let chunkClearBytes = 256 * 1024 - 16
     private let maxChunks = 512
     private let maxCipherBytes: Int64 = 64 * 1024 * 1024
     private let maxClearBytes: Int64 = 64 * 1024 * 1024
 
-    init(api: SereinAPI, contact: SereinContact) { self.api = api; self.contact = contact; self.activeDevices = contact.devices }
+    init(api: SereinAPI, contact: SereinContact) { self.api = api; self.contact = contact; self.activeDevices = contact.devices; self.peerDisplayName = contact.display_name; self.archived = contact.isDeleted; self.deletedAt = contact.deleted_at }
 
     func initialize() async {
         guard let user = api.user, let device = api.currentDevice else { status = "Sign in again to use encrypted chat."; return }
@@ -87,6 +91,7 @@ final class SereinChatEngine: ObservableObject {
             let deviceLayer2Crypto = try SereinDeviceCrypto.loadOrCreateLayer2(userID: user.id, deviceID: device.id)
             let localStore = try SereinLocalStore(accountID: user.id)
             crypto = deviceCrypto; layer2Crypto = deviceLayer2Crypto; local = localStore
+            if contact.isDeleted { loadMessages(); ready = true; status = "Archived conversation · this account was deleted · read-only"; return }
             let registration = try await api.registerDeviceKey(deviceCrypto.publicJWK(), layer2PublicJWK: deviceLayer2Crypto.publicJWK())
             guard let ownFingerprint = try? SereinDeviceCrypto.fingerprintBundle(layer1: deviceCrypto.publicJWK(), layer2: deviceLayer2Crypto.publicJWK()), registration["fingerprint"] as? String == ownFingerprint else {
                 throw SereinDeviceCrypto.CryptoError.invalidPublicKey
@@ -96,6 +101,7 @@ final class SereinChatEngine: ObservableObject {
             ready = true; status = peerStatus
             await retryPending()
             await poll()
+            notificationsArmed = true
         } catch { status = error.localizedDescription }
     }
 
@@ -111,6 +117,11 @@ final class SereinChatEngine: ObservableObject {
         let contactsData = try await api.contactsData()
         guard let rows = try JSONSerialization.jsonObject(with: contactsData) as? [[String: Any]],
               let latest = rows.first(where: { $0["user_id"] as? String == contact.user_id }) else { throw ChatError.contactUnavailable }
+        peerDisplayName = latest["display_name"] as? String ?? peerDisplayName
+        if latest["deleted"] as? Bool == true {
+            archived = true; deletedAt = latest["deleted_at"] as? String; activeDevices = []; peerKeys = []
+            status = "Archived conversation · this account was deleted · read-only"; loadMessages(); return
+        }
         let latestDevices = (latest["devices"] as? [[String: Any]] ?? []).compactMap { row -> SereinDevice? in
             guard let id = row["id"] as? String else { return nil }
             return SereinDevice(id: id, name: row["name"] as? String ?? "Device", created_at: nil, last_seen_at: nil, current: nil, online: nil)
@@ -151,6 +162,7 @@ final class SereinChatEngine: ObservableObject {
     }
 
     func sendText(_ input: String) async {
+        guard !contact.isDeleted && !archived else { status = "This archived conversation is read-only."; return }
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         guard text.unicodeScalars.count <= 4000 else { status = "Messages are limited to 4,000 characters."; return }
@@ -194,7 +206,7 @@ final class SereinChatEngine: ObservableObject {
     }
 
     private func retryPending() async {
-        guard let local else { return }
+        guard !archived, let local else { return }
         for var row in local.messages(for: contact.user_id) where row["mine"] as? Bool == true && row["status"] as? String == "pending" {
             guard let id = row["id"] as? String, let envelopes = row["envelopes"] as? [[String: String]] else { continue }
             do {
@@ -206,7 +218,7 @@ final class SereinChatEngine: ObservableObject {
     }
 
     func poll() async {
-        guard ready, !pollRunning, let user = api.user, let device = api.currentDevice, let crypto, let local else { return }
+        guard ready, !archived, !pollRunning, let user = api.user, let device = api.currentDevice, let crypto, let local else { return }
         pollRunning = true; defer { pollRunning = false }
         do {
             for _ in 0..<40 {
@@ -236,7 +248,7 @@ final class SereinChatEngine: ObservableObject {
                         var row: [String: Any] = ["id": id, "conversation_id": contact.user_id, "created_at": created, "text": text,
                             "mine": false, "sender": contact.display_name, "status": "received"]
                         if let attachment { row["attachment"] = attachment.json }
-                        try local.save(row); try await api.acknowledgeMessage(id); cursorTime = created; cursorID = id
+                        try local.save(row); try await api.acknowledgeMessage(id); if notificationsArmed { api.notifyIncomingMessage() }; cursorTime = created; cursorID = id
                     } catch {
                         status = error.localizedDescription; stopped = true; break
                     }
@@ -248,6 +260,7 @@ final class SereinChatEngine: ObservableObject {
     }
 
     func sendFile(url: URL, filename: String, contentType: String) async {
+        guard !contact.isDeleted && !archived else { status = "This archived conversation is read-only."; return }
         guard ready, let user = api.user, let device = api.currentDevice, let crypto else { status = "Protected device setup is not ready."; return }
         var contentKeyData: Data
         do { contentKeyData = try SereinDeviceCrypto.randomData(count: 32) } catch { status = error.localizedDescription; return }
@@ -301,7 +314,7 @@ final class SereinChatEngine: ObservableObject {
         } catch { status = error.localizedDescription }
     }
 
-    func localFile(for attachment: SereinEncryptedAttachment) -> URL? { SereinAttachmentStore.shared.existing(transferID: attachment.transferID, filename: attachment.filename, expectedBytes: attachment.size) }
+    func localFile(for attachment: SereinEncryptedAttachment) -> URL? { SereinAttachmentStore.shared.existing(accountID: api.user?.id ?? "", transferID: attachment.transferID, filename: attachment.filename, expectedBytes: attachment.size) }
 
     func download(_ attachment: SereinEncryptedAttachment) async -> URL? {
         guard let user = api.user, let device = api.currentDevice, let crypto else { status = "Protected device setup is not ready."; return nil }
@@ -353,7 +366,7 @@ final class SereinChatEngine: ObservableObject {
             }
             try output.synchronize()
             guard total == attachment.size else { throw ChatError.manifestMismatch }
-            let saved = try SereinAttachmentStore.shared.save(transferID: attachment.transferID, filename: attachment.filename, from: temporary!, expectedBytes: attachment.size)
+            let saved = try SereinAttachmentStore.shared.save(accountID: user.id, transferID: attachment.transferID, filename: attachment.filename, from: temporary!, expectedBytes: attachment.size)
             try await api.acknowledgeTransfer(attachment.transferID)
             status = "Download saved. Tap Open to hand it to a compatible app."
             return saved

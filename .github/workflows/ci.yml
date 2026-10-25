@@ -39,6 +39,7 @@ jobs:
           node --check frontend/web/device-crypto.js
           node --check frontend/web/message-limits.js
           node --check frontend/web/security.js
+          node --check frontend/web/status.js
           node --test frontend/web/tests/*.test.cjs
           node --check frontend/web/components/serein-ui.js
           python3 - <<'PY'
@@ -71,6 +72,27 @@ jobs:
       # The manual auth smoke test needs two real inboxes and live mail-provider credentials.
       # Keep it out of CI so test messages and secrets are never sent to a fake endpoint.
 
+  mobile-core:
+    needs: version-consistency
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+          - os: macos-15
+            target: aarch64-apple-ios
+          - os: macos-15
+            target: aarch64-apple-ios-sim
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Cross-check the shared Rust core target
+        run: cargo check --manifest-path crates/serein-core/Cargo.toml --target ${{ matrix.target }}
+
   android:
     needs: version-consistency
     runs-on: ubuntu-latest
@@ -102,19 +124,58 @@ jobs:
             apps/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
+  android-instrumented:
+    needs: version-consistency
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [26, 35]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install compile SDK and build tools
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'platform-tools'
+      - name: Run native backup/storage tests on API ${{ matrix.api-level }}
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          target: default
+          disable-animations: true
+          script: cd apps/android && gradle --no-daemon :app:connectedDebugAndroidTest
+      - name: Upload Android instrumentation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serein-android-test-api-${{ matrix.api-level }}-${{ github.sha }}
+          path: |
+            apps/android/app/build/outputs/androidTest-results/connected/**
+            apps/android/app/build/reports/androidTests/connected/**
+          if-no-files-found: ignore
+
   ios-simulator:
     needs: version-consistency
-    # Run the Xcode 16.4 simulator build on a fixed x64 runner and capture native
-    # diagnostics. Do not use xcodebuild -showBuildSettings here: that diagnostic
-    # invocation segfaulted on the runner before compilation. The real build below
-    # uses an explicit generic simulator destination and is the authoritative check.
-    runs-on: macos-15-intel
+    # The Xcode 16.4 x64 runner has repeatedly segfaulted inside xcodebuild before
+    # Swift compilation. Use the Apple-silicon macOS 15 runner and capture native
+    # diagnostics; do not treat a launcher crash as a successful simulator build.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Select stable Xcode and report runner architecture
         run: |
           set -euo pipefail
-          test "$(uname -m)" = "x86_64"
+          test "$(uname -m)" = "arm64"
           test -d /Applications/Xcode_16.4.app/Contents/Developer
           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
           uname -a
@@ -142,6 +203,27 @@ jobs:
           if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
           cd "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphonesimulator"
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent SereinChat.app "$GITHUB_WORKSPACE/SereinChat-iOS-Simulator.zip"
+      - name: Launch the built app in an available iOS simulator
+        run: |
+          set -euo pipefail
+          DEVICE_ID="$(python3 - <<'PY'
+          import json, subprocess
+          devices = json.loads(subprocess.check_output(['xcrun','simctl','list','devices','available','--json']))['devices']
+          for runtime, entries in devices.items():
+              if runtime.startswith('com.apple.CoreSimulator.SimRuntime.iOS'):
+                  for device in entries:
+                      if device.get('name','').startswith('iPhone'):
+                          print(device['udid']); raise SystemExit(0)
+          raise SystemExit('No available iOS simulator device found')
+          PY
+          )"
+          xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphonesimulator/SereinChat.app"
+          test -d "$APP"
+          xcrun simctl install "$DEVICE_ID" "$APP"
+          xcrun simctl launch --terminate-running-process "$DEVICE_ID" io.serein.chat
+          xcrun simctl shutdown "$DEVICE_ID"
       - name: Collect iOS compiler crash diagnostics
         if: failure()
         run: |

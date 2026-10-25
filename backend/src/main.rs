@@ -38,6 +38,7 @@ type PeerMap = DashMap<Uuid, Peer>;
 #[derive(Clone)] struct Peer { connection_id: Uuid, tx: mpsc::Sender<String> }
 #[derive(Clone)] struct AuthContext { user_id: Uuid, username: String, email: String, display_name: String, email_verified: bool, device_id: Uuid, device_name: String, session_hash: Vec<u8> }
 #[derive(Deserialize)] struct RegisterInput { username: String, email: String, display_name: String, password: String }
+#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct DeleteAccountInput { password: String }
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct LoginInput { identity: String, password: String }
 #[derive(Deserialize)] struct VerifyEmailInput { email: String, code: String, device_name: Option<String>, device_id: Option<Uuid> }
 #[derive(Deserialize)] struct VerifyLoginInput { identity: String, password: String, code: String, device_name: Option<String>, device_id: Option<Uuid> }
@@ -52,7 +53,7 @@ type PeerMap = DashMap<Uuid, Peer>;
 #[derive(Serialize)] struct AuthReply { user: UserReply, device: DeviceReply }
 #[derive(Serialize)] struct UserReply { id: Uuid, username: String, email: String, display_name: String, email_verified: bool }
 #[derive(Serialize, Clone)] struct DeviceReply { id: Uuid, name: String }
-#[derive(Serialize, Clone)] struct ContactReply { user_id: Uuid, username: String, display_name: String, email_verified: bool, online: bool, devices: Vec<DeviceReply> }
+#[derive(Serialize, Clone)] struct ContactReply { user_id: Uuid, username: String, display_name: String, email_verified: bool, online: bool, devices: Vec<DeviceReply>, connected_at: String, deleted: bool, deleted_at: Option<String> }
 #[derive(Serialize)] struct DeviceSessionReply { id: Uuid, name: String, created_at: String, last_seen_at: String, current: bool, online: bool }
 #[derive(Deserialize)] #[serde(tag = "type", rename_all = "snake_case")] enum ClientFrame { Message { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }, Ack { id: Uuid }, Heartbeat }
 #[derive(Deserialize)] struct HistoryQuery { after_created_at: Option<String>, after_id: Option<Uuid>, limit: Option<i64> }
@@ -98,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/healthz", get(healthz)).route("/api/v1/security/capabilities", get(security_capabilities)).route("/status", get(|| async { axum::response::Html(include_str!("../../frontend/web/status.html")) }))
         .route("/api/v1/auth/register", post(register)).route("/api/v1/auth/verify-email", post(verify_email)).route("/api/v1/auth/resend-verification", post(resend_verification)).route("/api/v1/auth/login", post(login)).route("/api/v1/auth/verify-login", post(verify_login)).route("/api/v1/auth/logout", post(logout))
-        .route("/api/v1/me", get(me)).route("/api/v1/device-key", put(register_device_public_key)).route("/api/v1/contacts/:contact_id/device-keys", get(list_contact_device_public_keys)).route("/api/v1/messages", get(list_messages).post(send_message_api)).route("/api/v1/messages/:id/ack", post(ack_message_api)).route("/api/v1/settings", get(get_settings).put(put_settings)).route("/api/v1/contacts", get(list_contacts).post(create_contact_request))
+        .route("/api/v1/me", get(me).delete(delete_account)).route("/api/v1/device-key", put(register_device_public_key)).route("/api/v1/contacts/:contact_id/device-keys", get(list_contact_device_public_keys)).route("/api/v1/messages", get(list_messages).post(send_message_api)).route("/api/v1/messages/:id/ack", post(ack_message_api)).route("/api/v1/settings", get(get_settings).put(put_settings)).route("/api/v1/contacts", get(list_contacts).post(create_contact_request))
         .route("/api/v1/contact-requests", get(list_contact_requests).post(create_contact_request)).route("/api/v1/contact-requests/:request_id/accept", post(accept_contact_request)).route("/api/v1/contact-requests/:request_id", delete(delete_contact_request))
         .route("/api/v1/blocks", get(list_blocks)).route("/api/v1/blocks/:user_id", put(block_user).delete(unblock_user))
         .route("/api/v1/contacts/:contact_id", delete(remove_contact)).route("/api/v1/devices", get(list_devices))
@@ -188,7 +189,15 @@ async fn initialize_schema(db: &PgPool) -> Result<(), sqlx::Error> {
         "DELETE FROM auth_sessions s USING accounts a WHERE s.user_id=a.id AND a.email_verified=FALSE",
         "CREATE TABLE IF NOT EXISTS email_verification_challenges (user_id UUID PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, code_hash TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, resend_after TIMESTAMPTZ NOT NULL, attempt_count SMALLINT NOT NULL DEFAULT 0, send_count SMALLINT NOT NULL DEFAULT 1, window_started_at TIMESTAMPTZ NOT NULL DEFAULT now())",
         "CREATE INDEX IF NOT EXISTS auth_sessions_by_user ON auth_sessions(user_id, expires_at)",
-        "CREATE TABLE IF NOT EXISTS contacts (owner_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, contact_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(owner_id, contact_id), CHECK(owner_id <> contact_id))",
+        "CREATE TABLE IF NOT EXISTS contacts (owner_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, contact_id UUID NOT NULL, contact_display_name TEXT NOT NULL DEFAULT 'Deleted User', deleted_at TIMESTAMPTZ NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(owner_id, contact_id), CHECK(owner_id <> contact_id))",
+        "ALTER TABLE contacts DROP CONSTRAINT IF EXISTS contacts_contact_id_fkey",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS contact_display_name TEXT",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL",
+        "UPDATE contacts c SET contact_display_name=a.display_name FROM accounts a WHERE a.id=c.contact_id AND c.contact_display_name IS NULL",
+        "UPDATE contacts SET contact_display_name='Deleted User' WHERE contact_display_name IS NULL",
+        "ALTER TABLE contacts ALTER COLUMN contact_display_name SET DEFAULT 'Deleted User'",
+        "ALTER TABLE contacts ALTER COLUMN contact_display_name SET NOT NULL",
+        "CREATE INDEX IF NOT EXISTS contacts_by_deleted_peer ON contacts(owner_id,contact_id,deleted_at)",
         "CREATE TABLE IF NOT EXISTS contact_requests (id UUID PRIMARY KEY, sender_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, recipient_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL DEFAULT (now()+interval '30 days'), UNIQUE(sender_id,recipient_id), CHECK(sender_id<>recipient_id))",
         "ALTER TABLE contact_requests ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NOT NULL DEFAULT (now()+interval '30 days')",
         "CREATE INDEX IF NOT EXISTS contact_requests_incoming_expiry ON contact_requests(recipient_id,expires_at,created_at DESC)",
@@ -511,6 +520,28 @@ async fn logout(State(state):State<AppState>,headers:HeaderMap)->Response{
     let mut response=Json(serde_json::json!({"ok":true})).into_response();clear_session_cookie(&mut response,state.cookie_secure);response
 }
 async fn me(State(state):State<AppState>,headers:HeaderMap)->Response{match authenticate(&state.db,&headers).await{Ok(Some(ctx))=>Json(auth_reply(&ctx)).into_response(),Ok(None)=>api_error(StatusCode::UNAUTHORIZED,"sign in required"),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"account service unavailable")}}
+
+async fn delete_account(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<DeleteAccountInput>)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    if input.password.is_empty()||input.password.len()>4096{return api_error(StatusCode::BAD_REQUEST,"enter your current password to confirm account deletion");}
+    let mut tx=match state.db.begin().await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"account deletion is temporarily unavailable")};
+    let account=match sqlx::query_as::<_,(String,String,String)>("SELECT username,display_name,password_hash FROM accounts WHERE id=$1 FOR UPDATE").bind(ctx.user_id).fetch_optional(&mut *tx).await{
+        Ok(Some(value))=>value,Ok(None)=>{let _=tx.rollback().await;return api_error(StatusCode::UNAUTHORIZED,"sign in required");},Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"account deletion is temporarily unavailable");}
+    };
+    let (username,display_name,password_hash)=account;
+    let parsed=match PasswordHash::new(&password_hash){Ok(value)=>value,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"account deletion could not be verified");}};
+    if Argon2::default().verify_password(input.password.as_bytes(),&parsed).is_err(){let _=tx.rollback().await;return api_error(StatusCode::FORBIDDEN,"current password is incorrect; the account was not deleted");}
+    let devices=match sqlx::query_scalar::<_,Uuid>("SELECT id FROM devices WHERE user_id=$1 FOR UPDATE").bind(ctx.user_id).fetch_all(&mut *tx).await{Ok(value)=>value,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"account deletion is temporarily unavailable");}};
+    if sqlx::query("UPDATE contacts SET contact_display_name=COALESCE(NULLIF(btrim($2),''),contact_display_name),deleted_at=COALESCE(deleted_at,now()) WHERE contact_id=$1 AND owner_id<>$1 AND deleted_at IS NULL").bind(ctx.user_id).bind(&display_name).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"account deletion is temporarily unavailable");}
+    let account_id=ctx.user_id.to_string();
+    let has_legacy_messages=match sqlx::query_scalar::<_,bool>("SELECT to_regclass('public.offline_messages') IS NOT NULL").fetch_one(&mut *tx).await{Ok(value)=>value,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"account deletion is temporarily unavailable");}};
+    if has_legacy_messages&&sqlx::query("DELETE FROM offline_messages WHERE sender IN ($1,$2) OR recipient IN ($1,$2)").bind(&account_id).bind(&username).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"account deletion is temporarily unavailable");}
+    if sqlx::query("DELETE FROM accounts WHERE id=$1").bind(ctx.user_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"account deletion is temporarily unavailable");}
+    if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"account deletion did not complete; retry after checking the account state");}
+    for device_id in devices{state.peers.remove(&device_id);}
+    let mut response=Json(serde_json::json!({"ok":true,"account_deleted":true,"username_released":true,"peer_history_retained_locally":true,"recreated_username_is_new_identity":true})).into_response();
+    clear_session_cookie(&mut response,state.cookie_secure);response
+}
 fn decode_p256_coordinate(value:&str)->Option<[u8;32]>{let bytes=URL_SAFE_NO_PAD.decode(value).ok()?;if bytes.len()!=32{return None;}let mut coordinate=[0u8;32];coordinate.copy_from_slice(&bytes);Some(coordinate)}
 fn p256_public_key_fingerprint(key:&P256PublicJwk)->Option<[u8;64]>{
     if key.kty!="EC"||key.crv!="P-256"{return None;}
@@ -540,7 +571,7 @@ async fn register_device_public_key(State(state):State<AppState>,headers:HeaderM
 }
 async fn list_contact_device_public_keys(State(state):State<AppState>,headers:HeaderMap,Path(contact_id):Path<Uuid>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
-    let allowed=sqlx::query_scalar::<_,bool>("SELECT $1=$2 OR (EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1)))")
+    let allowed=sqlx::query_scalar::<_,bool>("SELECT $1=$2 OR (EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1)))")
         .bind(ctx.user_id).bind(contact_id).fetch_one(&state.db).await;
     if !matches!(allowed,Ok(true)){return api_error(StatusCode::NOT_FOUND,"contact key directory unavailable");}
     let username=match sqlx::query_scalar::<_,String>("SELECT username FROM accounts WHERE id=$1").bind(contact_id).fetch_optional(&state.db).await{Ok(Some(value))=>value,Ok(None)=>return api_error(StatusCode::NOT_FOUND,"contact key directory unavailable"),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact key directory unavailable")};
@@ -552,15 +583,15 @@ async fn require_user(state:&AppState,headers:&HeaderMap)->Result<AuthContext,Re
 async fn session_is_active(db:&PgPool,ctx:&AuthContext)->bool{sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM auth_sessions s JOIN devices d ON d.id=s.device_id JOIN accounts a ON a.id=s.user_id AND a.email_verified=TRUE WHERE s.token_hash=$1 AND s.device_id=$2 AND s.user_id=$3 AND s.expires_at>now() AND d.revoked_at IS NULL)").bind(&ctx.session_hash).bind(ctx.device_id).bind(ctx.user_id).fetch_one(db).await.unwrap_or(false)}
 async fn list_contacts(State(state):State<AppState>,headers:HeaderMap)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
-    let rows=match sqlx::query_as::<_,(Uuid,String,String,bool,Option<Uuid>,Option<String>,Option<bool>,bool)>(
-        "SELECT a.id,a.username,a.display_name,a.email_verified,d.id,d.label,(d.last_seen_at>now()-interval '90 seconds'),COALESCE(us.settings->>'presence_visibility','contacts')<>'nobody' FROM contacts c JOIN accounts a ON a.id=c.contact_id LEFT JOIN user_settings us ON us.user_id=a.id LEFT JOIN devices d ON d.user_id=a.id AND d.revoked_at IS NULL WHERE c.owner_id=$1 AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.owner_id=c.owner_id AND b.blocked_user_id=c.contact_id) OR (b.owner_id=c.contact_id AND b.blocked_user_id=c.owner_id)) ORDER BY a.username,d.created_at ASC,d.id ASC"
+    let rows=match sqlx::query_as::<_,(Uuid,String,String,bool,Option<Uuid>,Option<String>,Option<bool>,bool,String,bool,Option<String>)>(
+        "SELECT c.contact_id,COALESCE(a.username,''),CASE WHEN c.deleted_at IS NOT NULL THEN c.contact_display_name||' (Deleted User)' ELSE COALESCE(a.display_name,c.contact_display_name) END,COALESCE(a.email_verified,FALSE),d.id,d.label,(d.last_seen_at>now()-interval '90 seconds'),COALESCE(us.settings->>'presence_visibility','contacts')<>'nobody',to_char(c.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),c.deleted_at IS NOT NULL,CASE WHEN c.deleted_at IS NULL THEN NULL ELSE to_char(c.deleted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') END FROM contacts c LEFT JOIN accounts a ON a.id=c.contact_id LEFT JOIN user_settings us ON us.user_id=a.id LEFT JOIN devices d ON c.deleted_at IS NULL AND d.user_id=a.id AND d.revoked_at IS NULL WHERE c.owner_id=$1 AND (a.id IS NOT NULL OR c.deleted_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.owner_id=c.owner_id AND b.blocked_user_id=c.contact_id) OR (b.owner_id=c.contact_id AND b.blocked_user_id=c.owner_id)) ORDER BY c.deleted_at NULLS FIRST,lower(COALESCE(a.username,c.contact_display_name)),d.created_at ASC,d.id ASC"
     ).bind(ctx.user_id).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"contacts unavailable")};
     let mut grouped:HashMap<Uuid,ContactReply>=HashMap::new();
-    for(user_id,username,display_name,email_verified,device_id,device_name,recently_active,presence_visible)in rows{
-        let contact=grouped.entry(user_id).or_insert_with(||ContactReply{user_id,username,display_name,email_verified,online:false,devices:Vec::new()});
+    for(user_id,username,display_name,email_verified,device_id,device_name,recently_active,presence_visible,connected_at,deleted,deleted_at)in rows{
+        let contact=grouped.entry(user_id).or_insert_with(||ContactReply{user_id,username,display_name,email_verified,online:false,devices:Vec::new(),connected_at:connected_at.clone(),deleted,deleted_at:deleted_at.clone()});
         if let Some(device_id)=device_id{contact.online|=presence_visible&&recently_active.unwrap_or(false)&&state.peers.contains_key(&device_id);contact.devices.push(DeviceReply{id:device_id,name:device_name.unwrap_or_else(||"Device".into())});}
     }
-    let mut result=grouped.into_values().collect::<Vec<_>>();result.sort_by(|a,b|a.username.cmp(&b.username));Json(result).into_response()
+    let mut result=grouped.into_values().collect::<Vec<_>>();result.sort_by(|a,b|a.deleted.cmp(&b.deleted).then_with(||a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase())));Json(result).into_response()
 }
 async fn get_settings(State(state):State<AppState>,headers:HeaderMap)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
@@ -598,14 +629,14 @@ async fn send_message_api(State(state):State<AppState>,headers:HeaderMap,Json(in
     let crypto_version=input.crypto_version.unwrap_or(1);
     if !matches!(crypto_version,1|2)||input.to==ctx.device_id||!valid_ciphertext_parts(&input.iv,&input.ciphertext){return api_error(StatusCode::BAD_REQUEST,"invalid encrypted envelope");}
     let target_user=match sqlx::query_scalar::<_,Uuid>("SELECT user_id FROM devices WHERE id=$1 AND revoked_at IS NULL").bind(input.to).fetch_optional(&state.db).await{Ok(Some(v))=>v,Ok(None)=>return api_error(StatusCode::NOT_FOUND,"recipient device not found"),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message service unavailable")};
-    let allowed=match sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message authorization unavailable")};
+    let allowed=match sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message authorization unavailable")};
     if !allowed{return api_error(StatusCode::FORBIDDEN,"recipient is not a contact");}
     let payload=serde_json::json!({"type":"message","id":input.id,"from":ctx.device_id,"crypto_version":crypto_version,"iv":input.iv,"ciphertext":input.ciphertext});
     let mut tx=match state.db.begin().await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message service unavailable")};
     let locked=sqlx::query_scalar::<_,Uuid>("SELECT id FROM accounts WHERE id IN ($1,$2) ORDER BY id FOR SHARE").bind(ctx.user_id).bind(target_user).fetch_all(&mut *tx).await;
     let expected_locks=if ctx.user_id==target_user{1}else{2};
     if !locked.as_ref().is_ok_and(|ids|ids.len()==expected_locks){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"message authorization unavailable");}
-    let still_allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&mut *tx).await;
+    let still_allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&mut *tx).await;
     if !matches!(still_allowed,Ok(true)){let _=tx.rollback().await;return api_error(StatusCode::FORBIDDEN,"recipient is not a contact");}
     if sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text),hashtext($2::text))").bind(input.to).bind("recipient-queue").execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"message queue unavailable");}
     let queued=match sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM queued_ciphertexts WHERE recipient_device_id=$1 AND delivered_at IS NULL AND id<>$2").bind(input.to).bind(input.id).fetch_one(&mut *tx).await{Ok(v)=>v,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"message queue unavailable");}};
@@ -658,7 +689,7 @@ async fn create_encrypted_transfer(State(state):State<AppState>,headers:HeaderMa
     let expected_user_locks=if ctx.user_id==input.recipient_user_id{1}else{2};
     if !user_locks.is_ok_and(|ids|ids.len()==expected_user_locks){let _=tx.rollback().await;return api_error(StatusCode::NOT_FOUND,"recipient account not found");}
     if input.recipient_user_id!=ctx.user_id{
-        let contact=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(input.recipient_user_id).fetch_optional(&mut *tx).await;
+        let contact=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(input.recipient_user_id).fetch_optional(&mut *tx).await;
         if !matches!(contact,Ok(Some(true))){let _=tx.rollback().await;return api_error(StatusCode::FORBIDDEN,"recipient must be an accepted contact");}
     }
     let mut active_devices=match sqlx::query_as::<_,(Uuid,Uuid)>("SELECT id,user_id FROM devices WHERE user_id IN ($1,$2) AND revoked_at IS NULL ORDER BY id FOR SHARE").bind(ctx.user_id).bind(input.recipient_user_id).fetch_all(&mut *tx).await{Ok(rows)=>rows,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer devices unavailable");}};
@@ -792,8 +823,8 @@ async fn create_contact_request(State(state):State<AppState>,headers:HeaderMap,J
                 let mut lock_users=vec![ctx.user_id,target_id];lock_users.sort_unstable();lock_users.dedup();
                 for user_id in lock_users{if sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text),hashtext('contact-request-quota'))").bind(user_id.to_string()).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact request service unavailable");}}
                 let has_capacity=sqlx::query_scalar::<_,bool>("SELECT (SELECT COUNT(*) FROM contact_requests WHERE sender_id=$1 AND expires_at>now())<50 AND (SELECT COUNT(*) FROM contact_requests WHERE recipient_id=$2 AND expires_at>now())<100").bind(ctx.user_id).bind(target_id).fetch_one(&mut *tx).await;
-                match has_capacity{Ok(true)=>{},Ok(false)=>{if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact request service unavailable");}return (StatusCode::ACCEPTED,Json(serde_json::json!({"ok":true,"message":"If the verified account is eligible, it will receive a connection request. We do not disclose request status before acceptance."}))).into_response();},Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact request service unavailable");}}
-                let eligible=sqlx::query_scalar::<_,bool>("SELECT NOT EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_id).fetch_one(&mut *tx).await;
+                match has_capacity{Ok(true)=>{},Ok(false)=>{if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact request service unavailable");}return (StatusCode::ACCEPTED,Json(serde_json::json!({"ok":true,"message":"If the account is eligible, it will receive a connection request. This response does not reveal eligibility; sent requests appear in your pending list."}))).into_response();},Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact request service unavailable");}}
+                let eligible=sqlx::query_scalar::<_,bool>("SELECT NOT EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_id).fetch_one(&mut *tx).await;
                 match eligible{
                     Ok(true)=>{if sqlx::query("INSERT INTO contact_requests(id,sender_id,recipient_id) VALUES($1,$2,$3) ON CONFLICT(sender_id,recipient_id) DO NOTHING").bind(Uuid::new_v4()).bind(ctx.user_id).bind(target_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact request service unavailable");}},
                     Ok(false)=>{},Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact request service unavailable");}
@@ -802,13 +833,13 @@ async fn create_contact_request(State(state):State<AppState>,headers:HeaderMap,J
         }
     }
     if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact request service unavailable");}
-    (StatusCode::ACCEPTED,Json(serde_json::json!({"ok":true,"message":"If the verified account is eligible, it will receive a connection request. We do not disclose request status before acceptance."}))).into_response()
+    (StatusCode::ACCEPTED,Json(serde_json::json!({"ok":true,"message":"If the account is eligible, it will receive a connection request. This response does not reveal eligibility; sent requests appear in your pending list."}))).into_response()
 }
 
 async fn list_contact_requests(State(state):State<AppState>,headers:HeaderMap)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
-    let rows=match sqlx::query_as::<_,(Uuid,String,String,String)>("SELECT r.id,a.username,a.display_name,r.created_at::text FROM contact_requests r JOIN accounts a ON a.id=r.sender_id WHERE r.recipient_id=$1 AND r.expires_at>now() ORDER BY r.created_at DESC").bind(ctx.user_id).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact requests unavailable")};
-    Json(rows.into_iter().map(|(id,username,display_name,created_at)|ContactRequestReply{id,username,display_name,created_at,direction:"incoming".to_owned()}).collect::<Vec<_>>()).into_response()
+    let rows=match sqlx::query_as::<_,(Uuid,String,String,String,String)>("(SELECT r.id,a.username,a.display_name,to_char(r.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),'incoming'::text FROM contact_requests r JOIN accounts a ON a.id=r.sender_id WHERE r.recipient_id=$1 AND r.expires_at>now()) UNION ALL (SELECT r.id,a.username,a.display_name,to_char(r.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),'sent'::text FROM contact_requests r JOIN accounts a ON a.id=r.recipient_id WHERE r.sender_id=$1 AND r.expires_at>now()) ORDER BY 4 DESC").bind(ctx.user_id).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact requests unavailable")};
+    Json(rows.into_iter().map(|(id,username,display_name,created_at,direction)|ContactRequestReply{id,username,display_name,created_at,direction}).collect::<Vec<_>>()).into_response()
 }
 
 async fn accept_contact_request(State(state):State<AppState>,headers:HeaderMap,Path(request_id):Path<Uuid>)->Response{
@@ -820,8 +851,9 @@ async fn accept_contact_request(State(state):State<AppState>,headers:HeaderMap,P
     let sender=match sqlx::query_scalar::<_,Uuid>("SELECT sender_id FROM contact_requests WHERE id=$1 AND recipient_id=$2 AND expires_at>now() FOR UPDATE").bind(request_id).bind(ctx.user_id).fetch_optional(&mut *tx).await{Ok(Some(v))=>v,Ok(None)=>{let _=tx.rollback().await;return api_error(StatusCode::NOT_FOUND,"pending request not found");},Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact request service unavailable");}};
     let blocked=match sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(sender).fetch_one(&mut *tx).await{Ok(v)=>v,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact request service unavailable");}};
     if blocked{let _=sqlx::query("DELETE FROM contact_requests WHERE id=$1").bind(request_id).execute(&mut *tx).await;let _=tx.commit().await;return api_error(StatusCode::NOT_FOUND,"pending request not found");}
-    for(owner,contact)in[(ctx.user_id,sender),(sender,ctx.user_id)]{
-        if sqlx::query("INSERT INTO contacts(owner_id,contact_id) VALUES($1,$2) ON CONFLICT DO NOTHING").bind(owner).bind(contact).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not accept contact request");}
+    let sender_name=match sqlx::query_scalar::<_,String>("SELECT display_name FROM accounts WHERE id=$1").bind(sender).fetch_optional(&mut *tx).await{Ok(Some(value))=>value,Ok(None)=>{let _=tx.rollback().await;return api_error(StatusCode::NOT_FOUND,"pending request not found");},Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not accept contact request");}};
+    for(owner,contact,label)in[(ctx.user_id,sender,sender_name.as_str()),(sender,ctx.user_id,ctx.display_name.as_str())]{
+        if sqlx::query("INSERT INTO contacts(owner_id,contact_id,contact_display_name) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(owner).bind(contact).bind(label).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not accept contact request");}
     }
     if sqlx::query("DELETE FROM contact_requests WHERE (sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1)").bind(ctx.user_id).bind(sender).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not accept contact request");}
     if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not accept contact request");}
@@ -916,15 +948,15 @@ async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
     });}
     let mut session_check=tokio::time::interval(Duration::from_secs(20));loop{tokio::select!{
         _=session_check.tick()=>{if !session_is_active(&state.db,&ctx).await{let _=ws_tx.send(Message::Close(None)).await;break;}},
-        outgoing=out_rx.recv()=>match outgoing{Some(text)=>if ws_tx.send(Message::Text(text.into())).await.is_err(){break},None=>break},
+        outgoing=out_rx.recv()=>match outgoing{Some(text)=>{if !session_is_active(&state.db,&ctx).await{let _=ws_tx.send(Message::Close(None)).await;break;}if ws_tx.send(Message::Text(text.into())).await.is_err(){break}},None=>break},
         incoming=ws_rx.next()=>match incoming{Some(Ok(Message::Text(text)))=>{
             if !session_is_active(&state.db,&ctx).await{let _=ws_tx.send(Message::Close(None)).await;break;}if text.len()>MAX_CIPHERTEXT_CHARS+1024{continue;}let Ok(frame)=serde_json::from_str::<ClientFrame>(&text)else{continue;};
             match frame{ClientFrame::Message{id,to,iv,ciphertext,crypto_version}=>{
-                let crypto_version=crypto_version.unwrap_or(1);if !matches!(crypto_version,1|2)||to==ctx.device_id||!valid_ciphertext_parts(&iv,&ciphertext){continue;}let target_user=sqlx::query_scalar::<_,Uuid>("SELECT d.user_id FROM devices d WHERE d.id=$1 AND d.revoked_at IS NULL").bind(to).fetch_optional(&state.db).await.ok().flatten();let Some(target_user)=target_user else{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"recipient device is unavailable"}).to_string().into())).await;continue;};let allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&state.db).await.unwrap_or(false);if !allowed{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"message":"recipient is not a contact"}).to_string().into())).await;continue;}
+                let crypto_version=crypto_version.unwrap_or(1);if !matches!(crypto_version,1|2)||to==ctx.device_id||!valid_ciphertext_parts(&iv,&ciphertext){continue;}let target_user=sqlx::query_scalar::<_,Uuid>("SELECT d.user_id FROM devices d WHERE d.id=$1 AND d.revoked_at IS NULL").bind(to).fetch_optional(&state.db).await.ok().flatten();let Some(target_user)=target_user else{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"recipient device is unavailable"}).to_string().into())).await;continue;};let allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&state.db).await.unwrap_or(false);if !allowed{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"message":"recipient is not a contact"}).to_string().into())).await;continue;}
                 let payload=serde_json::json!({"type":"message","id":id,"from":ctx.device_id,"crypto_version":crypto_version,"iv":iv,"ciphertext":ciphertext});
                 let mut tx=match state.db.begin().await{Ok(tx)=>tx,Err(_)=>{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"message service unavailable"}).to_string().into())).await;continue;}};
                 let account_locks=sqlx::query_scalar::<_,Uuid>("SELECT id FROM accounts WHERE id IN ($1,$2) ORDER BY id FOR SHARE").bind(ctx.user_id).bind(target_user).fetch_all(&mut *tx).await;let expected_locks=if ctx.user_id==target_user{1}else{2};if !account_locks.is_ok_and(|ids|ids.len()==expected_locks){let _=tx.rollback().await;continue;}
-                let still_allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&mut *tx).await;if !matches!(still_allowed,Ok(true)){let _=tx.rollback().await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"message":"recipient is not a contact"}).to_string().into())).await;continue;}
+                let still_allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&mut *tx).await;if !matches!(still_allowed,Ok(true)){let _=tx.rollback().await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"message":"recipient is not a contact"}).to_string().into())).await;continue;}
                 let _=sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text),hashtext($2::text))").bind(to).bind("recipient-queue").execute(&mut *tx).await;
                 let queued=sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM queued_ciphertexts WHERE recipient_device_id=$1 AND delivered_at IS NULL AND id<>$2").bind(to).bind(id).fetch_one(&mut *tx).await.unwrap_or(MAX_QUEUED_PER_DEVICE);
                 if queued>=MAX_QUEUED_PER_DEVICE{let _=tx.rollback().await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"recipient offline queue is full"}).to_string().into())).await;continue;}

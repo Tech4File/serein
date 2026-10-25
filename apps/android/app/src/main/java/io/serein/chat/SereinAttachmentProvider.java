@@ -48,6 +48,7 @@ public final class SereinAttachmentProvider extends ContentProvider {
         }
     }
 
+    private String displayName(String name){return name.replaceFirst("^[0-9a-fA-F-]{36}_[0-9a-fA-F-]{36}_","").replaceFirst("^[0-9a-fA-F-]{36}_","");}
     @Override public boolean onCreate() { return true; }
     @Override public String getType(Uri uri) {
         String extension = MimeTypeMap.getFileExtensionFromUrl(uri.getLastPathSegment());
@@ -61,7 +62,7 @@ public final class SereinAttachmentProvider extends ContentProvider {
         MatrixCursor cursor = new MatrixCursor(columns, 1);
         Object[] values = new Object[columns.length];
         for (int i=0; i<columns.length; i++) {
-            if (OpenableColumns.DISPLAY_NAME.equals(columns[i])) values[i] = file.getName();
+            if (OpenableColumns.DISPLAY_NAME.equals(columns[i])) values[i] = displayName(file.getName());
             else if (OpenableColumns.SIZE.equals(columns[i])) values[i] = file.length();
         }
         cursor.addRow(values);

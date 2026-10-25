@@ -14,6 +14,8 @@ import java.io.InputStream;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.UUID;
 
 /**
@@ -66,10 +68,16 @@ final class SereinAttachmentStore {
         return name.isEmpty() ? "attachment" : name;
     }
 
-    private static String stableName(String transferId, String filename) {
-        try { return UUID.fromString(transferId).toString() + "_" + safeName(filename); }
+    private static String accountScope(String accountId) throws Exception {String normalized=UUID.fromString(accountId).toString();byte[] digest=MessageDigest.getInstance("SHA-256").digest(("serein-download-account-v1:"+normalized).getBytes(StandardCharsets.UTF_8));StringBuilder out=new StringBuilder();for(byte value:digest)out.append(String.format(java.util.Locale.ROOT,"%02x",value&0xff));return out.toString();}
+    private static String stableName(String accountId,String transferId,String filename) {
+        try { return accountScope(accountId)+"_"+UUID.fromString(transferId).toString()+"_"+safeName(filename); }
+        catch (Exception invalid) { throw new IllegalArgumentException("Invalid attachment account or transfer identifier."); }
+    }
+    private static String legacyName(String transferId,String filename) {
+        try { return UUID.fromString(transferId).toString()+"_"+safeName(filename); }
         catch (Exception invalid) { throw new IllegalArgumentException("Invalid transfer identifier."); }
     }
+    static boolean deleteForAccount(Context context,String accountId){try{String prefix=accountScope(accountId)+"_";File root=directory(context);File[] files=root.listFiles();if(files==null)return true;boolean ok=true;for(File file:files)if(file.isFile()&&file.getName().startsWith(prefix)&&!file.delete())ok=false;return ok;}catch(Exception ignored){return false;}}
 
     static void cleanTemporaryFiles(Context context) {
         long cutoff = System.currentTimeMillis() - 24L * 60L * 60L * 1000L;
@@ -89,19 +97,22 @@ final class SereinAttachmentStore {
         }
     }
 
-    static File existing(Context context, String transferId, String filename, long expectedBytes) {
+    static File existing(Context context,String accountId,String transferId,String filename,long expectedBytes) {
         try {
             if (expectedBytes < 0 || expectedBytes > MAX_DOWNLOAD_BYTES) return null;
             File root = directory(context);
-            File file = new File(root, stableName(transferId, filename)).getCanonicalFile();
-            return file.getPath().startsWith(root.getPath() + File.separator) && file.isFile() && file.length() == expectedBytes ? file : null;
+            File file = new File(root, stableName(accountId,transferId,filename)).getCanonicalFile();
+            if(file.getPath().startsWith(root.getPath()+File.separator)&&file.isFile()&&file.length()==expectedBytes)return file;
+            // Legacy downloads predate account-scoped filename prefixes; preserve read access but do not erase them on deletion.
+            File legacy=new File(root,legacyName(transferId,filename)).getCanonicalFile();
+            return legacy.getPath().startsWith(root.getPath()+File.separator)&&legacy.isFile()&&legacy.length()==expectedBytes?legacy:null;
         } catch (Exception ignored) { return null; }
     }
 
-    static File save(Context context, String transferId, String filename, InputStream source, long expectedBytes) throws IOException {
+    static File save(Context context,String accountId,String transferId,String filename,InputStream source,long expectedBytes) throws IOException {
         if (source == null || expectedBytes < 0 || expectedBytes > MAX_DOWNLOAD_BYTES) throw new IOException("Attachment data is unavailable or exceeds the allowed size.");
         File root = directory(context);
-        File destination = new File(root, stableName(transferId, filename)).getCanonicalFile();
+        File destination = new File(root, stableName(accountId,transferId,filename)).getCanonicalFile();
         if (!destination.getPath().startsWith(root.getPath() + File.separator)) throw new IOException("Invalid attachment path.");
         File partial = new File(root, "." + UUID.randomUUID().toString() + ".part");
         long total = 0;

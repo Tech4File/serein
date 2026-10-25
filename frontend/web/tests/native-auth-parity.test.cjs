@@ -17,7 +17,7 @@ test('mobile clients complete login-purpose OTP without persisting the password'
   assert.match(backend, /struct LoginInput \{ identity: String, password: String \}/);
   assert.match(backend, /deny_unknown_fields/);
   assert.match(backend, /"native_clients": "source_implemented_unverified"/);
-  assert.match(securityPage, /Android and iOS chat source is connected but not fully device\/live-tested/);
+  assert.match(securityPage, /Android and iOS chat source is not fully device\/live-tested/);
   assert.doesNotMatch(securityPage, /Android\/iOS message clients are not connected/);
 
   assert.match(androidApi, /void verifyLogin\(String identity, String password, String code, Callback cb\)/);

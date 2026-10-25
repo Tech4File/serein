@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import UserNotifications
 
 struct SereinUser: Decodable, Identifiable {
     let id: String
@@ -24,6 +25,10 @@ struct SereinContact: Decodable, Identifiable {
     let email_verified: Bool
     let online: Bool
     let devices: [SereinDevice]
+    let connected_at: String?
+    let deleted: Bool?
+    let deleted_at: String?
+    var isDeleted: Bool { deleted == true }
 }
 struct SereinContactRequest: Decodable, Identifiable {
     let id: String
@@ -48,6 +53,13 @@ private struct SereinMessageReply: Decodable { let message: String; let retry_af
 private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)
+    }
+}
+
+private final class SereinNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = SereinNotificationDelegate()
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound, .badge])
     }
 }
 
@@ -86,6 +98,7 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
 
     init() {
         apiBase = UserDefaults.standard.string(forKey: "serein.api-base") ?? "https://api.example.invalid"
+        UNUserNotificationCenter.current().delegate = SereinNotificationDelegate.shared
         let config = URLSessionConfiguration.default
         config.httpCookieStorage = HTTPCookieStorage.shared
         config.httpShouldSetCookies = true
@@ -258,6 +271,7 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
             fontScale = ["system", "standard", "large", "extra_large"].contains(savedScale) ? (savedScale == "standard" ? "system" : savedScale) : "system"
             reduceMotion = prefs["reduce_motion"] as? Bool ?? false
             notifications = prefs["notifications"] as? Bool ?? false
+            defaults.set(notifications, forKey: "serein.notifications.enabled")
             presenceVisibility = (prefs["presence_visibility"] as? String) == "nobody" ? "nobody" : "contacts"
             allowContactRequests = prefs["allow_contact_requests"] as? Bool ?? true
             discoverableByEmail = prefs["discoverable_by_email"] as? Bool ?? false
@@ -346,7 +360,56 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         do { _ = try await request("/api/v1/contacts/\(contact.user_id)", method: "DELETE"); await refreshAccountData() }
         catch { errorMessage = error.localizedDescription }
     }
+    func deleteAccount(password: String) async -> (deleted: Bool, localDataCleared: Bool, error: String?) {
+        guard let user else { return (false, false, "Sign in again before deleting the account.") }
+        do {
+            _ = try await request("/api/v1/me", method: "DELETE", values: ["password": password])
+            var cleared = true
+            do { try SereinLocalStore.delete(accountID: user.id) } catch { cleared = false }
+            do { try SereinDeviceCrypto.deleteAccountKeys(userID: user.id) } catch { cleared = false }
+            if !SereinAttachmentStore.shared.deleteForAccount(user.id) { cleared = false }
+            if let root = URL(string: apiBase), let cookies = HTTPCookieStorage.shared.cookies(for: root) { cookies.filter { $0.name == "serein_session" }.forEach { HTTPCookieStorage.shared.deleteCookie($0) } }
+            defaults.removeObject(forKey: "serein.device-id")
+            self.user = nil; currentDevice = nil; contacts = []; contactRequests = []; blocks = []; devices = []
+            cancelVerification()
+            return (true, cleared, nil)
+        } catch { return (false, false, error.localizedDescription) }
+    }
+    func setNotificationsEnabled(_ enabled: Bool) async -> Bool {
+        let center = UNUserNotificationCenter.current()
+        var allowed = false
+        if enabled {
+            let current = await center.notificationSettings()
+            switch current.authorizationStatus {
+            case .notDetermined:
+                do { allowed = try await center.requestAuthorization(options: [.alert, .sound, .badge]) }
+                catch { errorMessage = error.localizedDescription }
+            case .authorized, .provisional, .ephemeral: allowed = true
+            case .denied: allowed = false
+            @unknown default: allowed = false
+            }
+        }
+        notifications = enabled && allowed
+        defaults.set(notifications, forKey: "serein.notifications.enabled")
+        await savePreferences()
+        return notifications == enabled
+    }
+    func notificationAuthorizationStatus() async -> UNAuthorizationStatus {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        return settings.authorizationStatus
+    }
+    func notifyIncomingMessage() {
+        guard notifications, defaults.bool(forKey: "serein.notifications.enabled") else { return }
+        let center = UNUserNotificationCenter.current()
+        let content = UNMutableNotificationContent()
+        content.title = "New encrypted message"
+        content.body = "You have a new encrypted message in Serein."
+        content.sound = defaults.object(forKey: "serein.notifications.sound") as? Bool == false ? nil : .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false))
+        center.add(request) { _ in }
+    }
     func savePreferences() async {
+        defaults.set(notifications, forKey: "serein.notifications.enabled")
         do {
             _ = try await request("/api/v1/settings", method: "PUT", values: ["theme": theme, "font_scale": fontScale, "reduce_motion": reduceMotion, "notifications": notifications, "presence_visibility": presenceVisibility, "allow_contact_requests": allowContactRequests, "discoverable_by_email": discoverableByEmail])
         } catch { errorMessage = error.localizedDescription }

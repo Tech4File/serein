@@ -37,6 +37,7 @@ final class SereinDeviceCrypto {
     private static final SecureRandom RANDOM = new SecureRandom();
     private SereinDeviceCrypto() {}
 
+    static boolean deleteForAccount(Context context,String userId){boolean first=SereinSecureVault.removePrefix(context,LOCAL_KEY_PREFIX+userId+":");boolean second=SereinSecureVault.removePrefix(context,"device-layer2-key-v1:"+userId+":");return first&&second;}
     static KeyPair loadOrCreate(Context context, String userId, String deviceId) throws Exception { return loadOrCreate(context, LOCAL_KEY_PREFIX, userId, deviceId); }
     static KeyPair loadOrCreateLayer2(Context context, String userId, String deviceId) throws Exception { return loadOrCreate(context, "device-layer2-key-v1:", userId, deviceId); }
     private static KeyPair loadOrCreate(Context context, String prefix, String userId, String deviceId) throws Exception {

@@ -44,6 +44,7 @@ final class SereinSecureVault {
     }
 
     static synchronized void remove(Context context, String name) { prefs(context).edit().remove(name).commit(); }
+    static synchronized boolean removePrefix(Context context, String prefix) { SharedPreferences values=prefs(context);SharedPreferences.Editor editor=values.edit();for(String key:values.getAll().keySet())if(key.startsWith(prefix))editor.remove(key);return editor.commit(); }
     private static SharedPreferences prefs(Context context) { return context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
     private static SecretKey key() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);

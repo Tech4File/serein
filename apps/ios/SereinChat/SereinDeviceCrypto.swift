@@ -31,6 +31,10 @@ final class SereinDeviceCrypto {
 
     private init(_ privateMaterial: PrivateMaterial) { self.privateMaterial = privateMaterial }
 
+    static func deleteAccountKeys(userID: String) throws {
+        try SereinKeychain.delete(accountsWithPrefix: "device-key-v1:\(userID):")
+        try SereinKeychain.delete(accountsWithPrefix: "device-layer2-key-v1:\(userID):")
+    }
     static func loadOrCreate(userID: String, deviceID: String) throws -> SereinDeviceCrypto { try loadOrCreate(userID: userID, deviceID: deviceID, layer2: false) }
     static func loadOrCreateLayer2(userID: String, deviceID: String) throws -> SereinDeviceCrypto { try loadOrCreate(userID: userID, deviceID: deviceID, layer2: true) }
     private static func loadOrCreate(userID: String, deviceID: String, layer2: Bool) throws -> SereinDeviceCrypto {
@@ -250,5 +254,17 @@ enum SereinKeychain {
             let update = SecItemUpdate(query as CFDictionary, attrs as CFDictionary)
             guard update == errSecSuccess else { throw NSError(domain: "SereinKeychain", code: Int(update), userInfo: [NSLocalizedDescriptionKey: "Protected device-key storage could not be updated."]) }
         } else if status != errSecSuccess { throw NSError(domain: "SereinKeychain", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Protected device-key storage could not be written."]) }
+    }
+    static func delete(account: String) throws {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "io.serein.chat.device-keys", kSecAttrAccount as String: account]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw NSError(domain: "SereinKeychain", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Account keys could not be fully removed from Keychain."]) }
+    }
+    static func delete(accountsWithPrefix prefix: String) throws {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "io.serein.chat.device-keys", kSecReturnAttributes as String: true, kSecMatchLimit as String: kSecMatchLimitAll]
+        var result: CFTypeRef?; let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return }
+        guard status == errSecSuccess, let rows = result as? [[String: Any]] else { throw NSError(domain: "SereinKeychain", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Account keys could not be listed for deletion."]) }
+        for row in rows { if let account = row[kSecAttrAccount as String] as? String, account.hasPrefix(prefix) { try delete(account: account) } }
     }
 }

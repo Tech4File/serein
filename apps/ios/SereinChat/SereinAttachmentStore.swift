@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import UIKit
 
@@ -9,25 +10,31 @@ final class SereinAttachmentStore: NSObject, UIDocumentInteractionControllerDele
     static let shared = SereinAttachmentStore()
     private let folderName = "Serein/Downloads"
     private let maximumDownloadBytes: Int64 = 64 * 1024 * 1024
-    private var cachedDownloadsDirectory: URL?
+    private var cachedDownloadsDirectories: [String: URL] = [:]
     private var activeDocumentController: UIDocumentInteractionController?
     private var dismissHandler: (() -> Void)?
 
     private override init() { super.init() }
 
-    private func downloadsDirectory() throws -> URL {
-        if let cachedDownloadsDirectory, FileManager.default.fileExists(atPath: cachedDownloadsDirectory.path) { return cachedDownloadsDirectory }
-        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            throw StoreError.storageUnavailable
-        }
-        let directory = documents.appendingPathComponent(folderName, isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [.protectionKey: FileProtectionType.complete]
-        )
-        cachedDownloadsDirectory = directory
+    private func accountScope(_ uuid: UUID) -> String { SHA256.hash(data: Data("serein-download-account-v1:\(uuid.uuidString.lowercased())".utf8)).prefix(16).map { String(format: "%02x", $0) }.joined() }
+    private func downloadsDirectory(accountID: String? = nil) throws -> URL {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { throw StoreError.storageUnavailable }
+        let base = documents.appendingPathComponent(folderName, isDirectory: true)
+        let key: String
+        if let accountID { guard let uuid = UUID(uuidString: accountID) else { throw StoreError.storageUnavailable }; key = accountScope(uuid) }
+        else { key = "legacy" }
+        if let cached = cachedDownloadsDirectories[key], FileManager.default.fileExists(atPath: cached.path) { return cached }
+        let directory = key == "legacy" ? base : base.appendingPathComponent(key, isDirectory: true)
+        try FileManager.default.createDirectory(directory, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
+        cachedDownloadsDirectories[key] = directory
         return directory
+    }
+    func deleteForAccount(_ accountID: String) -> Bool {
+        guard let uuid = UUID(uuidString: accountID), let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
+        let scope = accountScope(uuid)
+        let directory = documents.appendingPathComponent(folderName, isDirectory: true).appendingPathComponent(scope, isDirectory: true)
+        do { if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }; cachedDownloadsDirectories.removeValue(forKey: scope); return true }
+        catch { return false }
     }
 
     private func safeFilename(_ input: String?) -> String {
@@ -56,22 +63,28 @@ final class SereinAttachmentStore: NSObject, UIDocumentInteractionControllerDele
         }
     }
 
-    func existing(transferID: String, filename: String?, expectedBytes: Int64) -> URL? {
+    func existing(accountID: String,transferID: String,filename: String?,expectedBytes: Int64) -> URL? {
         guard expectedBytes >= 0, expectedBytes <= maximumDownloadBytes,
               let name = try? stableName(transferID: transferID, filename: filename),
-              let root = try? downloadsDirectory() else { return nil }
+              let root = try? downloadsDirectory(accountID: accountID) else { return nil }
         let url = root.appendingPathComponent(name, isDirectory: false).standardizedFileURL
-        guard url.deletingLastPathComponent() == root.standardizedFileURL,
-              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+        if url.deletingLastPathComponent() == root.standardizedFileURL,
+           let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attributes[.size] as? NSNumber, size.int64Value == expectedBytes { return url }
+        // Retain read compatibility for files saved before downloads became account-scoped.
+        guard let legacyRoot = try? downloadsDirectory() else { return nil }
+        let legacy = legacyRoot.appendingPathComponent(name, isDirectory: false).standardizedFileURL
+        guard legacy.deletingLastPathComponent() == legacyRoot.standardizedFileURL,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: legacy.path),
               let size = attributes[.size] as? NSNumber, size.int64Value == expectedBytes else { return nil }
-        return url
+        return legacy
     }
 
     /// Copies already-decrypted bytes from a temporary file to persistent local storage.
     /// The caller owns crypto and must authenticate the complete transfer before calling.
-    func save(transferID: String, filename: String?, from sourceURL: URL, expectedBytes: Int64) throws -> URL {
+    func save(accountID: String,transferID: String,filename: String?,from sourceURL: URL,expectedBytes: Int64) throws -> URL {
         guard expectedBytes >= 0, expectedBytes <= maximumDownloadBytes else { throw StoreError.invalidSizeLimit }
-        let root = try downloadsDirectory()
+        let root = try downloadsDirectory(accountID: accountID)
         let name = try stableName(transferID: transferID, filename: filename)
         let destination = root.appendingPathComponent(name, isDirectory: false).standardizedFileURL
         guard destination.deletingLastPathComponent() == root.standardizedFileURL else { throw StoreError.invalidFilename }
@@ -98,9 +111,12 @@ final class SereinAttachmentStore: NSObject, UIDocumentInteractionControllerDele
     /// Offers the saved file to iOS' native document/open-in UI, never an inline chat preview.
     func open(_ fileURL: URL, from viewController: UIViewController, onDismiss: @escaping () -> Void = {}) throws {
         guard fileURL.isFileURL,
-              let root = try? downloadsDirectory(),
-              fileURL.standardizedFileURL.deletingLastPathComponent() == root.standardizedFileURL,
               FileManager.default.fileExists(atPath: fileURL.path) else { throw StoreError.fileUnavailable }
+        let parent = fileURL.standardizedFileURL.deletingLastPathComponent()
+        let base = try downloadsDirectory().standardizedFileURL
+        let legacy = parent == base
+        let accountScoped = parent.deletingLastPathComponent() == base && UUID(uuidString: parent.lastPathComponent) != nil
+        guard legacy || accountScoped else { throw StoreError.fileUnavailable }
         let controller = UIDocumentInteractionController(url: fileURL)
         controller.delegate = self
         activeDocumentController = controller
