@@ -12,7 +12,7 @@ function runStatus(fetchImpl) {
   for (const id of ['summary','overall','checkedAt','api','database','frontend','email','messaging','transfers','calls','background','refresh']) {
     elements.set(id, { textContent: '', className: '', dataset: {}, addEventListener() {} });
   }
-  const context = { document: { getElementById: id => elements.get(id) }, fetch: fetchImpl, Date, Promise, console };
+  const context = { document: { documentElement: { dataset: {} }, getElementById: id => elements.get(id) }, localStorage: { getItem: () => 'system' }, fetch: fetchImpl, Date, Promise, console };
   vm.runInNewContext(script, context, { filename: 'status.js' });
   return elements;
 }
@@ -22,7 +22,7 @@ test('status page contains all IDs consumed by its script and distinguishes heal
     assert.match(html, new RegExp(`id=["']${id}["']`));
   }
   assert.match(html, /FEATURE IMPLEMENTATION STATUS · NOT LIVE QA/);
-  assert.match(html, /Signaling and QUIC media transport are not implemented/);
+  assert.match(html, /Calling is not implemented\. The app does not request camera or microphone access/);
   assert.match(html, /Remote push delivery is not configured/);
 });
 

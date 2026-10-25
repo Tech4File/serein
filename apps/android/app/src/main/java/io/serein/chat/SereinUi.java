@@ -32,7 +32,7 @@ final class SereinUi {
     static int muted(Context c) { return isDark(c) ? DARK_MUTED : MUTED; }
     static int accent(Context c) { return isDark(c) ? DARK_GREEN : GREEN; }
     static int dp(Context c, float v) { return (int)(v * c.getResources().getDisplayMetrics().density + 0.5f); }
-    static float fontSize(Context c, float size) { String scale=c.getSharedPreferences("serein",0).getString("font_scale","system"); float factor="large".equals(scale)?1.15f:"extra_large".equals(scale)?1.30f:1f; return Math.max(10f,size*factor); }
+    static float fontSize(Context c, float size) { String scale=c.getSharedPreferences("serein",0).getString("font_scale","system"); float factor=SereinTokens.FONT_SCALE_LARGE; if("extra_large".equals(scale))factor=SereinTokens.FONT_SCALE_EXTRA_LARGE;else if(!"large".equals(scale))factor=1f; return Math.max(SereinTokens.MIN_FONT_SIZE_SP,size*factor); }
     static GradientDrawable shape(Context c, int color, int radius) {
         GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(c, radius)); return d;
     }

@@ -1,5 +1,8 @@
 (() => {
   'use strict';
+  let savedFontScale = 'system';
+  try { savedFontScale = localStorage.getItem('serein.font-scale.v1') || 'system'; } catch { /* use the system default */ }
+  document.documentElement.dataset.fontScale = ['system', 'large', 'extra_large'].includes(savedFontScale) ? savedFontScale : 'system';
   const healthLabels = {
     api: { ready: ['Operational', 'ok'], other: ['Unavailable', 'bad'] },
     database: { ready: ['Connected', 'ok'], unavailable: ['Unavailable', 'bad'] },

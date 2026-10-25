@@ -24,4 +24,7 @@ final class SereinTokens {
     static final int NOTICE_TEXT_DARK = 0xFFEDDAA5;
     static final int ACCENT_SOFT_LIGHT = 0xFFE3F4EF;
     static final int ACCENT_SOFT_DARK = 0xFF203B36;
+    static final float FONT_SCALE_LARGE = 1.15f;
+    static final float FONT_SCALE_EXTRA_LARGE = 1.3f;
+    static final float MIN_FONT_SIZE_SP = 12f;
 }

@@ -1,6 +1,5 @@
 import SwiftUI
 import UIKit
-import AVFoundation
 import UserNotifications
 import UniformTypeIdentifiers
 
@@ -18,6 +17,7 @@ private struct SereinBackupDocument: FileDocument {
 struct SereinProductRootView: View {
     @StateObject private var api = SereinAPI()
     @Environment(\.dynamicTypeSize) private var systemDynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @AppStorage("serein.restore-prompt-done") private var restorePromptDone = false
     @State private var showingRestoreOnboarding = false
     @AppStorage("serein.theme") private var theme = "system"
@@ -30,7 +30,7 @@ struct SereinProductRootView: View {
         return build.map { "\(version) · build \($0)" } ?? version
     }
     private var effectiveDynamicTypeSize: DynamicTypeSize {
-        let minimum: DynamicTypeSize = api.fontScale == "extra_large" ? .xxxLarge : .xLarge
+        let minimum: DynamicTypeSize = api.fontScale == "extra_large" ? SereinTokens.fontScaleExtraLargeMinimum : SereinTokens.fontScaleLargeMinimum
         guard api.fontScale != "system" else { return systemDynamicTypeSize }
         return systemDynamicTypeSize < minimum ? minimum : systemDynamicTypeSize
     }
@@ -41,6 +41,12 @@ struct SereinProductRootView: View {
         }
         .tint(SereinPalette.green)
         .environment(\.dynamicTypeSize, effectiveDynamicTypeSize)
+        .transaction { transaction in
+            if api.reduceMotion || systemReduceMotion {
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
+        }
         .onChange(of: api.errorMessage) { value in showingError = value != nil }
         .onChange(of: api.theme) { value in theme = value }
         .alert("Serein", isPresented: $showingError) {
@@ -207,7 +213,6 @@ private struct SereinProductTabs: View {
         TabView {
             SereinNativeChats(api: api).tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
             SereinNativeContacts(api: api).tabItem { Label("Contacts", systemImage: "person.2") }
-            SereinNativeCalls().tabItem { Label("Calls", systemImage: "phone") }
             SereinNativeSettings(api: api).tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
         }
     }
@@ -462,55 +467,9 @@ private struct SereinNativeContacts: View {
     }
 }
 
-private struct SereinNativeCalls: View {
-    @State private var pendingVideo: Bool?
-    @State private var showPermissionDialog = false
-    @State private var permissionDenied = false
-    @State private var permissionStatus = "No call was started"
-    private var permissionExplanation: String {
-        pendingVideo == true ? "Serein needs microphone and camera access to prepare a video call. Permission is required before any call can begin." : "Serein needs microphone access to prepare an audio call. Permission is required before any call can begin."
-    }
-    var body: some View {
-        NavigationView {
-            VStack(spacing: 16) {
-                Image(systemName: pendingVideo == true ? "video" : "waveform.path").font(.system(size: 38, relativeTo: .body)).foregroundStyle(SereinPalette.green)
-                Text(pendingVideo == nil ? "Private calling setup" : "Preparing \(pendingVideo == true ? "video" : "audio") call").font(.system(size: 20, weight: .bold, relativeTo: .body))
-                Text("Microphone is required for audio; microphone and camera are required for video. Permission checks do not place a call. Encrypted QUIC media transport and signaling are not integrated, so no remote call will be started.").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                if pendingVideo == nil {
-                    Button { pendingVideo = false; permissionDenied = false; showPermissionDialog = true } label: { Label("Start audio call", systemImage: "phone.fill").frame(maxWidth: .infinity) }.buttonStyle(.borderedProminent)
-                    Button { pendingVideo = true; permissionDenied = false; showPermissionDialog = true } label: { Label("Start video call", systemImage: "video.fill").frame(maxWidth: .infinity) }.buttonStyle(.bordered)
-                } else {
-                    SereinStatusPill(title: permissionStatus)
-                    Button("Retry permission check") { requestCallPermissions() }.buttonStyle(.borderedProminent)
-                    Button("Cancel setup", role: .cancel) { pendingVideo = nil; permissionStatus = "No call was started" }.buttonStyle(.bordered)
-                }
-                Spacer(minLength: 0)
-            }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(uiColor: .systemGroupedBackground)).navigationTitle("Calls")
-                .alert(permissionDenied ? "Call permission required" : "Permissions before calling", isPresented: $showPermissionDialog) {
-                    Button("Retry") { requestCallPermissions() }
-                    Button("Open Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }
-                    Button("Cancel", role: .cancel) { pendingVideo = nil; permissionStatus = "No call was started" }
-                } message: { Text(permissionDenied ? "Access is denied or blocked. Retry the system permission request, or enable the required access in iOS Settings. No call has started." : permissionExplanation) }
-        }
-    }
-    private func requestCallPermissions() {
-        guard let video = pendingVideo else { return }
-        permissionStatus = "Checking permissions…"
-        AVAudioSession.sharedInstance().requestRecordPermission { microphoneGranted in
-            guard microphoneGranted else { DispatchQueue.main.async { permissionDenied = true; permissionStatus = "Microphone permission denied"; showPermissionDialog = true }; return }
-            if video {
-                AVCaptureDevice.requestAccess(for: .video) { cameraGranted in
-                    DispatchQueue.main.async { permissionDenied = !cameraGranted; permissionStatus = cameraGranted ? "Permissions granted · no call connected" : "Camera permission denied"; showPermissionDialog = !cameraGranted }
-                }
-            } else {
-                DispatchQueue.main.async { permissionDenied = false; permissionStatus = "Microphone permission granted · no call connected" }
-            }
-        }
-    }
-}
-
 private struct SereinNativeSettings: View {
     @ObservedObject var api: SereinAPI
+    @Environment(\.scenePhase) private var scenePhase
     @State private var confirmRevokeOthers = false
     @State private var showConnectionSettings = false
     @State private var showDeleteAccount = false
@@ -545,11 +504,12 @@ private struct SereinNativeSettings: View {
                     ForEach(api.devices) { device in HStack { VStack(alignment: .leading, spacing: 3) { Text(device.name).font(.system(size: 12, weight: .semibold, relativeTo: .body)); Text(device.online == true ? "Online" : (device.last_seen_at ?? "Last active unavailable")).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Spacer(); if device.current == true { Text("THIS DEVICE").font(.system(size: 10, weight: .bold, relativeTo: .body)).foregroundStyle(SereinPalette.green) } else { Button("Revoke", role: .destructive) { Task { await api.revoke(device) } }.font(.system(size: 10, relativeTo: .body)) } } }
                     Button("Revoke other devices", role: .destructive) { confirmRevokeOthers = true }
                 }
-                Section("Security status") { Text("Web and native chat use separate Layer 1/Layer 2 per-device P-256 ECDH key pairs, HKDF-SHA256, and nested AES-GCM after combined local fingerprint verification. Native private keys use Secure Enclave when available and otherwise Keychain-protected CryptoKit keys; local history uses a device-only Keychain key. This implementation has not been independently reviewed and does not provide forward secrecy, automatic key rotation/recovery, or background message delivery. Use test data only.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery and calls are not configured.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
+                Section("Security status") { Text("Web and native chat use separate Layer 1/Layer 2 per-device P-256 ECDH key pairs, HKDF-SHA256, and nested AES-GCM after combined local fingerprint verification. Native private keys use Secure Enclave when available and otherwise Keychain-protected CryptoKit keys; local history uses a device-only Keychain key. This implementation has not been independently reviewed and does not provide forward secrecy, automatic key rotation/recovery, or background message delivery. Use test data only.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery is not configured.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
                 Section("Danger zone") { Text("Account deletion removes server records, sessions, device keys, and this iPhone’s account-scoped local history. Contacts retain a read-only archived chat. Legacy downloads in shared Serein/Downloads cannot yet be attributed to this account and may remain; newer downloads are account-scoped.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Button("Permanently delete account", role: .destructive) { showDeleteAccount = true }.sheet(isPresented: $showDeleteAccount) { SereinDeleteAccountSheet(api: api) } }
                 Section { Button("Sign out", role: .destructive) { Task { _ = await api.signOut() } } }
             }.listStyle(.insetGrouped).navigationTitle("Settings")
                 .task { await api.refreshAccountData(); await refreshNotificationStatus() }
+                .onChange(of: scenePhase) { phase in if phase == .active { Task { await refreshNotificationStatus() } } }
                 .confirmationDialog("Revoke other devices? Their local data cannot be remotely erased.", isPresented: $confirmRevokeOthers, titleVisibility: .visible) { Button("Revoke devices", role: .destructive) { Task { await api.revokeOthers() } } }
                 .sheet(isPresented: $showConnectionSettings) { SereinConnectionSettings(api: api) }
                 .fileExporter(isPresented: $showingBackupExporter, document: backupDocument, contentType: .data, defaultFilename: backupFilename) { result in

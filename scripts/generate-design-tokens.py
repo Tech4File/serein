@@ -16,6 +16,9 @@ def css():
     lines=["/* Generated from design/tokens.json. Do not edit by hand. */",block(':root','light'),block(':root[data-theme="light"]','light'),block(':root[data-theme="dark"]','dark'),'@media(prefers-color-scheme:dark){'+block(':root[data-theme="system"]','dark')+'}']
     for key,value in DATA['spacing'].items(): lines[1]=lines[1][:-1]+f'--space-{key}:{value}px;'+'}'
     for key,value in DATA['radius'].items(): lines[1]=lines[1][:-1]+f'--radius-{key}:{value}px;'+'}'
+    typography=DATA['typography']
+    for key,value in typography['scale'].items(): lines[1]=lines[1][:-1]+f'--type-scale-{key.replace("_", "-")}:{value};'+'}'
+    lines[1]=lines[1][:-1]+f'--type-size-floor:{typography["minimum_web_rem"]}rem;'+'}'
     return '\n'.join(lines)+'\n'
 
 def argb(value): return '0xFF'+value.strip('#').upper()
@@ -24,6 +27,10 @@ def java():
     mapping={'GREEN':('light','accent'),'DARK_GREEN':('dark','accent'),'WHITE':('light','surface'),'MUTED':('light','muted'),'DARK_MUTED':('dark','muted'),'BG_LIGHT':('light','background'),'BG_DARK':('dark','background'),'SURFACE_LIGHT':('light','surface'),'SURFACE_DARK':('dark','surface'),'TEXT_LIGHT':('light','text'),'TEXT_DARK':('dark','text'),'BORDER_LIGHT':('light','border'),'BORDER_DARK':('dark','border'),'WARNING_LIGHT':('light','warning'),'WARNING_DARK':('dark','warning'),'NOTICE_LIGHT':('light','notice'),'NOTICE_DARK':('dark','notice'),'NOTICE_TEXT_LIGHT':('light','noticeText'),'NOTICE_TEXT_DARK':('dark','noticeText'),'ACCENT_SOFT_LIGHT':('light','accentSoft'),'ACCENT_SOFT_DARK':('dark','accentSoft')}
     lines=['package io.serein.chat;','','/** Generated from design/tokens.json. Do not edit by hand. */','final class SereinTokens {','    private SereinTokens() {}']
     for name,(theme,key) in mapping.items(): lines.append(f'    static final int {name} = {argb(colors[theme][key])};')
+    typography=DATA['typography']
+    lines.append(f'    static final float FONT_SCALE_LARGE = {typography["scale"]["large"]}f;')
+    lines.append(f'    static final float FONT_SCALE_EXTRA_LARGE = {typography["scale"]["extra_large"]}f;')
+    lines.append(f'    static final float MIN_FONT_SIZE_SP = {typography["minimum_android_sp"]}f;')
     lines.append('}')
     return '\n'.join(lines)+'\n'
 
@@ -35,6 +42,9 @@ def swift():
     mapping={'green':('light','accent'),'darkGreen':('dark','accent'),'mint':('light','mint'),'paleMint':('light','paleMint'),'ink':('light','text'),'muted':('light','muted'),'warning':('light','warning'),'backgroundLight':('light','background'),'backgroundDark':('dark','background'),'surfaceLight':('light','surface'),'surfaceDark':('dark','surface'),'textLight':('light','text'),'textDark':('dark','text')}
     lines=['import SwiftUI','','/// Generated from design/tokens.json. Do not edit by hand.','enum SereinTokens {']
     for name,(theme,key) in mapping.items(): lines.append(f'    static let {name} = {swift_color(c[theme][key])}')
+    typography=DATA['typography']
+    lines.append(f'    static let fontScaleLargeMinimum: DynamicTypeSize = .{typography["ios_dynamic_type_minimum"]["large"]}')
+    lines.append(f'    static let fontScaleExtraLargeMinimum: DynamicTypeSize = .{typography["ios_dynamic_type_minimum"]["extra_large"]}')
     lines.append('}')
     return '\n'.join(lines)+'\n'
 

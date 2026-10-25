@@ -41,10 +41,14 @@ public final class SereinConversationActivity extends Activity {
     private Button send, attach;
     private boolean started;
     private int pollCounter;
+    private int defaultWindowAnimations;
     private final Runnable pollTask = new Runnable() { @Override public void run() { if(engine!=null&&engine.ready()){engine.poll();if(++pollCounter%12==0)engine.refreshPeers();}if(started)handler.postDelayed(this,5000); } };
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        defaultWindowAnimations=getWindow().getAttributes().windowAnimations;
+        boolean reduced=getSharedPreferences("serein",MODE_PRIVATE).getBoolean("reduce_motion",false);
+        getWindow().setWindowAnimations(reduced?0:defaultWindowAnimations);
         try {
             JSONObject account = new JSONObject(getIntent().getStringExtra("account"));
             accountId=account.optJSONObject("user")==null?"":account.optJSONObject("user").optString("id","");
@@ -68,7 +72,7 @@ public final class SereinConversationActivity extends Activity {
         status=SereinUi.text(this,"Preparing secure messaging…",10,SereinUi.muted(this),false);status.setPadding(0,dp(5),0,dp(8));root.addView(status);
         messageScroll=new ScrollView(this);messageScroll.setFillViewport(false);messages=new LinearLayout(this);messages.setOrientation(LinearLayout.VERTICAL);messageScroll.addView(messages);root.addView(messageScroll,new LinearLayout.LayoutParams(-1,0,1));
         LinearLayout composerRow=new LinearLayout(this);composerRow.setGravity(Gravity.BOTTOM);attach=SereinUi.button(this,"＋",false);composerRow.addView(attach,new LinearLayout.LayoutParams(dp(44),dp(46)));attach.setOnClickListener(v->pickFile());
-        composer=new EditText(this);composer.setHint("Write an encrypted message…");composer.setTextSize(16);composer.setMinLines(1);composer.setMaxLines(4);composer.setPadding(dp(10),dp(8),dp(10),dp(8));composer.setBackgroundColor(SereinUi.surface(this));composerRow.addView(composer,new LinearLayout.LayoutParams(0,-2,1));
+        composer=new EditText(this);composer.setHint("Write an encrypted message…");composer.setTextSize(SereinUi.fontSize(this,16));composer.setMinLines(1);composer.setMaxLines(4);composer.setPadding(dp(10),dp(8),dp(10),dp(8));composer.setBackgroundColor(SereinUi.surface(this));composerRow.addView(composer,new LinearLayout.LayoutParams(0,-2,1));
         send=SereinUi.button(this,"Send",true);composerRow.addView(send,new LinearLayout.LayoutParams(dp(64),dp(46)));send.setOnClickListener(v->sendText());root.addView(composerRow);composer.setEnabled(false);send.setEnabled(false);attach.setEnabled(false);setContentView(root);
     }
     private void sendText(){if(contact!=null&&contact.optBoolean("deleted")){toast("This archived conversation is read-only.");return;}String text=composer.getText().toString().trim();if(text.isEmpty())return;send.setEnabled(false);status.setText("Encrypting separately for verified recipient devices…");engine.sendText(text).whenComplete((ignored,error)->runOnUiThread(()->{send.setEnabled(!contact.optBoolean("deleted"));if(error!=null)status.setText(safeError(error));else{composer.setText("");status.setText(engine.status());}render();}));}

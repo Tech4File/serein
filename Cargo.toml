@@ -4,5 +4,7 @@ members = [
     "backend",
     "crates/serein-core",
     "crates/serein-moq-engine",
-    "media-transport-spike",
 ]
+
+[workspace.package]
+version = "0.4.0-dev.26"

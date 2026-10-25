@@ -1,5 +1,6 @@
 package io.serein.chat;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.security.keystore.KeyGenParameterSpec;
@@ -43,7 +44,11 @@ final class SereinSecureVault {
         cipher.updateAAD(name.getBytes(StandardCharsets.UTF_8)); return cipher.doFinal(encrypted);
     }
 
+    // Persist vault-key deletion before callers report cleanup complete.
+    @SuppressLint("ApplySharedPref")
     static synchronized void remove(Context context, String name) { prefs(context).edit().remove(name).commit(); }
+    // Delete key material synchronously so account cleanup does not report success before it is durable.
+    @SuppressLint("ApplySharedPref")
     static synchronized boolean removePrefix(Context context, String prefix) { SharedPreferences values=prefs(context);SharedPreferences.Editor editor=values.edit();for(String key:values.getAll().keySet())if(key.startsWith(prefix))editor.remove(key);return editor.commit(); }
     private static SharedPreferences prefs(Context context) { return context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
     private static SecretKey key() throws Exception {

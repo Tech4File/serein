@@ -12,6 +12,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: ./.github/actions/sync-version
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -23,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/sync-version
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -42,14 +44,6 @@ jobs:
           node --check frontend/web/status.js
           node --test frontend/web/tests/*.test.cjs
           node --check frontend/web/components/serein-ui.js
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          html=Path('media-transport-spike/web/index.html').read_text()
-          scripts=re.findall(r'<script>(.*?)</script>', html, re.S)
-          Path('/tmp/wt-inline-check.js').write_text('\n'.join(scripts))
-          PY
-          node --check /tmp/wt-inline-check.js
       - name: Upload static web client
         uses: actions/upload-artifact@v4
         with:
@@ -62,13 +56,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/sync-version
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --manifest-path backend/Cargo.toml
       - run: cargo test --manifest-path backend/Cargo.toml
       - run: cargo test --manifest-path Cargo.toml -p serein-core
       - run: cargo test --manifest-path Cargo.toml -p serein-moq-engine
-      - run: cargo check --manifest-path media-transport-spike/Cargo.toml
       # The manual auth smoke test needs two real inboxes and live mail-provider credentials.
       # Keep it out of CI so test messages and secrets are never sent to a fake endpoint.
 
@@ -87,6 +81,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/sync-version
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -98,6 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/sync-version
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -134,6 +130,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/sync-version
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -172,6 +169,7 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/sync-version
       - name: Select stable Xcode and report runner architecture
         run: |
           set -euo pipefail

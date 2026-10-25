@@ -167,7 +167,6 @@ async fn security_capabilities() -> Json<Value> {
             "independent_review": "not_started"
         },
         "calls": {
-            "permission_preflight": "source_implemented_unverified",
             "quic_media_transport": "not_implemented",
             "session_signaling": "not_implemented",
             "device_session_coordination": "not_implemented"

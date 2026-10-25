@@ -8,8 +8,6 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.media.RingtoneManager;
-import android.net.Uri;
 import android.os.Build;
 
 /** Local foreground-sync notifications; there is no background push service yet. */
@@ -20,7 +18,6 @@ final class SereinNotifications {
     private SereinNotifications() { }
 
     static void ensureChannels(Context context) {
-        if (Build.VERSION.SDK_INT < 26) return;
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) return;
         NotificationChannel sound = new NotificationChannel(CHANNEL_SOUND, "Messages · sound", NotificationManager.IMPORTANCE_DEFAULT);
@@ -44,9 +41,9 @@ final class SereinNotifications {
         if (manager == null) return;
         Intent intent = new Intent(context, MainActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent pending = PendingIntent.getActivity(context, 9101, intent, PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0));
+        PendingIntent pending = PendingIntent.getActivity(context, 9101, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         String channel = soundEnabled ? CHANNEL_SOUND : CHANNEL_SILENT;
-        Notification.Builder builder = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(context, channel) : new Notification.Builder(context);
+        Notification.Builder builder = new Notification.Builder(context, channel);
         builder.setSmallIcon(android.R.drawable.ic_dialog_email)
                 .setContentTitle("New encrypted message")
                 .setContentText("You have a new encrypted message in Serein.")
@@ -54,7 +51,6 @@ final class SereinNotifications {
                 .setAutoCancel(true)
                 .setCategory(Notification.CATEGORY_MESSAGE)
                 .setVisibility(Notification.VISIBILITY_PRIVATE);
-        if (Build.VERSION.SDK_INT < 26 && soundEnabled) builder.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION));
         try { manager.notify((int) (System.nanoTime() & 0x7fffffff), builder.build()); }
         catch (SecurityException ignored) { /* Settings may have revoked permission during the sync. */ }
     }

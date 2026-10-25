@@ -5,12 +5,12 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
-test('large text presets raise the whole web UI and lift tiny-text floors', () => {
+test('large text presets use shared scales and lift tiny-text floors', () => {
   const css = read('style.css');
-  assert.match(css, /data-font-scale="large"\]\{--font-scale:1\.45\}/);
-  assert.match(css, /data-font-scale="extra_large"\]\{--font-scale:1\.8\}/);
+  assert.match(css, /data-font-scale="large"\]\{--font-scale:var\(--type-scale-large,1\.15\)\}/);
+  assert.match(css, /data-font-scale="extra_large"\]\{--font-scale:var\(--type-scale-extra-large,1\.3\)\}/);
   assert.ok(!/max\(0?\.(?:625|6875)rem,/.test(css), 'small text must not retain the old 10–11px floor');
-  assert.match(css, /max\(0\.8125rem,/);
+  assert.match(css, /var\(--type-size-floor,0\.8125rem\)/);
   assert.match(css, /\.logout-btn[^}]*font-size:[^}]*var\(--font-scale/);
   assert.match(css, /\.settings-nav button[^}]*font-size:[^}]*var\(--font-scale/);
   assert.match(css, /\.auth-card input[^}]*font-size:[^}]*var\(--font-scale/);
@@ -24,8 +24,9 @@ test('font-size preference persists locally before login and is reused on securi
   assert.match(app, /localStorage\.getItem\(FONT_SCALE_KEY\)/);
   assert.match(app, /applyFontScale\(state\.settings\.font_scale\)/);
   assert.match(security, /localStorage\.getItem\('serein\.font-scale\.v1'\)/);
-  assert.match(security, /savedFontScale === 'large' \? 1\.45/);
-  assert.match(security, /savedFontScale === 'extra_large' \? 1\.8/);
+  assert.match(security, /dataset\.fontScale = \['system', 'large', 'extra_large'\]/);
+  assert.match(read('security.html'), /--font-scale:var\(--type-scale-large,1\.15\)/);
+  assert.match(read('security.html'), /--font-scale:var\(--type-scale-extra-large,1\.3\)/);
 });
 
 test('native dialog backdrop clicks dismiss but respect backup-operation lock', () => {

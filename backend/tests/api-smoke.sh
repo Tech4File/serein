@@ -49,7 +49,7 @@ assert x['e2ee']['protocol']=='independent_device_bound_layer2_v2' and x['e2ee']
 assert x['e2ee']['device_key_registry']=='dual_public_key_source_implemented_unverified' and x['e2ee']['web_device_key_enrollment']=='web_android_ios_source_implemented_unverified'
 assert x['e2ee']['client_encrypt_decrypt']=='web_android_ios_source_implemented_unverified' and x['e2ee']['message_delivery']=='enabled' and x['e2ee']['independent_review']=='not_started'
 assert x['file_transfers']['web_client']=='source_implemented_unverified' and x['file_transfers']['native_clients']=='not_implemented'
-assert x['calls']['permission_preflight']=='source_implemented_unverified' and x['calls']['quic_media_transport']=='not_implemented'
+assert 'permission_preflight' not in x['calls'] and x['calls']['quic_media_transport']=='not_implemented'
 PY
 unknown_resend_status="$(curl -sS -D "$TMP/resend-accepted.headers" -o "$TMP/resend-accepted.json" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"identity":"unknown-account@example.test"}' "$BASE_URL/api/v1/auth/resend-verification")"
 test "$unknown_resend_status" = 202

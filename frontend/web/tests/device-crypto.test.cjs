@@ -55,7 +55,7 @@ test('both participants derive the same candidate key; AES-GCM decrypts and reje
   const aliceKey = await deriveOwnAndPeer(alice, 'account-a', 'device-a', bob, 'account-b', 'device-b');
   const bobKey = await deriveOwnAndPeer(bob, 'account-b', 'device-b', alice, 'account-a', 'device-a');
   const iv = webcrypto.getRandomValues(new Uint8Array(12));
-  const aad = textEncoder.encode('serein-message-prototype-v1');
+  const aad = textEncoder.encode('serein-message-crypto-test-v1');
   const clear = textEncoder.encode('local crypto conformance test');
   const ciphertext = await webcrypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, aliceKey, clear);
   const opened = await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad }, bobKey, ciphertext);

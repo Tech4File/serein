@@ -8,8 +8,6 @@
     web_android_ios_source_implemented_unverified: ['Web/Android/iOS source · runtime unverified', 'warn'],
     independent_layer1_layer2_key_pairs_source_implemented_unverified: ['Independent Layer 1/Layer 2 key pairs · unverified', 'warn'],
     browser_native_supported_codecs_only: ['Browser-supported codecs only', 'warn'],
-    prototype: ['Prototype · not used for messages', 'warn'],
-    web_prototype: ['Web prototype · not connected to messaging', 'warn'],
     web_implemented_unreviewed: ['Web path active · independent review pending', 'warn'],
     manual_fingerprint_verification: ['Manual fingerprint comparison required', 'warn'],
     manual_combined_fingerprint_verification: ['Compare combined device-key fingerprint manually', 'warn'],
@@ -43,16 +41,15 @@
       independent_review: 'not_started',
     },
     calls: {
-      permission_preflight: 'source_implemented_unverified', quic_media_transport: 'not_implemented',
-      session_signaling: 'not_implemented', device_session_coordination: 'not_implemented',
+      quic_media_transport: 'not_implemented', session_signaling: 'not_implemented',
+      device_session_coordination: 'not_implemented',
     },
   };
 
   const byId = (id) => document.getElementById(id);
   let savedFontScale = 'system';
   try { savedFontScale = localStorage.getItem('serein.font-scale.v1') || 'system'; } catch { /* use the system default */ }
-  const fontScale = savedFontScale === 'large' ? 1.45 : savedFontScale === 'extra_large' ? 1.8 : 1;
-  document.documentElement.style.setProperty('--font-scale', String(fontScale));
+  document.documentElement.dataset.fontScale = ['system', 'large', 'extra_large'].includes(savedFontScale) ? savedFontScale : 'system';
   const setStatus = (id, key, group = '') => {
     const element = byId(id);
     const result = group ? labels[group]?.[key] : labels[key];
@@ -94,7 +91,6 @@
     setStatus('transfer-web', transfers.web_client || 'unknown');
     setStatus('transfer-native', transfers.native_clients || 'unknown');
     setStatus('transfer-preview', transfers.media_preview || 'unknown');
-    setStatus('call-permissions', calls.permission_preflight || 'unknown');
     setStatus('call-quic', calls.quic_media_transport || 'unknown');
   }
 

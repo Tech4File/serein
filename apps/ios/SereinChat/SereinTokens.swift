@@ -15,4 +15,6 @@ enum SereinTokens {
     static let surfaceDark = Color(red: 0.090196, green: 0.121569, blue: 0.145098)
     static let textLight = Color(red: 0.090196, green: 0.137255, blue: 0.168627)
     static let textDark = Color(red: 0.925490, green: 0.949020, blue: 0.949020)
+    static let fontScaleLargeMinimum: DynamicTypeSize = .xLarge
+    static let fontScaleExtraLargeMinimum: DynamicTypeSize = .xxLarge
 }
