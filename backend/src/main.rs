@@ -38,13 +38,14 @@ type PeerMap = DashMap<Uuid, Peer>;
 #[derive(Clone)] struct Peer { connection_id: Uuid, tx: mpsc::Sender<String> }
 #[derive(Clone)] struct AuthContext { user_id: Uuid, username: String, email: String, display_name: String, email_verified: bool, device_id: Uuid, device_name: String, session_hash: Vec<u8> }
 #[derive(Deserialize)] struct RegisterInput { username: String, email: String, display_name: String, password: String }
-#[derive(Deserialize)] struct LoginInput { identity: String, password: String, device_name: Option<String>, device_id: Option<Uuid> }
+#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct LoginInput { identity: String, password: String }
 #[derive(Deserialize)] struct VerifyEmailInput { email: String, code: String, device_name: Option<String>, device_id: Option<Uuid> }
+#[derive(Deserialize)] struct VerifyLoginInput { identity: String, password: String, code: String, device_name: Option<String>, device_id: Option<Uuid> }
 #[derive(Deserialize)] struct ResendVerificationInput { identity: String }
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct AddContactInput { identity: Option<String>, username: Option<String>, email: Option<String> }
 #[derive(Deserialize,Serialize,Default)] #[serde(deny_unknown_fields)] struct SettingsPatch { #[serde(skip_serializing_if="Option::is_none")] theme: Option<String>, #[serde(skip_serializing_if="Option::is_none")] font_scale: Option<String>, #[serde(skip_serializing_if="Option::is_none")] reduce_motion: Option<bool>, #[serde(skip_serializing_if="Option::is_none")] notifications: Option<bool>, #[serde(skip_serializing_if="Option::is_none")] presence_visibility: Option<String>, #[serde(skip_serializing_if="Option::is_none")] allow_contact_requests: Option<bool>, #[serde(skip_serializing_if="Option::is_none")] discoverable_by_email: Option<bool> }
 #[derive(Serialize)] struct ErrorBody { error: String }
-#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct DevicePublicKeyInput { algorithm: String, public_key: P256PublicJwk }
+#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct DevicePublicKeyInput { algorithm: String, public_key: P256PublicJwk, layer2_public_key: P256PublicJwk }
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)] #[serde(deny_unknown_fields)] struct P256PublicJwk { kty: String, crv: String, x: String, y: String }
 #[derive(Serialize)] struct ContactRequestReply { id: Uuid, username: String, display_name: String, created_at: String, direction: String }
 #[derive(Serialize)] struct BlockReply { user_id: Uuid, username: String, display_name: String, created_at: String }
@@ -53,9 +54,9 @@ type PeerMap = DashMap<Uuid, Peer>;
 #[derive(Serialize, Clone)] struct DeviceReply { id: Uuid, name: String }
 #[derive(Serialize, Clone)] struct ContactReply { user_id: Uuid, username: String, display_name: String, email_verified: bool, online: bool, devices: Vec<DeviceReply> }
 #[derive(Serialize)] struct DeviceSessionReply { id: Uuid, name: String, created_at: String, last_seen_at: String, current: bool, online: bool }
-#[derive(Deserialize)] #[serde(tag = "type", rename_all = "snake_case")] enum ClientFrame { Message { id: Uuid, to: Uuid, iv: String, ciphertext: String }, Ack { id: Uuid }, Heartbeat }
+#[derive(Deserialize)] #[serde(tag = "type", rename_all = "snake_case")] enum ClientFrame { Message { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }, Ack { id: Uuid }, Heartbeat }
 #[derive(Deserialize)] struct HistoryQuery { after_created_at: Option<String>, after_id: Option<Uuid>, limit: Option<i64> }
-#[derive(Deserialize)] struct SendEnvelopeInput { id: Uuid, to: Uuid, iv: String, ciphertext: String }
+#[derive(Deserialize)] struct SendEnvelopeInput { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }
 #[derive(Deserialize)] struct CreateTransferInput { id: Uuid, recipient_user_id: Uuid, chunk_count: i32, total_ciphertext_bytes: i64, device_envelopes: Vec<TransferDeviceEnvelope> }
 #[derive(Deserialize)] struct TransferDeviceEnvelope { device_id: Uuid, iv: String, ciphertext: String }
 #[derive(Serialize)] struct TransferReply { id: Uuid, sender_user_id: Uuid, recipient_user_id: Uuid, sender_device_id: Uuid, chunk_count: i32, total_ciphertext_bytes: i64, received_chunks: i64, ready_at: Option<String>, expires_at: String, manifest_iv: String, manifest_ciphertext: String, acknowledged: bool }
@@ -96,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState { peers: Arc::new(PeerMap::new()), db, mailer, cookie_secure, allowed_origins: Arc::new(allowed_origins) };
     let app = Router::new()
         .route("/healthz", get(healthz)).route("/api/v1/security/capabilities", get(security_capabilities)).route("/status", get(|| async { axum::response::Html(include_str!("../../frontend/web/status.html")) }))
-        .route("/api/v1/auth/register", post(register)).route("/api/v1/auth/verify-email", post(verify_email)).route("/api/v1/auth/resend-verification", post(resend_verification)).route("/api/v1/auth/login", post(login)).route("/api/v1/auth/logout", post(logout))
+        .route("/api/v1/auth/register", post(register)).route("/api/v1/auth/verify-email", post(verify_email)).route("/api/v1/auth/resend-verification", post(resend_verification)).route("/api/v1/auth/login", post(login)).route("/api/v1/auth/verify-login", post(verify_login)).route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/me", get(me)).route("/api/v1/device-key", put(register_device_public_key)).route("/api/v1/contacts/:contact_id/device-keys", get(list_contact_device_public_keys)).route("/api/v1/messages", get(list_messages).post(send_message_api)).route("/api/v1/messages/:id/ack", post(ack_message_api)).route("/api/v1/settings", get(get_settings).put(put_settings)).route("/api/v1/contacts", get(list_contacts).post(create_contact_request))
         .route("/api/v1/contact-requests", get(list_contact_requests).post(create_contact_request)).route("/api/v1/contact-requests/:request_id/accept", post(accept_contact_request)).route("/api/v1/contact-requests/:request_id", delete(delete_contact_request))
         .route("/api/v1/blocks", get(list_blocks)).route("/api/v1/blocks/:user_id", put(block_user).delete(unblock_user))
@@ -145,22 +146,22 @@ async fn security_capabilities() -> Json<Value> {
             "status": "partial"
         },
         "e2ee": {
-            "protocol": "user_defined_three_layer_v1",
+            "protocol": "independent_device_bound_layer2_v2",
             "protocol_status": "in_development_unreviewed",
-            "device_key_registry": "source_implemented_unverified",
-            "web_device_key_enrollment": "web_implemented_unreviewed",
-            "web_conversation_key_derivation": "web_implemented_unreviewed",
-            "authenticated_key_exchange": "manual_fingerprint_verification",
+            "device_key_registry": "dual_public_key_source_implemented_unverified",
+            "web_device_key_enrollment": "web_android_ios_source_implemented_unverified",
+            "web_conversation_key_derivation": "independent_layer1_layer2_key_pairs_source_implemented_unverified",
+            "authenticated_key_exchange": "manual_combined_fingerprint_verification",
             "key_change_verification": "manual_reverification_required",
             "forward_secrecy": "not_implemented",
-            "client_encrypt_decrypt": "web_implemented_unreviewed",
+            "client_encrypt_decrypt": "web_android_ios_source_implemented_unverified",
             "message_delivery": if MESSAGING_ENABLED { "enabled" } else { "disabled" },
             "independent_review": "not_started"
         },
         "file_transfers": {
             "server_chunk_store": "source_implemented_unverified",
             "web_client": "source_implemented_unverified",
-            "native_clients": "not_implemented",
+            "native_clients": "source_implemented_unverified",
             "media_preview": "browser_native_supported_codecs_only",
             "independent_review": "not_started"
         },
@@ -178,7 +179,10 @@ async fn initialize_schema(db: &PgPool) -> Result<(), sqlx::Error> {
         "CREATE TABLE IF NOT EXISTS accounts (id UUID PRIMARY KEY, username TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, email_verified BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
         "CREATE TABLE IF NOT EXISTS devices (id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, label TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ NULL)",
         "CREATE INDEX IF NOT EXISTS devices_by_user ON devices(user_id, created_at DESC)",
-        "CREATE TABLE IF NOT EXISTS device_public_keys (device_id UUID PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL CHECK(algorithm='ECDH-P256'), public_key JSONB NOT NULL, fingerprint TEXT NOT NULL, key_version INTEGER NOT NULL DEFAULT 1 CHECK(key_version=1), registered_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        "CREATE TABLE IF NOT EXISTS device_public_keys (device_id UUID PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL CHECK(algorithm='ECDH-P256'), public_key JSONB NOT NULL, layer2_public_key JSONB, fingerprint TEXT NOT NULL, key_version INTEGER NOT NULL DEFAULT 1 CHECK(key_version IN (1,2)), registered_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS layer2_public_key JSONB",
+        "ALTER TABLE device_public_keys DROP CONSTRAINT IF EXISTS device_public_keys_key_version_check",
+        "ALTER TABLE device_public_keys ADD CONSTRAINT device_public_keys_key_version_check CHECK(key_version IN (1,2))",
         "CREATE INDEX IF NOT EXISTS device_public_keys_by_user ON device_public_keys(user_id,registered_at)",
         "CREATE TABLE IF NOT EXISTS auth_sessions (token_hash BYTEA PRIMARY KEY, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL)",
         "DELETE FROM auth_sessions s USING accounts a WHERE s.user_id=a.id AND a.email_verified=FALSE",
@@ -241,7 +245,10 @@ async fn security_headers(State(state):State<AppState>,request:Request,next:Next
 }
 fn api_error(status: StatusCode, message: &'static str) -> Response { (status, Json(ErrorBody { error: message.into() })).into_response() }
 fn verification_response(status:StatusCode,email:&str,message:&'static str,delivery:&'static str)->Response{
-    (status,Json(serde_json::json!({"error":message,"verification":{"required":true,"verified":false,"email":email,"delivery":delivery}}))).into_response()
+    (status,Json(serde_json::json!({"error":message,"verification":{"required":true,"verified":false,"email":email,"delivery":delivery,"purpose":"email"}}))).into_response()
+}
+fn verification_login_response(email:&str,message:&'static str,delivery:&'static str)->Response{
+    (StatusCode::FORBIDDEN,Json(serde_json::json!({"error":message,"verification":{"required":true,"verified":false,"email":email,"delivery":delivery,"purpose":"login"}}))).into_response()
 }
 fn resend_cooldown_response(seconds:u64)->Response{
     let retry=seconds.clamp(1,OTP_RESEND_COOLDOWN_SECONDS);
@@ -251,7 +258,7 @@ fn resend_cooldown_response(seconds:u64)->Response{
 }
 fn resend_accepted_response()->Response{
     let retry=OTP_RESEND_COOLDOWN_SECONDS;
-    let mut response=(StatusCode::ACCEPTED,Json(serde_json::json!({"message":"If the account exists and needs verification, a code will be sent.","retry_after_seconds":retry}))).into_response();
+    let mut response=(StatusCode::ACCEPTED,Json(serde_json::json!({"message":"If the account exists, a code may be sent.","retry_after_seconds":retry}))).into_response();
     if let Ok(value)=HeaderValue::try_from(retry.to_string()){response.headers_mut().insert(header::RETRY_AFTER,value);}
     response
 }
@@ -390,7 +397,7 @@ async fn resend_verification(State(state):State<AppState>,Json(input):Json<Resen
     if identity.is_empty(){return api_error(StatusCode::BAD_REQUEST,"enter your email or username");}
     if !state.mailer.is_enabled(){warn!("verification resend blocked because email delivery is disabled");return api_error(StatusCode::SERVICE_UNAVAILABLE,"email verification is not configured");}
     let account=match sqlx::query_as::<_,(Uuid,bool,String)>("SELECT id,email_verified,email FROM accounts WHERE email=$1 OR username=$1").bind(&identity).fetch_optional(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"verification service unavailable")};
-    if let Some((user_id,false,email))=account{
+    if let Some((user_id,_,email))=account{
         if let Err(error)=issue_verification_code(&state.db,&state.mailer,user_id,&email,true).await{
             warn!(provider=state.mailer.provider_name(),failure=otp_failure_kind(&error),provider_status=otp_provider_status(&error),"verification resend failed");
             if let Some(seconds)=cooldown_seconds(&error){return resend_cooldown_response(seconds);}
@@ -448,8 +455,8 @@ fn otp_failure_kind(error:&str)->&'static str{
 
 async fn login(State(state):State<AppState>,Json(input):Json<LoginInput>)->Response{
     let identity=input.identity.trim().to_ascii_lowercase();if identity.is_empty()||input.password.is_empty(){return api_error(StatusCode::BAD_REQUEST,"enter your username/email and password");}
-    let row=match sqlx::query_as::<_,(Uuid,String,String,String,String,bool)>("SELECT id,username,email,display_name,password_hash,email_verified FROM accounts WHERE username=$1 OR email=$1").bind(&identity).fetch_optional(&state.db).await{Ok(row)=>row,Err(_)=>{warn!("login lookup failed");return api_error(StatusCode::SERVICE_UNAVAILABLE,"account service unavailable");}};
-    let Some((user_id,username,email,display_name,password_hash,email_verified))=row else{return api_error(StatusCode::UNAUTHORIZED,"invalid username/email or password")};let parsed=match PasswordHash::new(&password_hash){Ok(p)=>p,Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"stored credential could not be verified")};if Argon2::default().verify_password(input.password.as_bytes(),&parsed).is_err(){return api_error(StatusCode::UNAUTHORIZED,"invalid username/email or password");}if !email_verified{
+    let row=match sqlx::query_as::<_,(Uuid,String,String,bool)>("SELECT id,email,password_hash,email_verified FROM accounts WHERE username=$1 OR email=$1").bind(&identity).fetch_optional(&state.db).await{Ok(row)=>row,Err(_)=>{warn!("login lookup failed");return api_error(StatusCode::SERVICE_UNAVAILABLE,"account service unavailable");}};
+    let Some((user_id,email,password_hash,email_verified))=row else{return api_error(StatusCode::UNAUTHORIZED,"invalid username/email or password")};let parsed=match PasswordHash::new(&password_hash){Ok(p)=>p,Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"stored credential could not be verified")};if Argon2::default().verify_password(input.password.as_bytes(),&parsed).is_err(){return api_error(StatusCode::UNAUTHORIZED,"invalid username/email or password");}if !email_verified{
         let (message,delivery)=match ensure_verification_challenge(&state.db,&state.mailer,user_id,&email).await{
             Ok(())=>("Email verification is required. Check your inbox for the code.","email"),
             Err(error) if cooldown_seconds(&error).is_some()=>("Email verification is required. A code was recently requested; wait briefly before resending.","email"),
@@ -458,8 +465,41 @@ async fn login(State(state):State<AppState>,Json(input):Json<LoginInput>)->Respo
         };
         return verification_response(StatusCode::FORBIDDEN,&email,message,delivery);
     }
-    let label=input.device_name.as_deref().unwrap_or("Web browser").trim();let label=if label.is_empty(){"Web browser"}else{label};let(device_id,token)=match create_device_session(&state.db,user_id,label,input.device_id).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not create session")};let ctx=AuthContext{user_id,username,email,display_name,email_verified,device_id,device_name:label.into(),session_hash:token_hash(&token)};
-    let mut response=Json(serde_json::json!({"account":auth_reply(&ctx),"verification":{"required":false,"verified":email_verified}})).into_response();attach_session_cookie(&mut response,&token,state.cookie_secure);response
+    let (message,delivery)=match ensure_verification_challenge(&state.db,&state.mailer,user_id,&email).await{
+        Ok(())=>("A sign-in code was sent to your verified email. Enter it to finish signing in.","email"),
+        Err(error) if cooldown_seconds(&error).is_some()=>("A sign-in code was recently requested. Check your inbox or wait briefly before resending.","email"),
+        Err(error) if error=="send_limit"=>("The sign-in code limit was reached. Try again later.","limited"),
+        Err(error)=>{warn!(provider=state.mailer.provider_name(),failure=otp_failure_kind(&error),provider_status=otp_provider_status(&error),"login OTP could not be prepared");("Sign-in code delivery is currently unavailable. Try again shortly.","unavailable")}
+    };
+    verification_login_response(&email,message,delivery)
+}
+async fn verify_login(State(state):State<AppState>,Json(input):Json<VerifyLoginInput>)->Response{
+    let identity=input.identity.trim().to_ascii_lowercase();
+    if identity.is_empty()||input.password.is_empty()||input.code.len()!=6||!input.code.bytes().all(|b|b.is_ascii_digit()){
+        return api_error(StatusCode::BAD_REQUEST,"enter your sign-in credentials and six-digit code");
+    }
+    let account=match sqlx::query_as::<_,(Uuid,String,String,String,String,bool)>("SELECT id,username,email,display_name,password_hash,email_verified FROM accounts WHERE username=$1 OR email=$1").bind(&identity).fetch_optional(&state.db).await{
+        Ok(Some(value))=>value,Ok(None)=>return api_error(StatusCode::UNAUTHORIZED,"invalid sign-in credentials or code"),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"sign-in service unavailable")
+    };
+    let (user_id,username,email,display_name,password_hash,email_verified)=account;
+    if !email_verified{return api_error(StatusCode::UNAUTHORIZED,"invalid sign-in credentials or code");}
+    let parsed=match PasswordHash::new(&password_hash){Ok(value)=>value,Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"stored credential could not be verified")};
+    if Argon2::default().verify_password(input.password.as_bytes(),&parsed).is_err(){return api_error(StatusCode::UNAUTHORIZED,"invalid sign-in credentials or code");}
+    let mut tx=match state.db.begin().await{Ok(tx)=>tx,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"sign-in service unavailable")};
+    let challenge=sqlx::query_as::<_,(String,bool,i16)>("SELECT code_hash,expires_at>now(),attempt_count FROM email_verification_challenges WHERE user_id=$1 FOR UPDATE").bind(user_id).fetch_optional(&mut *tx).await;
+    let (code_hash,not_expired,attempts)=match challenge{Ok(Some(value))=>value,Ok(None)=>{let _=tx.rollback().await;return api_error(StatusCode::BAD_REQUEST,"sign-in code is invalid or expired")},Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"sign-in service unavailable")}};
+    if !not_expired||attempts>=5{let _=tx.rollback().await;return api_error(StatusCode::BAD_REQUEST,"sign-in code is invalid or expired");}
+    let parsed=match PasswordHash::new(&code_hash){Ok(value)=>value,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::INTERNAL_SERVER_ERROR,"sign-in could not be completed")}};
+    if Argon2::default().verify_password(input.code.as_bytes(),&parsed).is_err(){
+        if sqlx::query("UPDATE email_verification_challenges SET attempt_count=attempt_count+1 WHERE user_id=$1").bind(user_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"sign-in service unavailable");}
+        if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"sign-in service unavailable");}
+        return api_error(StatusCode::BAD_REQUEST,"sign-in code is invalid or expired");
+    }
+    if sqlx::query("UPDATE email_verification_challenges SET expires_at=now(),resend_after=now(),attempt_count=5 WHERE user_id=$1").bind(user_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"sign-in service unavailable");}
+    if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"sign-in service unavailable");}
+    let label=input.device_name.as_deref().unwrap_or("Web browser").trim();let label=if label.is_empty(){"Web browser"}else{label};let(device_id,token)=match create_device_session(&state.db,user_id,label,input.device_id).await{Ok(value)=>value,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not create session")};
+    let ctx=AuthContext{user_id,username,email,display_name,email_verified:true,device_id,device_name:label.into(),session_hash:token_hash(&token)};
+    let mut response=Json(serde_json::json!({"account":auth_reply(&ctx),"verification":{"required":false,"verified":true}})).into_response();attach_session_cookie(&mut response,&token,state.cookie_secure);response
 }
 async fn logout(State(state):State<AppState>,headers:HeaderMap)->Response{
     if let Some(token)=cookie_value(&headers){
@@ -472,23 +512,28 @@ async fn logout(State(state):State<AppState>,headers:HeaderMap)->Response{
 }
 async fn me(State(state):State<AppState>,headers:HeaderMap)->Response{match authenticate(&state.db,&headers).await{Ok(Some(ctx))=>Json(auth_reply(&ctx)).into_response(),Ok(None)=>api_error(StatusCode::UNAUTHORIZED,"sign in required"),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"account service unavailable")}}
 fn decode_p256_coordinate(value:&str)->Option<[u8;32]>{let bytes=URL_SAFE_NO_PAD.decode(value).ok()?;if bytes.len()!=32{return None;}let mut coordinate=[0u8;32];coordinate.copy_from_slice(&bytes);Some(coordinate)}
-fn p256_public_key_fingerprint(key:&P256PublicJwk)->Option<String>{
+fn p256_public_key_fingerprint(key:&P256PublicJwk)->Option<[u8;64]>{
     if key.kty!="EC"||key.crv!="P-256"{return None;}
-    let x=decode_p256_coordinate(&key.x)?;let y=decode_p256_coordinate(&key.y)?;let mut material=Vec::with_capacity(70);material.extend_from_slice(b"Serein ECDH P-256 public key v1\0");material.extend_from_slice(&x);material.extend_from_slice(&y);Some(hex_lower(&Sha256::digest(material)))
+    let x=decode_p256_coordinate(&key.x)?;let y=decode_p256_coordinate(&key.y)?;let mut coordinates=[0u8;64];coordinates[..32].copy_from_slice(&x);coordinates[32..].copy_from_slice(&y);Some(coordinates)
+}
+fn p256_key_bundle_fingerprint(layer1:&P256PublicJwk,layer2:&P256PublicJwk)->Option<String>{
+    let first=p256_public_key_fingerprint(layer1)?;let second=p256_public_key_fingerprint(layer2)?;
+    let mut material=Vec::with_capacity(64+128);material.extend_from_slice(b"Serein ECDH P-256 device key bundle v2\0");material.extend_from_slice(&first);material.extend_from_slice(&second);Some(hex_lower(&Sha256::digest(material)))
 }
 async fn register_device_public_key(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<DevicePublicKeyInput>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     if input.algorithm!="ECDH-P256"{return api_error(StatusCode::BAD_REQUEST,"unsupported device key algorithm");}
-    let Some(fingerprint)=p256_public_key_fingerprint(&input.public_key)else{return api_error(StatusCode::BAD_REQUEST,"invalid public device key");};
+    let Some(fingerprint)=p256_key_bundle_fingerprint(&input.public_key,&input.layer2_public_key)else{return api_error(StatusCode::BAD_REQUEST,"invalid public device key bundle");};
     let public_key=match serde_json::to_value(&input.public_key){Ok(v)=>v,Err(_)=>return api_error(StatusCode::BAD_REQUEST,"invalid public device key")};
-    let inserted=sqlx::query("INSERT INTO device_public_keys(device_id,user_id,algorithm,public_key,fingerprint,key_version) SELECT d.id,d.user_id,'ECDH-P256',$3,$4,1 FROM devices d WHERE d.id=$1 AND d.user_id=$2 AND d.revoked_at IS NULL ON CONFLICT(device_id) DO NOTHING")
-        .bind(ctx.device_id).bind(ctx.user_id).bind(public_key).bind(&fingerprint).execute(&state.db).await;
+    let layer2_public_key=match serde_json::to_value(&input.layer2_public_key){Ok(v)=>v,Err(_)=>return api_error(StatusCode::BAD_REQUEST,"invalid layer-2 public device key")};
+    let inserted=sqlx::query("INSERT INTO device_public_keys(device_id,user_id,algorithm,public_key,layer2_public_key,fingerprint,key_version) SELECT d.id,d.user_id,'ECDH-P256',$3,$4,$5,2 FROM devices d WHERE d.id=$1 AND d.user_id=$2 AND d.revoked_at IS NULL ON CONFLICT(device_id) DO UPDATE SET layer2_public_key=EXCLUDED.layer2_public_key,fingerprint=EXCLUDED.fingerprint,key_version=2 WHERE device_public_keys.user_id=EXCLUDED.user_id AND device_public_keys.public_key=EXCLUDED.public_key AND (device_public_keys.layer2_public_key IS NULL OR device_public_keys.layer2_public_key=EXCLUDED.layer2_public_key)")
+        .bind(ctx.device_id).bind(ctx.user_id).bind(public_key).bind(layer2_public_key).bind(&fingerprint).execute(&state.db).await;
     if inserted.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key could not be registered");}
-    let stored=sqlx::query_as::<_,(Value,String)>("SELECT public_key,fingerprint FROM device_public_keys WHERE device_id=$1 AND user_id=$2")
+    let stored=sqlx::query_as::<_,(Value,Option<Value>,String,i32)>("SELECT public_key,layer2_public_key,fingerprint,key_version FROM device_public_keys WHERE device_id=$1 AND user_id=$2")
         .bind(ctx.device_id).bind(ctx.user_id).fetch_optional(&state.db).await;
     match stored{
-        Ok(Some((stored_key,stored_fingerprint))) if stored_key==serde_json::to_value(&input.public_key).unwrap_or(Value::Null)&&stored_fingerprint==fingerprint=>Json(serde_json::json!({"registered":true,"algorithm":"ECDH-P256","fingerprint":fingerprint,"key_version":1})).into_response(),
-        Ok(Some(_))=>api_error(StatusCode::CONFLICT,"a different key is already registered for this device; key rotation is not available until the verification flow is implemented"),
+        Ok(Some((stored_key,Some(stored_layer2),stored_fingerprint,2))) if stored_key==serde_json::to_value(&input.public_key).unwrap_or(Value::Null)&&stored_layer2==serde_json::to_value(&input.layer2_public_key).unwrap_or(Value::Null)&&stored_fingerprint==fingerprint=>Json(serde_json::json!({"registered":true,"algorithm":"ECDH-P256","fingerprint":fingerprint,"key_version":2})).into_response(),
+        Ok(Some(_))=>api_error(StatusCode::CONFLICT,"a different key is already registered for this device; key rotation requires verification"),
         Ok(None)=>api_error(StatusCode::FORBIDDEN,"active device session required"),
         Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"device key status unavailable"),
     }
@@ -499,16 +544,16 @@ async fn list_contact_device_public_keys(State(state):State<AppState>,headers:He
         .bind(ctx.user_id).bind(contact_id).fetch_one(&state.db).await;
     if !matches!(allowed,Ok(true)){return api_error(StatusCode::NOT_FOUND,"contact key directory unavailable");}
     let username=match sqlx::query_scalar::<_,String>("SELECT username FROM accounts WHERE id=$1").bind(contact_id).fetch_optional(&state.db).await{Ok(Some(value))=>value,Ok(None)=>return api_error(StatusCode::NOT_FOUND,"contact key directory unavailable"),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact key directory unavailable")};
-    let rows=sqlx::query_as::<_,(Uuid,Value,String)>("SELECT k.device_id,k.public_key,k.fingerprint FROM device_public_keys k JOIN devices d ON d.id=k.device_id AND d.revoked_at IS NULL WHERE k.user_id=$1 ORDER BY k.registered_at,k.device_id")
+    let rows=sqlx::query_as::<_,(Uuid,Value,Option<Value>,String,String,i32)>("SELECT k.device_id,k.public_key,k.layer2_public_key,k.fingerprint,k.algorithm,k.key_version FROM device_public_keys k JOIN devices d ON d.id=k.device_id AND d.revoked_at IS NULL WHERE k.user_id=$1 ORDER BY d.created_at ASC,d.id ASC")
         .bind(contact_id).fetch_all(&state.db).await;
-    match rows{Ok(devices)=>Json(serde_json::json!({"user_id":contact_id,"username":username,"devices":devices.into_iter().map(|(device_id,public_key,fingerprint)|serde_json::json!({"device_id":device_id,"public_key":public_key,"fingerprint":fingerprint,"algorithm":"ECDH-P256","key_version":1})).collect::<Vec<_>>()})).into_response(),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"contact key directory unavailable")}
+    match rows{Ok(devices)=>Json(serde_json::json!({"user_id":contact_id,"username":username,"devices":devices.into_iter().map(|(device_id,public_key,layer2_public_key,fingerprint,algorithm,key_version)|serde_json::json!({"device_id":device_id,"public_key":public_key,"layer2_public_key":layer2_public_key,"fingerprint":fingerprint,"algorithm":algorithm,"key_version":key_version})).collect::<Vec<_>>()})).into_response(),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"contact key directory unavailable")}
 }
 async fn require_user(state:&AppState,headers:&HeaderMap)->Result<AuthContext,Response>{match authenticate(&state.db,headers).await{Ok(Some(ctx))=>Ok(ctx),Ok(None)=>Err(api_error(StatusCode::UNAUTHORIZED,"sign in required")),Err(_)=>{warn!("session validation failed");Err(api_error(StatusCode::SERVICE_UNAVAILABLE,"account service unavailable"))}}}
 async fn session_is_active(db:&PgPool,ctx:&AuthContext)->bool{sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM auth_sessions s JOIN devices d ON d.id=s.device_id JOIN accounts a ON a.id=s.user_id AND a.email_verified=TRUE WHERE s.token_hash=$1 AND s.device_id=$2 AND s.user_id=$3 AND s.expires_at>now() AND d.revoked_at IS NULL)").bind(&ctx.session_hash).bind(ctx.device_id).bind(ctx.user_id).fetch_one(db).await.unwrap_or(false)}
 async fn list_contacts(State(state):State<AppState>,headers:HeaderMap)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     let rows=match sqlx::query_as::<_,(Uuid,String,String,bool,Option<Uuid>,Option<String>,Option<bool>,bool)>(
-        "SELECT a.id,a.username,a.display_name,a.email_verified,d.id,d.label,(d.last_seen_at>now()-interval '90 seconds'),COALESCE(us.settings->>'presence_visibility','contacts')<>'nobody' FROM contacts c JOIN accounts a ON a.id=c.contact_id LEFT JOIN user_settings us ON us.user_id=a.id LEFT JOIN devices d ON d.user_id=a.id AND d.revoked_at IS NULL WHERE c.owner_id=$1 AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.owner_id=c.owner_id AND b.blocked_user_id=c.contact_id) OR (b.owner_id=c.contact_id AND b.blocked_user_id=c.owner_id)) ORDER BY a.username,d.created_at DESC"
+        "SELECT a.id,a.username,a.display_name,a.email_verified,d.id,d.label,(d.last_seen_at>now()-interval '90 seconds'),COALESCE(us.settings->>'presence_visibility','contacts')<>'nobody' FROM contacts c JOIN accounts a ON a.id=c.contact_id LEFT JOIN user_settings us ON us.user_id=a.id LEFT JOIN devices d ON d.user_id=a.id AND d.revoked_at IS NULL WHERE c.owner_id=$1 AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.owner_id=c.owner_id AND b.blocked_user_id=c.contact_id) OR (b.owner_id=c.contact_id AND b.blocked_user_id=c.owner_id)) ORDER BY a.username,d.created_at ASC,d.id ASC"
     ).bind(ctx.user_id).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"contacts unavailable")};
     let mut grouped:HashMap<Uuid,ContactReply>=HashMap::new();
     for(user_id,username,display_name,email_verified,device_id,device_name,recently_active,presence_visible)in rows{
@@ -550,11 +595,12 @@ async fn ack_message_api(State(state):State<AppState>,headers:HeaderMap,Path(id)
 }
 async fn send_message_api(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<SendEnvelopeInput>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
-    if input.to==ctx.device_id||!valid_ciphertext_parts(&input.iv,&input.ciphertext){return api_error(StatusCode::BAD_REQUEST,"invalid encrypted envelope");}
+    let crypto_version=input.crypto_version.unwrap_or(1);
+    if !matches!(crypto_version,1|2)||input.to==ctx.device_id||!valid_ciphertext_parts(&input.iv,&input.ciphertext){return api_error(StatusCode::BAD_REQUEST,"invalid encrypted envelope");}
     let target_user=match sqlx::query_scalar::<_,Uuid>("SELECT user_id FROM devices WHERE id=$1 AND revoked_at IS NULL").bind(input.to).fetch_optional(&state.db).await{Ok(Some(v))=>v,Ok(None)=>return api_error(StatusCode::NOT_FOUND,"recipient device not found"),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message service unavailable")};
     let allowed=match sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message authorization unavailable")};
     if !allowed{return api_error(StatusCode::FORBIDDEN,"recipient is not a contact");}
-    let payload=serde_json::json!({"type":"message","id":input.id,"from":ctx.device_id,"iv":input.iv,"ciphertext":input.ciphertext});
+    let payload=serde_json::json!({"type":"message","id":input.id,"from":ctx.device_id,"crypto_version":crypto_version,"iv":input.iv,"ciphertext":input.ciphertext});
     let mut tx=match state.db.begin().await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message service unavailable")};
     let locked=sqlx::query_scalar::<_,Uuid>("SELECT id FROM accounts WHERE id IN ($1,$2) ORDER BY id FOR SHARE").bind(ctx.user_id).bind(target_user).fetch_all(&mut *tx).await;
     let expected_locks=if ctx.user_id==target_user{1}else{2};
@@ -873,9 +919,9 @@ async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
         outgoing=out_rx.recv()=>match outgoing{Some(text)=>if ws_tx.send(Message::Text(text.into())).await.is_err(){break},None=>break},
         incoming=ws_rx.next()=>match incoming{Some(Ok(Message::Text(text)))=>{
             if !session_is_active(&state.db,&ctx).await{let _=ws_tx.send(Message::Close(None)).await;break;}if text.len()>MAX_CIPHERTEXT_CHARS+1024{continue;}let Ok(frame)=serde_json::from_str::<ClientFrame>(&text)else{continue;};
-            match frame{ClientFrame::Message{id,to,iv,ciphertext}=>{
-                if to==ctx.device_id||!valid_ciphertext_parts(&iv,&ciphertext){continue;}let target_user=sqlx::query_scalar::<_,Uuid>("SELECT d.user_id FROM devices d WHERE d.id=$1 AND d.revoked_at IS NULL").bind(to).fetch_optional(&state.db).await.ok().flatten();let Some(target_user)=target_user else{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"recipient device is unavailable"}).to_string().into())).await;continue;};let allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&state.db).await.unwrap_or(false);if !allowed{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"message":"recipient is not a contact"}).to_string().into())).await;continue;}
-                let payload=serde_json::json!({"type":"message","id":id,"from":ctx.device_id,"iv":iv,"ciphertext":ciphertext});
+            match frame{ClientFrame::Message{id,to,iv,ciphertext,crypto_version}=>{
+                let crypto_version=crypto_version.unwrap_or(1);if !matches!(crypto_version,1|2)||to==ctx.device_id||!valid_ciphertext_parts(&iv,&ciphertext){continue;}let target_user=sqlx::query_scalar::<_,Uuid>("SELECT d.user_id FROM devices d WHERE d.id=$1 AND d.revoked_at IS NULL").bind(to).fetch_optional(&state.db).await.ok().flatten();let Some(target_user)=target_user else{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"recipient device is unavailable"}).to_string().into())).await;continue;};let allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&state.db).await.unwrap_or(false);if !allowed{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"message":"recipient is not a contact"}).to_string().into())).await;continue;}
+                let payload=serde_json::json!({"type":"message","id":id,"from":ctx.device_id,"crypto_version":crypto_version,"iv":iv,"ciphertext":ciphertext});
                 let mut tx=match state.db.begin().await{Ok(tx)=>tx,Err(_)=>{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"message service unavailable"}).to_string().into())).await;continue;}};
                 let account_locks=sqlx::query_scalar::<_,Uuid>("SELECT id FROM accounts WHERE id IN ($1,$2) ORDER BY id FOR SHARE").bind(ctx.user_id).bind(target_user).fetch_all(&mut *tx).await;let expected_locks=if ctx.user_id==target_user{1}else{2};if !account_locks.is_ok_and(|ids|ids.len()==expected_locks){let _=tx.rollback().await;continue;}
                 let still_allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&mut *tx).await;if !matches!(still_allowed,Ok(true)){let _=tx.rollback().await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"message":"recipient is not a contact"}).to_string().into())).await;continue;}
@@ -893,7 +939,7 @@ async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
 
 #[cfg(test)]
 mod tests {
-    use super::{account_unique_conflict, cooldown_seconds, history_page_limit, normalise_username, normalize_web_origin, registration_password_requirements, token_hash, valid_ciphertext_parts, valid_email, valid_font_scale, valid_theme, valid_username};
+    use super::{account_unique_conflict, cooldown_seconds, history_page_limit, normalise_username, normalize_web_origin, p256_key_bundle_fingerprint, registration_password_requirements, token_hash, valid_ciphertext_parts, valid_email, valid_font_scale, valid_theme, valid_username, LoginInput, VerifyLoginInput, P256PublicJwk};
     #[test] fn duplicate_username_and_email_return_distinct_safe_messages(){assert!(account_unique_conflict(Some("accounts_username_key")).unwrap().contains("username"));assert!(account_unique_conflict(Some("accounts_email_key")).unwrap().contains("email"));assert!(account_unique_conflict(Some("unrelated_constraint")).is_none());}
     #[test] fn username_normalisation_is_ascii_lowercase(){assert_eq!(normalise_username("  Alice_7 "),"alice_7");}
     #[test] fn username_validation_rejects_short_and_unsafe_values(){assert!(valid_username("alice.7"));assert!(!valid_username("ab"));assert!(!valid_username("bad name"));assert!(!valid_username("Upper"));}
@@ -902,7 +948,14 @@ mod tests {
     #[test] fn history_page_size_is_defaulted_and_bounded(){assert_eq!(history_page_limit(None),100);assert_eq!(history_page_limit(Some(0)),1);assert_eq!(history_page_limit(Some(500)),200);}
     #[test] fn account_setting_values_are_allowlisted(){assert!(valid_theme("dark"));assert!(!valid_theme("ultraviolet"));assert!(valid_font_scale("system"));assert!(valid_font_scale("large"));assert!(valid_font_scale("extra_large"));assert!(!valid_font_scale("huge"));}
     #[test] fn ciphertext_envelopes_require_gcm_iv_and_tag(){assert!(valid_ciphertext_parts("AAAAAAAAAAAAAAAA","AAAAAAAAAAAAAAAAAAAAAA=="));assert!(!valid_ciphertext_parts("short","AAAAAAAAAAAAAAAAAAAAAA=="));assert!(!valid_ciphertext_parts("AAAAAAAAAAAAAAAA","AA=="));}
+    #[test] fn layer2_fingerprint_binds_both_ordered_device_public_keys(){let first=P256PublicJwk{kty:"EC".into(),crv:"P-256".into(),x:"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),y:"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE".into()};let second=P256PublicJwk{kty:"EC".into(),crv:"P-256".into(),x:"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI".into(),y:"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM".into()};let ab=p256_key_bundle_fingerprint(&first,&second).unwrap();let ba=p256_key_bundle_fingerprint(&second,&first).unwrap();assert_eq!(ab.len(),64);assert_ne!(ab,ba);}
     #[test] fn registration_password_policy_requires_length_case_digit_and_byte_limit(){assert_eq!(registration_password_requirements("Serein123"),[true,true,true,true,true]);assert_eq!(registration_password_requirements("password1"),[true,false,true,true,true]);assert_eq!(registration_password_requirements("PASSWORD1"),[true,true,false,true,true]);assert_eq!(registration_password_requirements("Password"),[true,true,true,false,true]);assert_eq!(registration_password_requirements("Abc123"),[false,true,true,true,true]);assert!(!registration_password_requirements(&format!("{}Aa1", "x".repeat(1022)))[4]);}
     #[test] fn resend_cooldown_seconds_are_parsed_and_bounded_by_response(){assert_eq!(cooldown_seconds("cooldown:59"),Some(59));assert_eq!(cooldown_seconds("cooldown"),Some(60));assert_eq!(cooldown_seconds("send_limit"),None);}
+    #[test] fn login_payload_is_strict_and_login_otp_requires_all_credentials(){
+        assert!(serde_json::from_str::<LoginInput>(r#"{"identity":"person@example.test","password":"correct horse battery staple"}"#).is_ok());
+        assert!(serde_json::from_str::<LoginInput>(r#"{"identity":"person@example.test","password":"secret","device_name":"Android"}"#).is_err());
+        assert!(serde_json::from_str::<VerifyLoginInput>(r#"{"identity":"person@example.test","password":"secret","code":"123456"}"#).is_ok());
+        assert!(serde_json::from_str::<VerifyLoginInput>(r#"{"identity":"person@example.test","password":"secret"}"#).is_err());
+    }
     #[test] fn web_origins_are_exact_https_origins_and_local_http_only(){assert_eq!(normalize_web_origin("https://web.example.org/" ).unwrap(),"https://web.example.org");assert_eq!(normalize_web_origin("https://web.example.org:8443").unwrap(),"https://web.example.org:8443");assert!(normalize_web_origin("https://web.example.org/path").is_err());assert!(normalize_web_origin("http://web.example.org").is_err());assert_eq!(normalize_web_origin("http://localhost:8080").unwrap(),"http://localhost:8080");}
 }

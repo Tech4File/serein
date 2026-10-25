@@ -1,6 +1,6 @@
 [package]
 name = "serein-wt-spike"
-version = "0.4.0-dev.7"
+version = "0.4.0-dev.16"
 edition = "2021"
 
 [dependencies]

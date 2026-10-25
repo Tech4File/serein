@@ -20,7 +20,7 @@
     <header><div class="brand">s</div><div><p class="eyebrow">SEREIN · IMPLEMENTATION STATUS</p><h1>Security progress</h1></div></header>
     <section class="card" aria-live="polite">
       <div id="summary" class="top" data-state="loading"><i class="dot"></i><div><h2 id="overall">Checking selected server…</h2><small id="checkedAt">Statuses refresh automatically every 30 seconds.</small></div></div>
-      <div class="alert"><b>Web encrypted messaging is active; independent review is pending.</b> Verify every recipient-device fingerprint through a separate trusted channel. Android/iOS message clients are not connected, and the current static ECDH design has no forward secrecy or automated key recovery.</div>
+      <div class="alert"><b>Web and native encrypted-messaging source is present; independent review is pending.</b> Verify every recipient-device fingerprint through a separate trusted channel. Android and iOS chat source is connected but not fully device/live-tested; the static ECDH design has no forward secrecy or automated key recovery.</div>
       <div class="section-title">SHARED APPLICATION CORE</div>
       <div class="rows">
         <div class="row"><div><b>Rust core in backend</b><small>Shared validation and domain primitives are used by the API.</small></div><span id="core-backend" class="pill unknown">Checking</span></div>
@@ -28,22 +28,22 @@
         <div class="row"><div><b>Rust core in Android</b><small>JNI/NDK import and native conformance tests.</small></div><span id="core-android" class="pill unknown">Checking</span></div>
         <div class="row"><div><b>Rust core in iOS</b><small>C/Swift import and device/simulator conformance tests.</small></div><span id="core-ios" class="pill unknown">Checking</span></div>
       </div>
-      <div class="section-title">END-TO-END ENCRYPTION — WEB CLIENT ACTIVE; REVIEW PENDING</div>
+      <div class="section-title">END-TO-END ENCRYPTION — WEB AND NATIVE SOURCE ACTIVE; REVIEW PENDING</div>
       <div class="rows">
-        <div class="row"><div><b>User-defined three-layer design</b><small>In development; not independently reviewed. The username is an identity label, never a secret.</small></div><span id="e2ee-protocol" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Two application E2EE layers (TLS is transport)</b><small>In development; not independently reviewed. The username is an identity label, never a secret.</small></div><span id="e2ee-protocol" class="pill unknown">Checking</span></div>
         <div class="row"><div><b>Public device-key directory</b><small>Authenticated account/device binding; private keys are never uploaded.</small></div><span id="e2ee-key-directory" class="pill unknown">Checking</span></div>
         <div class="row"><div><b>Browser ECDH device-key enrollment</b><small>WebCrypto non-extractable private key stored locally; hardware backing is not guaranteed.</small></div><span id="e2ee-web-enrollment" class="pill unknown">Checking</span></div>
         <div class="row"><div><b>Per-device-pair conversation-key derivation</b><small>The web client derives per-account/device keys with ECDH and HKDF and uses them for per-device message envelopes.</small></div><span id="e2ee-shared-key" class="pill unknown">Checking</span></div>
-        <div class="row"><div><b>Authenticated device identity and key-change verification</b><small>Users compare full fingerprints out-of-band and explicitly pin them locally; key changes require re-verification. Automatic key signatures, rotation, recovery, and native multi-device key enrollment remain incomplete.</small></div><span id="e2ee-keys" class="pill unknown">Checking</span></div>
-        <div class="row"><div><b>Client-side message encryption and decryption</b><small>WebCrypto encrypt/decrypt is wired to browser message send/receive and durable opaque-ciphertext delivery; native Android/iOS implementations are absent.</small></div><span id="e2ee-client" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Authenticated device identity and key-change verification</b><small>Users compare full fingerprints out-of-band and explicitly pin them locally; key changes require re-verification. Native key enrollment exists in source but needs live cross-platform testing. Automatic key signatures, rotation, and recovery remain incomplete.</small></div><span id="e2ee-keys" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Client-side message encryption and decryption</b><small>WebCrypto and Android/iOS platform-crypto implementations are wired to source-level message send/receive and durable opaque-ciphertext delivery; native live flows remain unverified.</small></div><span id="e2ee-client" class="pill unknown">Checking</span></div>
         <div class="row"><div><b>Forward secrecy and recovery behavior</b><small>Protocol-level lifecycle, rotation, and multi-device semantics.</small></div><span id="e2ee-forward" class="pill unknown">Checking</span></div>
-        <div class="row"><div><b>Message send and receive</b><small>Web client uses authenticated ciphertext envelopes; native client delivery is not integrated.</small></div><span id="e2ee-delivery" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Message send and receive</b><small>Web and native clients use authenticated ciphertext envelopes in source; native/live delivery has not been verified.</small></div><span id="e2ee-delivery" class="pill unknown">Checking</span></div>
         <div class="row"><div><b>Independent security review</b><small>Required before any E2EE or sensitive-use claim.</small></div><span id="e2ee-review" class="pill unknown">Checking</span></div>
       </div>
       <div class="section-title">ENCRYPTED FILE TRANSFER</div>
       <div class="rows">
         <div class="row"><div><b>Web encrypted upload/download</b><small>Implemented in source; not live-tested or independently reviewed. Per-device manifests and chunk AEAD.</small></div><span id="transfer-web" class="pill unknown">Checking</span></div>
-        <div class="row"><div><b>Native transfer clients</b><small>Android/iOS clients do not yet send or decrypt attachments.</small></div><span id="transfer-native" class="pill unknown">Checking</span></div>
+        <div class="row"><div><b>Native transfer clients</b><small>Android/iOS transfer paths exist in source but are not device/live-tested.</small></div><span id="transfer-native" class="pill unknown">Checking</span></div>
         <div class="row"><div><b>Media preview</b><small>Browser-native image/audio/video preview only where the browser supports the declared MIME/codec; otherwise save to a compatible app.</small></div><span id="transfer-preview" class="pill unknown">Checking</span></div>
       </div>
       <div class="section-title">AUDIO / VIDEO CALLING</div>

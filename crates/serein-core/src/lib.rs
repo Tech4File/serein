@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(registration_password_requirements("Password"),[true,true,true,false,true]);
         assert_eq!(registration_password_requirements("Abc123"),[false,true,true,true,true]);
         assert_eq!(registration_password_requirements("😀😀😀😀😀Aa1"),[true,true,true,true,true]);
-        assert_eq!(registration_password_requirements("A".to_owned()+&"a".repeat(1022)+"1"),[true,true,true,true,true]);
+        assert_eq!(registration_password_requirements(&("A".to_owned()+&"a".repeat(1022)+"1")),[true,true,true,true,true]);
         assert!(!registration_password_requirements(&("A".to_owned()+&"a".repeat(1023)+"1"))[4]);
         assert_eq!(registration_password_requirement_mask("Serein123"),PASSWORD_REQ_ALL);
         let bytes=b"Serein123";

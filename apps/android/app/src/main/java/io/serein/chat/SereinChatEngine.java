@@ -29,9 +29,9 @@ final class SereinChatEngine {
     static final class Peer {
         final String userId, deviceId, name, fingerprint;
         final JSONObject publicJwk;
-        final byte[] conversationKey;
+        final byte[] conversationKey, layer2Key;
         final boolean trusted;
-        Peer(String userId,String deviceId,String name,String fingerprint,JSONObject publicJwk,byte[] key,boolean trusted){this.userId=userId;this.deviceId=deviceId;this.name=name;this.fingerprint=fingerprint;this.publicJwk=publicJwk;this.conversationKey=key;this.trusted=trusted;}
+        Peer(String userId,String deviceId,String name,String fingerprint,JSONObject publicJwk,byte[] key,byte[] layer2Key,boolean trusted){this.userId=userId;this.deviceId=deviceId;this.name=name;this.fingerprint=fingerprint;this.publicJwk=publicJwk;this.conversationKey=key;this.layer2Key=layer2Key;this.trusted=trusted;}
     }
     private final Context context;
     private final SereinApi api;
@@ -39,7 +39,7 @@ final class SereinChatEngine {
     private final String userId, deviceId, contactId, contactName, contactUsername;
     private final Listener listener;
     private final Map<String,Peer> peers=new HashMap<>();
-    private volatile KeyPair pair;
+    private volatile KeyPair pair, layer2Pair;
     private volatile SereinLocalStore local;
     private volatile String status="Preparing protected device keys…";
     private volatile boolean ready;
@@ -63,11 +63,11 @@ final class SereinChatEngine {
 
     CompletableFuture<Void> initialize(){
         return CompletableFuture.supplyAsync(()->{
-            try{if(userId.isEmpty()||deviceId.isEmpty())throw new IllegalStateException("Signed-in device identity is unavailable.");SereinAttachmentStore.cleanTemporaryFiles(context);pair=SereinDeviceCrypto.loadOrCreate(context,userId,deviceId);local=new SereinLocalStore(context,userId);return null;}
+            try{if(userId.isEmpty()||deviceId.isEmpty())throw new IllegalStateException("Signed-in device identity is unavailable.");SereinAttachmentStore.cleanTemporaryFiles(context);pair=SereinDeviceCrypto.loadOrCreate(context,userId,deviceId);layer2Pair=SereinDeviceCrypto.loadOrCreateLayer2(context,userId,deviceId);local=new SereinLocalStore(context,userId);return null;}
             catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
         }).thenComposeAsync(ignored->{
-            try{return api.enrollDeviceKey(SereinDeviceCrypto.publicJwk(pair)).thenApplyAsync(reply->{
-                try{String fp=SereinDeviceCrypto.fingerprint(SereinDeviceCrypto.publicJwk(pair));if(!fp.equals(reply.optString("fingerprint")))throw new IllegalStateException("Server fingerprint did not match this device key.");return null;}
+            try{return api.enrollDeviceKey(SereinDeviceCrypto.publicJwk(pair),SereinDeviceCrypto.publicJwk(layer2Pair)).thenApplyAsync(reply->{
+                try{String fp=SereinDeviceCrypto.fingerprintBundle(SereinDeviceCrypto.publicJwk(pair),SereinDeviceCrypto.publicJwk(layer2Pair));if(!fp.equals(reply.optString("fingerprint")))throw new IllegalStateException("Server fingerprint did not match this device key bundle.");return null;}
                 catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
             });}catch(Exception error){return failed(error);}
         }).thenComposeAsync(ignored->refreshPeers()).thenRunAsync(()->{
@@ -92,10 +92,10 @@ final class SereinChatEngine {
                 Map<String,Peer> next=new HashMap<>();
                 for(int i=0;i<active.length();i++){
                     JSONObject d=active.optJSONObject(i);if(d==null)continue;String id=d.optString("id");JSONObject entry=publishedById.get(id);if(entry==null)continue;
-                    JSONObject jwk=entry.optJSONObject("public_key");if(jwk==null||!"ECDH-P256".equals(entry.optString("algorithm")))throw new IllegalStateException("A contact device published an unsupported key.");
-                    String fingerprint=SereinDeviceCrypto.fingerprint(jwk);if(!fingerprint.equals(entry.optString("fingerprint")))throw new IllegalStateException("A contact device fingerprint is inconsistent.");
-                    String trusted=local.trustedFingerprint(contactId,id);byte[] key=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,contactId,id,jwk);
-                    next.put(id,new Peer(contactId,id,d.optString("name","Device"),fingerprint,jwk,key,fingerprint.equals(trusted)));
+                    JSONObject jwk=entry.optJSONObject("public_key"),layer2Jwk=entry.optJSONObject("layer2_public_key");if(jwk==null||layer2Jwk==null||entry.optInt("key_version")!=2||!"ECDH-P256".equals(entry.optString("algorithm")))throw new IllegalStateException("A contact device has not published both E2EE key layers.");
+                    String fingerprint=SereinDeviceCrypto.fingerprintBundle(jwk,layer2Jwk);if(!fingerprint.equals(entry.optString("fingerprint")))throw new IllegalStateException("A contact device key-bundle fingerprint is inconsistent.");
+                    String trusted=local.trustedFingerprint(contactId,id);byte[] key=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,contactId,id,jwk);byte[] layer2Key=SereinDeviceCrypto.layer2ConversationKey(layer2Pair.getPrivate(),userId,deviceId,contactId,id,layer2Jwk);
+                    next.put(id,new Peer(contactId,id,d.optString("name","Device"),fingerprint,jwk,key,layer2Key,fingerprint.equals(trusted)));
                 }
                 if(publishedById.keySet().stream().anyMatch(id->{for(int i=0;i<active.length();i++)if(id.equals(active.optJSONObject(i)==null?"":active.optJSONObject(i).optString("id")))return false;return true;}))throw new IllegalStateException("The contact device list changed. Refresh Contacts and reopen this chat.");
                 synchronized(this){peers.clear();peers.putAll(next);}status=peerStatus();notifyUi();
@@ -110,7 +110,7 @@ final class SereinChatEngine {
     }
     CompletableFuture<Void> trust(String targetDeviceId){
         return CompletableFuture.runAsync(()->{
-            try{Peer peer; synchronized(this){peer=peers.get(targetDeviceId);}if(peer==null)throw new IllegalStateException("Device key is no longer available.");local.trustFingerprint(contactId,targetDeviceId,peer.fingerprint);synchronized(this){peers.put(targetDeviceId,new Peer(peer.userId,peer.deviceId,peer.name,peer.fingerprint,peer.publicJwk,peer.conversationKey,true));}status=peerStatus();notifyUi();}
+            try{Peer peer; synchronized(this){peer=peers.get(targetDeviceId);}if(peer==null)throw new IllegalStateException("Device key is no longer available.");local.trustFingerprint(contactId,targetDeviceId,peer.fingerprint);synchronized(this){peers.put(targetDeviceId,new Peer(peer.userId,peer.deviceId,peer.name,peer.fingerprint,peer.publicJwk,peer.conversationKey,peer.layer2Key,true));}status=peerStatus();notifyUi();}
             catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
         });
     }
@@ -124,8 +124,8 @@ final class SereinChatEngine {
             try{
                 List<Peer> targets=trustedTargets();String messageId=UUID.randomUUID().toString().toLowerCase(Locale.ROOT),createdAt=java.time.Instant.now().toString();JSONArray envelopes=new JSONArray();
                 for(Peer target:targets){JSONObject content=new JSONObject().put("version",1).put("text",text).put("conversation_id",contactId).put("sender_user_id",userId).put("sender_device_id",deviceId).put("recipient_user_id",contactId).put("recipient_device_id",target.deviceId);if(attachment!=null)content.put("attachment",attachment);
-                    JSONObject encrypted=SereinDeviceCrypto.encryptMessage(target.conversationKey,content,contactId,messageId,userId,deviceId,contactId,target.deviceId);
-                    envelopes.put(new JSONObject().put("to",target.deviceId).put("iv",encrypted.getString("iv")).put("ciphertext",encrypted.getString("ciphertext")));
+                    JSONObject encrypted=SereinDeviceCrypto.encryptLayeredMessage(target.conversationKey,target.layer2Key,content,contactId,messageId,userId,deviceId,contactId,target.deviceId);
+                    envelopes.put(new JSONObject().put("to",target.deviceId).put("crypto_version",2).put("iv",encrypted.getString("iv")).put("ciphertext",encrypted.getString("ciphertext")));
                 }
                 JSONObject localMessage=new JSONObject().put("id",messageId).put("conversation_id",contactId).put("created_at",createdAt).put("text",text).put("mine",true).put("sender",user.optString("display_name","You")).put("status","pending").put("envelopes",envelopes);if(attachment!=null)localMessage.put("attachment",attachment);
                 local.saveMessage(localMessage);notifyUi();return localMessage;
@@ -139,7 +139,7 @@ final class SereinChatEngine {
     }
     private CompletableFuture<Void> deliver(JSONObject message){
         JSONArray envelopes=message.optJSONArray("envelopes");CompletableFuture<Void> chain=CompletableFuture.completedFuture(null);
-        for(int i=0;envelopes!=null&&i<envelopes.length();i++){JSONObject e=envelopes.optJSONObject(i);if(e==null)continue;String id=message.optString("id");chain=chain.thenCompose(ignored->api.sendEnvelopeFuture(id,e.optString("to"),e.optString("iv"),e.optString("ciphertext")).thenApply(value->null));}
+        for(int i=0;envelopes!=null&&i<envelopes.length();i++){JSONObject e=envelopes.optJSONObject(i);if(e==null)continue;String id=message.optString("id");chain=chain.thenCompose(ignored->api.sendEnvelopeFuture(id,e.optString("to"),e.optString("iv"),e.optString("ciphertext"),e.optInt("crypto_version",1)).thenApply(value->null));}
         return chain.thenRunAsync(()->{try{message.put("status","accepted");message.remove("envelopes");local.saveMessage(message);status="Encrypted message accepted by all recipient devices.";notifyUi();}catch(Exception error){throw new java.util.concurrent.CompletionException(error);}});
     }
     private void retryPending(){
@@ -171,7 +171,7 @@ final class SereinChatEngine {
                 if(!belongs){advance(created,id);return;}
                 if(local.containsMessage(id)){api.acknowledgeFuture(id);advance(created,id);return;}
                 Peer peer; synchronized(this){peer=peers.get(senderDevice);}if(peer==null||!peer.trusted){status=peer==null?"Refresh Contacts: the sender device is not in the accepted contact list.":"Message is held until you verify the sender-device fingerprint.";notifyUi();throw new IllegalStateException(status);}
-                JSONObject content=SereinDeviceCrypto.decryptMessage(peer.conversationKey,packet.optString("iv"),packet.optString("ciphertext"),contactId,id,contactId,senderDevice,userId,deviceId);
+                JSONObject content=SereinDeviceCrypto.decryptLayeredMessage(peer.conversationKey,peer.layer2Key,packet.optInt("crypto_version",1),packet.optString("iv"),packet.optString("ciphertext"),contactId,id,contactId,senderDevice,userId,deviceId);
                 if(content.optInt("version")!=1||!contactId.equals(content.optString("conversation_id"))||!contactId.equals(content.optString("sender_user_id"))||!senderDevice.equals(content.optString("sender_device_id"))||!userId.equals(content.optString("recipient_user_id"))||!deviceId.equals(content.optString("recipient_device_id")))throw new SecurityException("Encrypted message routing did not match this device.");
                 String text=content.optString("text","");if(text.isEmpty()||text.codePointCount(0,text.length())>4000)throw new SecurityException("Encrypted message text exceeded the protocol limit.");
                 JSONObject message=new JSONObject().put("id",id).put("conversation_id",contactId).put("created_at",created).put("text",text).put("mine",false).put("sender",contactName).put("status","received");

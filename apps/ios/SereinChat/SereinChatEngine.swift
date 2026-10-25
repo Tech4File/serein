@@ -51,6 +51,7 @@ struct SereinPeerKey: Identifiable {
     let previousFingerprint: String
     let trusted: Bool
     let key: SymmetricKey
+    let layer2Key: SymmetricKey
 }
 
 @MainActor
@@ -65,6 +66,7 @@ final class SereinChatEngine: ObservableObject {
     private let api: SereinAPI
     private let contact: SereinContact
     private var crypto: SereinDeviceCrypto?
+    private var layer2Crypto: SereinDeviceCrypto?
     private var local: SereinLocalStore?
     private var cursorTime: String?
     private var cursorID: String?
@@ -82,10 +84,11 @@ final class SereinChatEngine: ObservableObject {
         do {
             SereinAttachmentStore.shared.cleanTemporaryFiles()
             let deviceCrypto = try SereinDeviceCrypto.loadOrCreate(userID: user.id, deviceID: device.id)
+            let deviceLayer2Crypto = try SereinDeviceCrypto.loadOrCreateLayer2(userID: user.id, deviceID: device.id)
             let localStore = try SereinLocalStore(accountID: user.id)
-            crypto = deviceCrypto; local = localStore
-            let registration = try await api.registerDeviceKey(deviceCrypto.publicJWK())
-            guard let ownFingerprint = try? SereinDeviceCrypto.fingerprint(deviceCrypto.publicJWK()), registration["fingerprint"] as? String == ownFingerprint else {
+            crypto = deviceCrypto; layer2Crypto = deviceLayer2Crypto; local = localStore
+            let registration = try await api.registerDeviceKey(deviceCrypto.publicJWK(), layer2PublicJWK: deviceLayer2Crypto.publicJWK())
+            guard let ownFingerprint = try? SereinDeviceCrypto.fingerprintBundle(layer1: deviceCrypto.publicJWK(), layer2: deviceLayer2Crypto.publicJWK()), registration["fingerprint"] as? String == ownFingerprint else {
                 throw SereinDeviceCrypto.CryptoError.invalidPublicKey
             }
             try await refreshPeerKeys()
@@ -104,7 +107,7 @@ final class SereinChatEngine: ObservableObject {
     }
 
     func refreshPeerKeys() async throws {
-        guard let user = api.user, let device = api.currentDevice, let crypto else { throw ChatError.deviceUnavailable }
+        guard let user = api.user, let device = api.currentDevice, let crypto, let layer2Crypto else { throw ChatError.deviceUnavailable }
         let contactsData = try await api.contactsData()
         guard let rows = try JSONSerialization.jsonObject(with: contactsData) as? [[String: Any]],
               let latest = rows.first(where: { $0["user_id"] as? String == contact.user_id }) else { throw ChatError.contactUnavailable }
@@ -121,13 +124,16 @@ final class SereinChatEngine: ObservableObject {
         for target in latestDevices {
             guard let entry = entries.first(where: { $0["device_id"] as? String == target.id }),
                   entry["algorithm"] as? String == "ECDH-P256",
+                  entry["key_version"] as? Int == 2,
                   let jwk = entry["public_key"] as? [String: Any],
+                  let layer2JWK = entry["layer2_public_key"] as? [String: Any],
                   let serverFingerprint = entry["fingerprint"] as? String else { continue }
-            let fingerprint = try SereinDeviceCrypto.fingerprint(jwk)
+            let fingerprint = try SereinDeviceCrypto.fingerprintBundle(layer1: jwk, layer2: layer2JWK)
             guard fingerprint == serverFingerprint else { throw ChatError.keyDirectoryMismatch }
             let key = try crypto.conversationKey(localUserID: user.id, localDeviceID: device.id, peerUserID: contact.user_id, peerDeviceID: target.id, peerJWK: jwk)
+            let layer2Key = try layer2Crypto.layer2ConversationKey(localUserID: user.id, localDeviceID: device.id, peerUserID: contact.user_id, peerDeviceID: target.id, peerJWK: layer2JWK)
             let old = local?.previousFingerprint(userID: contact.user_id, deviceID: target.id) ?? ""
-            next.append(SereinPeerKey(id: target.id, name: target.name, fingerprint: fingerprint, previousFingerprint: old, trusted: old == fingerprint, key: key))
+            next.append(SereinPeerKey(id: target.id, name: target.name, fingerprint: fingerprint, previousFingerprint: old, trusted: old == fingerprint, key: key, layer2Key: layer2Key))
         }
         activeDevices = latestDevices
         peerKeys = next
@@ -139,7 +145,7 @@ final class SereinChatEngine: ObservableObject {
               let local else { throw ChatError.deviceListChanged }
         try local.trust(userID: contact.user_id, deviceID: peer.id, fingerprint: peer.fingerprint)
         peerKeys = peerKeys.map { value in
-            SereinPeerKey(id: value.id, name: value.name, fingerprint: value.fingerprint, previousFingerprint: value.fingerprint, trusted: value.id == peer.id || value.trusted, key: value.key)
+            SereinPeerKey(id: value.id, name: value.name, fingerprint: value.fingerprint, previousFingerprint: value.fingerprint, trusted: value.id == peer.id || value.trusted, key: value.key, layer2Key: value.layer2Key)
         }
         status = peerStatus
     }
@@ -162,16 +168,16 @@ final class SereinChatEngine: ObservableObject {
                 "sender_user_id": user.id, "sender_device_id": device.id, "recipient_user_id": contact.user_id,
                 "recipient_device_id": peer.id]
             if let attachment { content["attachment"] = attachment.json }
-            envelopes.append(try crypto.encryptMessage(content, key: peer.key, conversationID: contact.user_id, messageID: messageID,
+            envelopes.append(try crypto.encryptLayeredMessage(content, layer1Key: peer.key, layer2Key: peer.layer2Key, conversationID: contact.user_id, messageID: messageID,
                 senderUserID: user.id, senderDeviceID: device.id, recipientUserID: contact.user_id, recipientDeviceID: peer.id)
-                .merging(["to": peer.id]) { _, new in new })
+                .merging(["to": peer.id, "crypto_version": "2"]) { _, new in new })
         }
         var row: [String: Any] = ["id": messageID, "conversation_id": contact.user_id, "created_at": createdAt,
             "text": text, "mine": true, "sender": user.display_name, "status": "pending", "envelopes": envelopes]
         if let attachment { row["attachment"] = attachment.json }
         try local.save(row); loadMessages()
         for envelope in envelopes {
-            try await api.sendEncryptedEnvelope(id: messageID, to: envelope["to"] ?? "", iv: envelope["iv"] ?? "", ciphertext: envelope["ciphertext"] ?? "")
+            try await api.sendEncryptedEnvelope(id: messageID, to: envelope["to"] ?? "", iv: envelope["iv"] ?? "", ciphertext: envelope["ciphertext"] ?? "", cryptoVersion: Int(envelope["crypto_version"] ?? "1") ?? 1)
         }
         row["status"] = "accepted"; row.removeValue(forKey: "envelopes"); try local.save(row); loadMessages()
         status = "Encrypted message accepted by all recipient devices."
@@ -192,7 +198,7 @@ final class SereinChatEngine: ObservableObject {
         for var row in local.messages(for: contact.user_id) where row["mine"] as? Bool == true && row["status"] as? String == "pending" {
             guard let id = row["id"] as? String, let envelopes = row["envelopes"] as? [[String: String]] else { continue }
             do {
-                for envelope in envelopes { try await api.sendEncryptedEnvelope(id: id, to: envelope["to"] ?? "", iv: envelope["iv"] ?? "", ciphertext: envelope["ciphertext"] ?? "") }
+                for envelope in envelopes { try await api.sendEncryptedEnvelope(id: id, to: envelope["to"] ?? "", iv: envelope["iv"] ?? "", ciphertext: envelope["ciphertext"] ?? "", cryptoVersion: Int(envelope["crypto_version"] ?? "1") ?? 1) }
                 row["status"] = "accepted"; row.removeValue(forKey: "envelopes"); try local.save(row)
             } catch { status = "A queued encrypted message will retry when the server is reachable." }
         }

@@ -45,9 +45,9 @@ python3 - "$TMP/security-capabilities.json" <<'PY'
 import json,sys
 x=json.load(open(sys.argv[1]));assert x['messaging_enabled'] is True
 assert x['shared_core']['status']=='partial' and x['shared_core']['android_native'] is False and x['shared_core']['ios_native'] is False
-assert x['e2ee']['protocol']=='user_defined_three_layer_v1' and x['e2ee']['protocol_status']=='in_development_unreviewed'
-assert x['e2ee']['device_key_registry']=='source_implemented_unverified' and x['e2ee']['web_device_key_enrollment']=='web_implemented_unreviewed'
-assert x['e2ee']['client_encrypt_decrypt']=='web_implemented_unreviewed' and x['e2ee']['message_delivery']=='enabled' and x['e2ee']['independent_review']=='not_started'
+assert x['e2ee']['protocol']=='independent_device_bound_layer2_v2' and x['e2ee']['protocol_status']=='in_development_unreviewed'
+assert x['e2ee']['device_key_registry']=='dual_public_key_source_implemented_unverified' and x['e2ee']['web_device_key_enrollment']=='web_android_ios_source_implemented_unverified'
+assert x['e2ee']['client_encrypt_decrypt']=='web_android_ios_source_implemented_unverified' and x['e2ee']['message_delivery']=='enabled' and x['e2ee']['independent_review']=='not_started'
 assert x['file_transfers']['web_client']=='source_implemented_unverified' and x['file_transfers']['native_clients']=='not_implemented'
 assert x['calls']['permission_preflight']=='source_implemented_unverified' and x['calls']['quic_media_transport']=='not_implemented'
 PY
@@ -58,7 +58,7 @@ import json,sys
 body=json.load(open(sys.argv[1]));headers=open(sys.argv[2]).read().lower()
 assert body['retry_after_seconds']==60
 assert 'retry-after: 60' in headers
-assert body['message']=='If the account exists and needs verification, a code will be sent.'
+assert body['message']=='If the account exists, a code may be sent.'
 PY
 
 python3 - "$TMP" "$SMOKE_EMAIL_A" "$SMOKE_EMAIL_B" <<'PY'
@@ -140,6 +140,13 @@ otp_for(){
   [[ "$value" =~ ^[0-9]{6}$ ]] || { echo "OTP must be six digits" >&2; return 1; }
   printf '%s' "$value"
 }
+otp_login_for(){
+  local who="$1" email="$2" stage="$3" var="OTP_${who^^}_${stage}" value
+  value="${!var:-}"
+  if [[ -z "$value" ]]; then read -r -p "Enter the six-digit sign-in code received by ${email} (${stage}): " value; fi
+  [[ "$value" =~ ^[0-9]{6}$ ]] || { echo "Sign-in OTP must be six digits" >&2; return 1; }
+  printf '%s' "$value"
+}
 for who in a b; do
   email="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["email"])' "$TMP/$who.json")"
   code="$(otp_for "$who" "$email")"
@@ -152,7 +159,7 @@ PY
   test "$invalid_status" = 400
   payload="$(python3 - "$TMP/$who.json" "$code" <<'PY'
 import json,sys
-x=json.load(open(sys.argv[1]));print(json.dumps({'email':x['email'],'code':sys.argv[2],'device_name':x['device_name'],'device_id':x['device_id']}))
+x=json.load(open(sys.argv[1]));print(json.dumps({'identity':x['email'],'password':x['password'],'code':sys.argv[2],'device_name':x['device_name'],'device_id':x['device_id']}))
 PY
 )"
   post_json "$TMP/$who.jar" /api/v1/auth/verify-email "$payload" >"$TMP/$who-verify.json"
@@ -186,11 +193,36 @@ test "$bad_status" = 400
 
 # Signing out and signing in again with the same stable device ID preserves the device record.
 post_json "$A" /api/v1/auth/logout '{}' >/dev/null
-post_json "$A" /api/v1/auth/login "$(python3 - "$TMP/a.json" <<'PY'
+login_payload="$(python3 - "$TMP/a.json" <<'PY'
 import json,sys
-x=json.load(open(sys.argv[1]));print(json.dumps({'identity':x['email'],'password':x['password'],'device_name':x['device_name'],'device_id':x['device_id']}))
+x=json.load(open(sys.argv[1]));print(json.dumps({'identity':x['email'],'password':x['password']}))
 PY
-)" >"$TMP/a-login.json"
+)"
+login_status="$(curl -sS -c "$A" -b "$A" -H 'Content-Type: application/json' -d "$login_payload" -o "$TMP/a-login-challenge.json" -w '%{http_code}' "$BASE_URL/api/v1/auth/login")"
+test "$login_status" = 403
+python3 - "$TMP/a-login-challenge.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]));assert x['verification']['required'] is True and x['verification']['purpose']=='login' and 'account' not in x
+PY
+login_code="$(otp_login_for a "$SMOKE_EMAIL_A" LOGIN)"
+wrong_login_code="$(python3 - "$login_code" <<'PY'
+import sys
+code=sys.argv[1];print(('0' if code[0]!='0' else '1')+code[1:])
+PY
+)"
+wrong_login_payload="$(python3 - "$TMP/a.json" "$wrong_login_code" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]));print(json.dumps({'identity':x['email'],'password':x['password'],'code':sys.argv[2],'device_name':x['device_name'],'device_id':x['device_id']}))
+PY
+)"
+wrong_login_status="$(curl -sS -o "$TMP/a-login-wrong-code.json" -w '%{http_code}' -H 'Content-Type: application/json' -d "$wrong_login_payload" "$BASE_URL/api/v1/auth/verify-login")"
+test "$wrong_login_status" = 400
+login_verify="$(python3 - "$TMP/a.json" "$login_code" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]));print(json.dumps({'identity':x['email'],'password':x['password'],'code':sys.argv[2],'device_name':x['device_name'],'device_id':x['device_id']}))
+PY
+)"
+post_json "$A" /api/v1/auth/verify-login "$login_verify" >"$TMP/a-login.json"
 python3 - "$TMP" <<'PY'
 import json,pathlib,sys
 p=pathlib.Path(sys.argv[1]);x=json.loads((p/'a-login.json').read_text());assert x['account']['device']['id']==(p/'a_device').read_text();assert x['verification']['required'] is False and x['verification']['verified'] is True
@@ -199,7 +231,20 @@ python3 - "$TMP" <<'PY'
 import json,pathlib,sys,uuid
 p=pathlib.Path(sys.argv[1]);x=json.load(open(p/'a.json'));x['device_id']=str(uuid.uuid4());(p/'a-second-device-login.json').write_text(json.dumps({'identity':x['username'],'password':x['password'],'device_name':'Second web device','device_id':x['device_id']}));(p/'a_second_device').write_text(x['device_id'])
 PY
-post_json "$A" /api/v1/auth/login "$(cat "$TMP/a-second-device-login.json")" >/dev/null
+second_login_request="$(python3 - "$TMP/a-second-device-login.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]));print(json.dumps({'identity':x['identity'],'password':x['password']}))
+PY
+)"
+second_login_status="$(curl -sS -c "$A" -b "$A" -H 'Content-Type: application/json' -d "$second_login_request" -o "$TMP/a-second-device-challenge.json" -w '%{http_code}' "$BASE_URL/api/v1/auth/login")"
+test "$second_login_status" = 403
+second_login_code="$(otp_login_for a "$SMOKE_EMAIL_A" SECOND_LOGIN)"
+second_login_payload="$(python3 - "$TMP/a.json" "$TMP/a-second-device-login.json" "$second_login_code" <<'PY'
+import json,sys
+account=json.load(open(sys.argv[1]));device=json.load(open(sys.argv[2]));print(json.dumps({'identity':account['email'],'password':account['password'],'code':sys.argv[3],'device_name':device['device_name'],'device_id':device['device_id']}))
+PY
+)"
+post_json "$A" /api/v1/auth/verify-login "$second_login_payload" >/dev/null
 get_json "$A" /api/v1/settings >"$TMP/settings-after-login.json"
 get_json "$A" /api/v1/devices >"$TMP/devices.json"
 python3 - "$TMP" <<'PY'
@@ -215,16 +260,22 @@ p=pathlib.Path(sys.argv[1])
 def b64(h): return base64.urlsafe_b64encode(bytes.fromhex(h)).decode().rstrip('=')
 # Public points for private scalars 1 and 2 on the standard NIST P-256 curve.
 points=[('6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296','4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5'),('7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978','07775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1')]
-for name,(x,y) in zip(('key-a.json','key-b.json'),points):
-    (p/name).write_text(json.dumps({'algorithm':'ECDH-P256','public_key':{'kty':'EC','crv':'P-256','x':b64(x),'y':b64(y)}}))
+layer2_points=[('5ecbe4d1a6330a44c8f7ef951d4bf165e6c6b721efada985fb41661bc6e7fd6c','8734640c4998ff7e374b06ce1a64a2ecd82ab036384fb83d9a79b127a27d5032'),('e2534a3532d08fbba02dde659ee62bd0031fe2db785596ef509302446b030852','e0f1575a4c633cc719dfee5fda862d764efc96c3f30ee0055c42c23f184ed8c6')]
+for name,(point,layer2_point) in zip(('key-a.json','key-b.json'),zip(points,layer2_points)):
+    x,y=point; x2,y2=layer2_point
+    jwk=lambda a,b:{'kty':'EC','crv':'P-256','x':b64(a),'y':b64(b)}
+    (p/name).write_text(json.dumps({'algorithm':'ECDH-P256','public_key':jwk(x,y),'layer2_public_key':jwk(x2,y2)}))
 PY
 put_json "$A" /api/v1/device-key "$(cat "$TMP/key-a.json")" >"$TMP/key-a-result.json"
 post_json "$B" /api/v1/device-key "$(cat "$TMP/key-b.json")" >"$TMP/key-b-result.json"
 python3 - "$TMP" <<'PY'
-import json,pathlib,re,sys
+import base64,hashlib,json,pathlib,re,sys
 p=pathlib.Path(sys.argv[1])
-for name in ('key-a-result.json','key-b-result.json'):
-    x=json.load(open(p/name));assert x['registered'] is True and x['algorithm']=='ECDH-P256' and re.fullmatch(r'[0-9a-f]{64}',x['fingerprint'])
+for name,source in (('key-a-result.json','key-a.json'),('key-b-result.json','key-b.json')):
+    x=json.load(open(p/name));bundle=json.load(open(p/source));assert x['registered'] is True and x['algorithm']=='ECDH-P256' and re.fullmatch(r'[0-9a-f]{64}',x['fingerprint'])
+    coords=lambda jwk:base64.urlsafe_b64decode(jwk['x']+'==')+base64.urlsafe_b64decode(jwk['y']+'==')
+    expected=hashlib.sha256(b'Serein ECDH P-256 device key bundle v2\0'+coords(bundle['public_key'])+coords(bundle['layer2_public_key'])).hexdigest()
+    assert x['fingerprint']==expected
 PY
 key_change_status="$(curl -sS -o "$TMP/key-change.json" -w '%{http_code}' -c "$A" -b "$A" -H 'Content-Type: application/json' -X PUT -d "$(cat "$TMP/key-b.json")" "$BASE_URL/api/v1/device-key")"
 test "$key_change_status" = 409
@@ -302,8 +353,8 @@ import json,pathlib,sys
 result=json.load(open(sys.argv[1]));p=pathlib.Path(sys.argv[2]);rows=result['devices']
 account=json.load(open(p/'b-verify.json'))['account']['user']
 assert result['user_id']==account['id'] and result['username']==account['username']
-assert any(row['device_id']==(p/'b_device').read_text() and row['fingerprint']==json.load(open(p/'key-b-result.json'))['fingerprint'] for row in rows)
-assert all('d' not in row['public_key'] for row in rows)
+assert any(row['device_id']==(p/'b_device').read_text() and row['fingerprint']==json.load(open(p/'key-b-result.json'))['fingerprint'] and row['key_version']==2 and row['layer2_public_key'] for row in rows)
+assert all('d' not in row['public_key'] and row.get('layer2_public_key') is not None and 'd' not in row['layer2_public_key'] for row in rows)
 PY
 message_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 recipient_device="$(python3 - "$TMP/b-verify.json" <<'PY'
@@ -313,7 +364,7 @@ PY
 )"
 post_json "$A" /api/v1/messages "$(python3 - "$message_id" "$recipient_device" <<'PY'
 import json,sys
-print(json.dumps({'id':sys.argv[1],'to':sys.argv[2],'iv':'AAAAAAAAAAAAAAAA','ciphertext':'AAAAAAAAAAAAAAAAAAAAAA=='}))
+print(json.dumps({'id':sys.argv[1],'to':sys.argv[2],'crypto_version':2,'iv':'AAAAAAAAAAAAAAAA','ciphertext':'AAAAAAAAAAAAAAAAAAAAAA=='}))
 PY
 )" >"$TMP/message-accepted.json"
 get_json "$B" /api/v1/messages?limit=10 >"$TMP/message-history.json"
@@ -323,7 +374,7 @@ accepted=json.load(open(sys.argv[1]));history=json.load(open(sys.argv[2]));messa
 assert accepted['id']==message_id and accepted['type']=='accepted'
 item=next(row for row in history['items'] if row['id']==message_id)
 payload=item['payload']
-assert payload['type']=='message' and payload['id']==message_id
+assert payload['type']=='message' and payload['id']==message_id and payload['crypto_version']==2
 assert payload['iv']=='AAAAAAAAAAAAAAAA' and payload['ciphertext']=='AAAAAAAAAAAAAAAAAAAAAA=='
 assert 'plaintext' not in payload
 PY

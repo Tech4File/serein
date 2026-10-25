@@ -4,11 +4,15 @@
     core: { integrated: ['Integrated', 'good'], not_integrated: ['Not integrated', 'bad'], unknown: ['Unknown', 'unknown'] },
     protocol: { not_selected: ['Not selected', 'bad'], selected: ['Selected · review pending', 'warn'], in_development_unreviewed: ['In development · unreviewed', 'warn'], unknown: ['Unknown', 'unknown'] },
     source_implemented_unverified: ['Implemented in source · unverified', 'warn'],
+    dual_public_key_source_implemented_unverified: ['Two public device keys · source unverified', 'warn'],
+    web_android_ios_source_implemented_unverified: ['Web/Android/iOS source · runtime unverified', 'warn'],
+    independent_layer1_layer2_key_pairs_source_implemented_unverified: ['Independent Layer 1/Layer 2 key pairs · unverified', 'warn'],
     browser_native_supported_codecs_only: ['Browser-supported codecs only', 'warn'],
     prototype: ['Prototype · not used for messages', 'warn'],
     web_prototype: ['Web prototype · not connected to messaging', 'warn'],
     web_implemented_unreviewed: ['Web path active · independent review pending', 'warn'],
     manual_fingerprint_verification: ['Manual fingerprint comparison required', 'warn'],
+    manual_combined_fingerprint_verification: ['Compare combined device-key fingerprint manually', 'warn'],
     manual_reverification_required: ['Key changes require manual re-verification', 'warn'],
     not_implemented: ['Not implemented', 'bad'],
     not_started: ['Not started', 'bad'],
@@ -68,7 +72,7 @@
       setStatus('call-quic', calls.quic_media_transport || 'unknown');
       const enabled = data.messaging_enabled === true;
       summary.dataset.state = enabled ? 'ok' : 'error';
-      overall.textContent = enabled ? 'Web encrypted messaging is active · independent review pending' : 'Messaging remains disabled';
+      overall.textContent = enabled ? 'Encrypted messaging source active · independent review pending' : 'Messaging remains disabled';
       document.getElementById('checkedAt').textContent = `Checked ${new Date().toLocaleTimeString()} · auto-refreshes every 30 seconds`;
       source.textContent = 'Live capability response received. This is not an audit.';
     } catch {

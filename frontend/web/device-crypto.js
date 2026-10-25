@@ -24,25 +24,44 @@
     if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(raw)) throw new Error('Malformed message Base64.');
     return Uint8Array.from(atob(raw), character => character.charCodeAt(0));
   }
-  function messageAdditionalData(metadata) {
+  function messageAdditionalData(metadata, layer = 'legacy') {
     const fields = ['conversationId', 'messageId', 'senderUserId', 'senderDeviceId', 'recipientUserId', 'recipientDeviceId'];
     const values = fields.map(field => String(metadata?.[field] || ''));
     if (values.some(value => !value || value.length > 128)) throw new Error('Message authentication metadata is incomplete.');
-    return encoder.encode(JSON.stringify(['serein-message-v1', ...values]));
+    const label = layer === 'legacy' ? 'serein-message-v1' : `serein-message-${layer}-v2`;
+    return encoder.encode(JSON.stringify([label, ...values]));
   }
-  async function encryptMessage(key, plaintext, metadata) {
+  async function sealMessageLayer(key, cleartext, aad) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, key, cleartext);
+    return { iv: encodeBase64(iv), ciphertext: encodeBase64(new Uint8Array(ciphertext)) };
+  }
+  async function openMessageLayer(key, envelope, aad, maximum = 50_000) {
+    const iv = decodeStandardBase64(envelope?.iv), ciphertext = decodeStandardBase64(envelope?.ciphertext);
+    if (iv.length !== 12 || ciphertext.length < 16 || ciphertext.length > maximum) throw new Error('Malformed encrypted-message envelope.');
+    return crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, key, ciphertext);
+  }
+  async function encryptMessage(layer1Key, layer2Key, plaintext, metadata) {
     if (typeof plaintext !== 'string') throw new Error('Message plaintext must be text.');
     const cleartext = encoder.encode(plaintext);
     if (cleartext.length > 16_384) throw new Error('Message exceeds the 16 KiB encrypted-envelope plaintext limit.');
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: messageAdditionalData(metadata), tagLength: 128 }, key, cleartext);
-    return { version: 1, algorithm: 'AES-256-GCM', iv: encodeBase64(iv), ciphertext: encodeBase64(new Uint8Array(ciphertext)) };
+    const inner = await sealMessageLayer(layer1Key, cleartext, messageAdditionalData(metadata, 'layer1'));
+    const innerBytes = encoder.encode(JSON.stringify({ version: 1, algorithm: 'AES-256-GCM', ...inner }));
+    const outer = await sealMessageLayer(layer2Key, innerBytes, messageAdditionalData(metadata, 'layer2'));
+    return { version: 2, algorithm: 'SEREIN-LAYER2-AES-256-GCM', ...outer };
   }
-  async function decryptMessage(key, envelope, metadata) {
-    if (envelope?.version !== 1 || envelope?.algorithm !== 'AES-256-GCM') throw new Error('Unsupported encrypted-message envelope.');
-    const iv = decodeStandardBase64(envelope.iv), ciphertext = decodeStandardBase64(envelope.ciphertext);
-    if (iv.length !== 12 || ciphertext.length < 16 || ciphertext.length > 16_400) throw new Error('Malformed encrypted-message envelope.');
-    const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: messageAdditionalData(metadata), tagLength: 128 }, key, ciphertext);
+  async function decryptMessage(layer1Key, layer2Key, envelope, metadata) {
+    if (envelope?.version === 1 && envelope?.algorithm === 'AES-256-GCM') {
+      const plaintext = await openMessageLayer(layer1Key, envelope, messageAdditionalData(metadata), 16_400);
+      return new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
+    }
+    if (envelope?.version !== 2 || envelope?.algorithm !== 'SEREIN-LAYER2-AES-256-GCM') throw new Error('Unsupported encrypted-message envelope.');
+    const outer = await openMessageLayer(layer2Key, envelope, messageAdditionalData(metadata, 'layer2'));
+    let inner;
+    try { inner = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(outer)); }
+    catch { throw new Error('Malformed nested encrypted-message envelope.'); }
+    if (inner?.version !== 1 || inner?.algorithm !== 'AES-256-GCM') throw new Error('Unsupported inner encrypted-message envelope.');
+    const plaintext = await openMessageLayer(layer1Key, inner, messageAdditionalData(metadata, 'layer1'), 16_400);
     return new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
   }
   async function generateDeviceKeyPair() {
@@ -61,13 +80,34 @@
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', material));
     return [...digest].map(byte => byte.toString(16).padStart(2, '0')).join('');
   }
+  async function fingerprintDeviceKeyBundle(layer1Jwk, layer2Jwk) {
+    const first = await publicCoordinates(layer1Jwk), second = await publicCoordinates(layer2Jwk);
+    const prefix = encoder.encode('Serein ECDH P-256 device key bundle v2\0');
+    const material = new Uint8Array(prefix.length + 128);
+    material.set(prefix); material.set(first.x, prefix.length); material.set(first.y, prefix.length + 32);
+    material.set(second.x, prefix.length + 64); material.set(second.y, prefix.length + 96);
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', material));
+    return [...digest].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+  async function publicCoordinates(jwk) {
+    if (!jwk || jwk.kty !== 'EC' || jwk.crv !== 'P-256') throw new Error('Unsupported public key type.');
+    const x = decodeBase64Url(jwk.x), y = decodeBase64Url(jwk.y);
+    if (x.length !== 32 || y.length !== 32) throw new Error('Malformed P-256 public key coordinates.');
+    return { x, y };
+  }
   async function deriveCandidateConversationKey(privateKey, localUserId, localDeviceId, peerUserId, peerDeviceId, peerPublicJwk) {
+    return deriveDevicePairKey(privateKey, localUserId, localDeviceId, peerUserId, peerDeviceId, peerPublicJwk, 'layer1');
+  }
+  async function deriveLayer2ConversationKey(privateKey, localUserId, localDeviceId, peerUserId, peerDeviceId, peerPublicJwk) {
+    return deriveDevicePairKey(privateKey, localUserId, localDeviceId, peerUserId, peerDeviceId, peerPublicJwk, 'layer2');
+  }
+  async function deriveDevicePairKey(privateKey, localUserId, localDeviceId, peerUserId, peerDeviceId, peerPublicJwk, purpose) {
     const peerPublicKey = await crypto.subtle.importKey('jwk', peerPublicJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
     const sharedSecret = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerPublicKey }, privateKey, 256);
     const material = await crypto.subtle.importKey('raw', sharedSecret, 'HKDF', false, ['deriveKey']);
     const parties = [`${localUserId}:${localDeviceId}`, `${peerUserId}:${peerDeviceId}`].sort();
-    const context = `serein-e2ee-conversation-v1|${parties.join('|')}`;
-    const salt = await crypto.subtle.digest('SHA-256', encoder.encode(`serein-e2ee-salt-v1|${parties.join('|')}`));
+    const context = purpose === 'layer2' ? `serein-e2ee-layer2-session-v1|${parties.join('|')}` : `serein-e2ee-conversation-v1|${parties.join('|')}`;
+    const salt = await crypto.subtle.digest('SHA-256', encoder.encode(`${purpose === 'layer2' ? 'serein-e2ee-layer2-salt-v1' : 'serein-e2ee-salt-v1'}|${parties.join('|')}`));
     return crypto.subtle.deriveKey(
       { name: 'HKDF', hash: 'SHA-256', salt, info: encoder.encode(context) },
       material,
@@ -134,5 +174,5 @@
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
     return [...digest].map(byte => byte.toString(16).padStart(2, '0')).join('');
   }
-  window.SereinDeviceCrypto = Object.freeze({ generateDeviceKeyPair, fingerprintP256, deriveCandidateConversationKey, encryptMessage, decryptMessage, encryptTransferManifest, decryptTransferManifest, generateTransferKey, importTransferKey, encryptTransferChunk, decryptTransferChunk, transferChunkIv, sha256Hex, encodeBase64, encodeBase64Url, decodeStandardBase64 });
+  window.SereinDeviceCrypto = Object.freeze({ generateDeviceKeyPair, fingerprintP256, fingerprintDeviceKeyBundle, deriveCandidateConversationKey, deriveLayer2ConversationKey, encryptMessage, decryptMessage, encryptTransferManifest, decryptTransferManifest, generateTransferKey, importTransferKey, encryptTransferChunk, decryptTransferChunk, transferChunkIv, sha256Hex, encodeBase64, encodeBase64Url, decodeStandardBase64 });
 })();

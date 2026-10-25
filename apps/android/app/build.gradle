@@ -4,7 +4,7 @@ android {
     namespace 'io.serein.chat'
     compileSdk 35
     def repoVersion = file('../../../VERSION').text.trim()
-    def buildNumber = System.getenv('ANDROID_VERSION_CODE') ?: '6'
+    def buildNumber = System.getenv('ANDROID_VERSION_CODE') ?: '15'
     defaultConfig {
         applicationId 'io.serein.chat'
         minSdk 26

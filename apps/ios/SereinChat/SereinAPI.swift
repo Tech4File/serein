@@ -41,7 +41,7 @@ struct SereinBlock: Decodable, Identifiable {
 }
 private struct SereinAccountReply: Decodable { let user: SereinUser; let device: SereinDevice }
 private struct SereinAuthReply: Decodable { let account: SereinAccountReply }
-private struct SereinVerificationMeta: Decodable { let required: Bool?; let verified: Bool?; let email: String? }
+private struct SereinVerificationMeta: Decodable { let required: Bool?; let verified: Bool?; let email: String?; let purpose: String? }
 private struct SereinErrorReply: Decodable { let error: String; let verification: SereinVerificationMeta?; let retry_after_seconds: Int? }
 private struct SereinMessageReply: Decodable { let message: String; let retry_after_seconds: Int? }
 
@@ -55,6 +55,9 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     @Published var verificationRequired = false
     @Published var verificationIdentity = ""
     @Published var verificationEmail = ""
+    @Published var verificationPurpose = "email"
+    private var pendingLoginIdentity = ""
+    private var pendingLoginPassword = ""
     @Published var user: SereinUser?
     @Published var currentDevice: SereinDevice?
     @Published var contacts: [SereinContact] = []
@@ -108,7 +111,7 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     }
     func setServerOrigin(_ value: String) throws {
         let normalized = try normalizedServerOrigin(value)
-        if apiBase != normalized { verificationRequired = false; verificationIdentity = ""; verificationEmail = "" }
+        if apiBase != normalized { cancelVerification() }
         apiBase = normalized
     }
     func testServerConnection(_ value: String) async -> Bool {
@@ -142,10 +145,11 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         }
     }
     func signIn(identity: String, password: String) async {
-        await authenticate(path: "/api/v1/auth/login", values: [
-            "identity": identity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-            "password": password, "device_name": "Serein iOS", "device_id": deviceID
-        ])
+        let normalizedIdentity = identity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        pendingLoginIdentity = normalizedIdentity
+        pendingLoginPassword = password
+        verificationPurpose = "login"
+        await authenticate(path: "/api/v1/auth/login", values: ["identity": normalizedIdentity, "password": password])
     }
     func register(username: String, email: String, displayName: String, password: String) async {
         busy = true; errorMessage = nil; statusMessage = nil
@@ -158,13 +162,15 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
                 "display_name": displayName.trimmingCharacters(in: .whitespacesAndNewlines),
                 "password": password
             ])
-            verificationRequired = true; verificationIdentity = cleanEmail; verificationEmail = cleanEmail
+            verificationRequired = true; verificationIdentity = cleanEmail; verificationEmail = cleanEmail; verificationPurpose = "email"
+            pendingLoginIdentity = ""; pendingLoginPassword = ""
             statusMessage = "Check your email for a six-digit verification code."
         } catch {
             let ns = error as NSError
             if ns.userInfo["verificationRequired"] as? Bool == true,
                let address = ns.userInfo["verificationEmail"] as? String {
-                verificationRequired = true; verificationEmail = address; verificationIdentity = address
+                verificationRequired = true; verificationEmail = address; verificationIdentity = address; verificationPurpose = "email"
+                pendingLoginIdentity = ""; pendingLoginPassword = ""
             }
             errorMessage = error.localizedDescription
         }
@@ -173,13 +179,22 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         busy = true; errorMessage = nil; statusMessage = nil
         defer { busy = false }
         do {
-            let data = try await request("/api/v1/auth/verify-email", method: "POST", values: ["email": email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), "code": code, "device_name": "Serein iOS", "device_id": deviceID])
+            let loginOtp = verificationPurpose == "login"
+            let path = loginOtp ? "/api/v1/auth/verify-login" : "/api/v1/auth/verify-email"
+            let values: [String: Any] = loginOtp
+                ? ["identity": pendingLoginIdentity, "password": pendingLoginPassword, "code": code, "device_name": "Serein iOS", "device_id": deviceID]
+                : ["email": email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), "code": code, "device_name": "Serein iOS", "device_id": deviceID]
+            let data = try await request(path, method: "POST", values: values)
             let reply = try JSONDecoder().decode(SereinAuthReply.self, from: data)
             user = reply.account.user; currentDevice = reply.account.device
             defaults.set(reply.account.device.id, forKey: "serein.device-id")
-            verificationRequired = false; verificationIdentity = ""; verificationEmail = ""
+            cancelVerification()
             await refreshAccountData()
         } catch { errorMessage = error.localizedDescription }
+    }
+    func cancelVerification() {
+        verificationRequired = false; verificationIdentity = ""; verificationEmail = ""; verificationPurpose = "email"
+        pendingLoginIdentity = ""; pendingLoginPassword = ""
     }
     func resendVerification(identity: String) async -> Int? {
         busy = true; errorMessage = nil; statusMessage = nil
@@ -203,12 +218,15 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
             let reply = try JSONDecoder().decode(SereinAuthReply.self, from: data)
             user = reply.account.user; currentDevice = reply.account.device
             defaults.set(reply.account.device.id, forKey: "serein.device-id")
+            if path == "/api/v1/auth/login" { pendingLoginIdentity = ""; pendingLoginPassword = "" }
             await refreshAccountData()
         } catch {
             let ns = error as NSError
             if path == "/api/v1/auth/login", ns.userInfo["verificationRequired"] as? Bool == true {
                 let address = (ns.userInfo["verificationEmail"] as? String ?? "").lowercased()
-                verificationRequired = true; verificationIdentity = address; verificationEmail = address
+                verificationRequired = true; verificationEmail = address
+                verificationPurpose = (ns.userInfo["verificationPurpose"] as? String) == "login" ? "login" : "email"
+                verificationIdentity = verificationPurpose == "login" ? pendingLoginIdentity : address
                 errorMessage = error.localizedDescription
             } else { errorMessage = error.localizedDescription }
         }
@@ -247,8 +265,8 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         } catch { errorMessage = error.localizedDescription }
     }
     func contactsData() async throws -> Data { try await request("/api/v1/contacts") }
-    func registerDeviceKey(_ publicJWK: [String: String]) async throws -> [String: Any] {
-        let data = try await request("/api/v1/device-key", method: "PUT", values: ["algorithm": "ECDH-P256", "public_key": publicJWK])
+    func registerDeviceKey(_ publicJWK: [String: String], layer2PublicJWK: [String: String]) async throws -> [String: Any] {
+        let data = try await request("/api/v1/device-key", method: "PUT", values: ["algorithm": "ECDH-P256", "public_key": publicJWK, "layer2_public_key": layer2PublicJWK])
         return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
     }
     func contactDeviceKeys(_ contactID: String) async throws -> [String: Any] {
@@ -263,8 +281,8 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         return try await request(components.string ?? "/api/v1/messages?limit=100")
     }
     func acknowledgeMessage(_ id: String) async throws { _ = try await request("/api/v1/messages/\(id)/ack", method: "POST", values: [:]) }
-    func sendEncryptedEnvelope(id: String, to deviceID: String, iv: String, ciphertext: String) async throws {
-        _ = try await request("/api/v1/messages", method: "POST", values: ["id": id, "to": deviceID, "iv": iv, "ciphertext": ciphertext])
+    func sendEncryptedEnvelope(id: String, to deviceID: String, iv: String, ciphertext: String, cryptoVersion: Int) async throws {
+        _ = try await request("/api/v1/messages", method: "POST", values: ["id": id, "to": deviceID, "crypto_version": cryptoVersion, "iv": iv, "ciphertext": ciphertext])
     }
     func transfersData() async throws -> Data { try await request("/api/v1/transfers") }
     func createTransfer(_ values: [String: Any]) async throws { _ = try await request("/api/v1/transfers", method: "POST", values: values) }
@@ -349,6 +367,7 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
             cookies.filter { $0.name == "serein_session" }.forEach { HTTPCookieStorage.shared.deleteCookie($0) }
         }
         user = nil; currentDevice = nil; contacts = []; contactRequests = []; blocks = []; devices = []
+        cancelVerification()
         return serverRevoked
     }
     private func request(_ path: String, method: String = "GET", values: [String: Any]? = nil) async throws -> Data {
@@ -369,6 +388,7 @@ private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
             if reply?.verification?.required == true {
                 info["verificationRequired"] = true
                 info["verificationEmail"] = reply?.verification?.email ?? ""
+                info["verificationPurpose"] = reply?.verification?.purpose ?? "email"
             }
             if let retry = reply?.retry_after_seconds { info["retryAfterSeconds"] = retry }
             throw NSError(domain: "SereinAPI", code: http.statusCode, userInfo: info)

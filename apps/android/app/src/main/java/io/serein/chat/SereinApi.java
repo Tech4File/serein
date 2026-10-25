@@ -67,12 +67,15 @@ final class SereinApi {
         request("POST", "/api/v1/auth/register", body, cb);
     }
     void login(String identity, String password, Callback cb) {
-        request("POST", "/api/v1/auth/login", json("identity", identity, "password", password,
-                "device_name", "Serein Android", "device_id", stableDeviceId()), cb);
+        request("POST", "/api/v1/auth/login", json("identity", identity, "password", password), cb);
     }
     void verifyEmail(String email, String code, Callback cb) {
         request("POST", "/api/v1/auth/verify-email", json("email", email, "code", code,
                 "device_name", "Serein Android", "device_id", stableDeviceId()), cb);
+    }
+    void verifyLogin(String identity, String password, String code, Callback cb) {
+        request("POST", "/api/v1/auth/verify-login", json("identity", identity, "password", password,
+                "code", code, "device_name", "Serein Android", "device_id", stableDeviceId()), cb);
     }
     void resendVerification(String identity, Callback cb) {
         request("POST", "/api/v1/auth/resend-verification", json("identity", identity), cb);
@@ -103,9 +106,9 @@ final class SereinApi {
     CompletableFuture<JSONObject> deviceKeyDirectory(String contactId) {
         return future("GET", "/api/v1/contacts/" + contactId + "/device-keys", null).thenApply(value -> (JSONObject) value);
     }
-    CompletableFuture<JSONObject> enrollDeviceKey(JSONObject publicKey) {
+    CompletableFuture<JSONObject> enrollDeviceKey(JSONObject publicKey, JSONObject layer2PublicKey) {
         JSONObject body = json("algorithm", "ECDH-P256");
-        try { body.put("public_key", publicKey); } catch (Exception ignored) { }
+        try { body.put("public_key", publicKey); body.put("layer2_public_key", layer2PublicKey); } catch (Exception ignored) { }
         return future("PUT", "/api/v1/device-key", body).thenApply(value -> (JSONObject) value);
     }
     CompletableFuture<Object> historyPage(String afterCreatedAt, String afterId) {
@@ -113,8 +116,10 @@ final class SereinApi {
         if(afterCreatedAt!=null&&afterId!=null)try{path+="&after_created_at="+java.net.URLEncoder.encode(afterCreatedAt,"UTF-8")+"&after_id="+java.net.URLEncoder.encode(afterId,"UTF-8");}catch(Exception ignored){}
         return future("GET", path, null);
     }
-    CompletableFuture<Object> sendEnvelopeFuture(String id, String deviceId, String iv, String ciphertext) {
-        return future("POST", "/api/v1/messages", json("id", id, "to", deviceId, "iv", iv, "ciphertext", ciphertext));
+    CompletableFuture<Object> sendEnvelopeFuture(String id, String deviceId, String iv, String ciphertext, int cryptoVersion) {
+        JSONObject body = json("id", id, "to", deviceId, "iv", iv, "ciphertext", ciphertext);
+        try { body.put("crypto_version", cryptoVersion); } catch (Exception ignored) { }
+        return future("POST", "/api/v1/messages", body);
     }
     CompletableFuture<Object> acknowledgeFuture(String id) { return future("POST", "/api/v1/messages/" + id + "/ack", new JSONObject()); }
     CompletableFuture<Object> transfers() { return future("GET", "/api/v1/transfers", null); }
