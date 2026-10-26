@@ -6,12 +6,11 @@ const root = path.resolve(__dirname, '../../..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
 
 test('approved media direction remains first-party Rust QUIC/MOQT plus PQC, with WebRTC prohibited', () => {
-  const plan = read('docs/MEDIA_STACK_EVALUATION.md');
-  assert.match(plan, /first-party, Rust-centric transport/);
-  assert.match(plan, /no-new-third-party-runtime-dependency/);
-  assert.match(plan, /WebRTC/);
-  assert.match(plan, /ML-KEM/);
-  assert.match(plan, /not implemented/);
+  const readme = read('README.md');
+  assert.match(readme, /zero-third-party-dependency Rust QUIC\/MOQT/);
+  assert.match(readme, /WebRTC is prohibited/);
+  assert.match(readme, /PQC/);
+  assert.match(readme, /not implemented/);
 });
 
 test('no WebRTC or RTC-adjacent implementation/dependency is introduced into application code', () => {

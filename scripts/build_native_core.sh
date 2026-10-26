@@ -73,18 +73,28 @@ PY
     build_target aarch64-apple-ios "$IOS_OUT/iphoneos-arm64"
     build_target aarch64-apple-ios-sim "$IOS_OUT/iphonesimulator-arm64"
     build_target x86_64-apple-ios "$IOS_OUT/iphonesimulator-x86_64"
-    for header_dir in "$IOS_OUT/iphoneos-arm64" "$IOS_OUT/iphonesimulator-arm64" "$IOS_OUT/iphonesimulator-x86_64"; do
-      cat > "$header_dir/module.modulemap" <<'MODULEMAP'
+    IOS_SIM_UNIVERSAL="$IOS_OUT/iphonesimulator-universal"
+    mkdir -p "$IOS_SIM_UNIVERSAL"
+    lipo -create \
+      "$IOS_OUT/iphonesimulator-arm64/libserein_core.a" \
+      "$IOS_OUT/iphonesimulator-x86_64/libserein_core.a" \
+      -output "$IOS_SIM_UNIVERSAL/libserein_core.a"
+    install -m 0644 "$IOS_OUT/iphonesimulator-arm64/serein_core.h" "$IOS_SIM_UNIVERSAL/serein_core.h"
+    cat > "$IOS_OUT/iphoneos-arm64/module.modulemap" <<'MODULEMAP'
 module SereinCore {
   header "serein_core.h"
   export *
 }
 MODULEMAP
-    done
+    cat > "$IOS_SIM_UNIVERSAL/module.modulemap" <<'MODULEMAP'
+module SereinCore {
+  header "serein_core.h"
+  export *
+}
+MODULEMAP
     xcodebuild -create-xcframework \
       -library "$IOS_OUT/iphoneos-arm64/libserein_core.a" -headers "$IOS_OUT/iphoneos-arm64" \
-      -library "$IOS_OUT/iphonesimulator-arm64/libserein_core.a" -headers "$IOS_OUT/iphonesimulator-arm64" \
-      -library "$IOS_OUT/iphonesimulator-x86_64/libserein_core.a" -headers "$IOS_OUT/iphonesimulator-x86_64" \
+      -library "$IOS_SIM_UNIVERSAL/libserein_core.a" -headers "$IOS_SIM_UNIVERSAL" \
       -output "$IOS_OUT/SereinCore.xcframework"
     printf 'iOS Rust XCFramework written to %s\n' "$IOS_OUT/SereinCore.xcframework"
     ;;

@@ -25,6 +25,7 @@ test('Android conversation has theme-aware split message bubbles and a local wal
   assert.match(ui, /chatIncoming\(Context c\)/);
   assert.match(ui, /chatOutgoing\(Context c\)/);
   assert.match(conversation, /line\.setGravity\(mine\?Gravity\.END:Gravity\.START\)/);
+  assert.match(conversation, /body\.setMaxWidth\(contentMaxWidth\)/);
   assert.match(conversation, /new SereinChatWallpaper\(this\)/);
   assert.match(read('apps/android/app/src/main/java/io/serein/chat/SereinChatWallpaper.java'), /class SereinChatWallpaper extends Drawable/);
 });

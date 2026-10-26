@@ -48,8 +48,18 @@ test('native core helper builds static archives without adding dependencies or p
   const script = read('scripts/build_native_core.sh');
   assert.match(manifest, /crate-type\s*=\s*\["rlib",\s*"cdylib",\s*"staticlib"\]/);
   assert.match(script, /target\/native-core/);
+  assert.match(script, /lipo -create/);
+  assert.match(script, /IOS_SIM_UNIVERSAL="\$IOS_OUT\/iphonesimulator-universal"/);
+  assert.match(script, /\$IOS_SIM_UNIVERSAL\/libserein_core\.a/);
+  assert.doesNotMatch(script, /-library "\$IOS_OUT\/iphonesimulator-arm64/);
+  assert.doesNotMatch(script, /-library "\$IOS_OUT\/iphonesimulator-x86_64/);
   for (const target of ['aarch64-linux-android', 'armv7-linux-androideabi', 'i686-linux-android', 'x86_64-linux-android', 'aarch64-apple-ios', 'aarch64-apple-ios-sim', 'x86_64-apple-ios']) {
     assert.ok(script.includes(target), `native build script must cover ${target}`);
   }
-  assert.match(read('BUILDING.md'), /Android JNI and iOS Swift call the shared Rust C ABI ratchet from live message send\/receive paths/);
+  const androidEngine = read('apps/android/app/src/main/java/io/serein/chat/SereinChatEngine.java');
+  const iosEngine = read('apps/ios/SereinChat/SereinChatEngine.swift');
+  assert.match(androidEngine, /SereinRatchetSession\.open/);
+  assert.match(androidEngine, /snapshots\.values\(\)/);
+  assert.match(iosEngine, /SereinCoreBridge\.Ratchet/);
+  assert.match(iosEngine, /SereinLayeredRatchet/);
 });

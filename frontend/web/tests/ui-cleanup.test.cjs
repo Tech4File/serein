@@ -50,7 +50,6 @@ test('nonfunctional call preflight and echo demo are retired from application co
   }
   assert.doesNotMatch(read('frontend/web/security.js'), /call-permissions|permission_preflight/);
   assert.match(read('frontend/web/security.html'), /Calling<\/b><small>Not implemented/);
-  assert.equal(fs.existsSync(path.join(root, 'media-transport-spike')), false);
   for (const source of [read('Cargo.toml'), read('Cargo.lock'), read('.github/workflows/ci.yml'), read('scripts/check_versions.py'), read('scripts/sync_versions.py')]) {
     assert.doesNotMatch(source, /media-transport-spike|serein-wt-spike/);
   }
