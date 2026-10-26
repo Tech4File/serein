@@ -31,6 +31,19 @@ final class SereinUi {
     static int text(Context c) { return isDark(c) ? SereinTokens.TEXT_DARK : SereinTokens.TEXT_LIGHT; }
     static int muted(Context c) { return isDark(c) ? DARK_MUTED : MUTED; }
     static int accent(Context c) { return isDark(c) ? DARK_GREEN : GREEN; }
+    static int chatBackground(Context c) { return isDark(c) ? 0xFF0B141A : 0xFFECEAE2; }
+    static int chatIncoming(Context c) { return isDark(c) ? 0xFF202C33 : 0xFFFFFFFF; }
+    static int chatOutgoing(Context c) { return isDark(c) ? 0xFF075E54 : 0xFFD9F5DF; }
+    static int chatBubbleText(Context c, boolean own) { return own && isDark(c) ? 0xFFF2F7F4 : text(c); }
+    static GradientDrawable chatBubble(Context c, boolean own) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(own ? chatOutgoing(c) : chatIncoming(c));
+        float large = dp(c, 16), small = dp(c, 5);
+        d.setCornerRadii(own
+            ? new float[]{large,large,large,large,small,small,large,large}
+            : new float[]{large,large,large,large,large,large,small,small});
+        return d;
+    }
     static int dp(Context c, float v) { return (int)(v * c.getResources().getDisplayMetrics().density + 0.5f); }
     static float fontSize(Context c, float size) { String scale=c.getSharedPreferences("serein",0).getString("font_scale","system"); float factor=SereinTokens.FONT_SCALE_LARGE; if("extra_large".equals(scale))factor=SereinTokens.FONT_SCALE_EXTRA_LARGE;else if(!"large".equals(scale))factor=1f; return Math.max(SereinTokens.MIN_FONT_SIZE_SP,size*factor); }
     static GradientDrawable shape(Context c, int color, int radius) {

@@ -1,19 +1,5 @@
 name: Rust dependency security audit
 on:
-  push:
-    paths:
-      - Cargo.toml
-      - Cargo.lock
-      - backend/Cargo.toml
-      - .github/workflows/security-audit.yml
-  pull_request:
-    paths:
-      - Cargo.toml
-      - Cargo.lock
-      - backend/Cargo.toml
-      - .github/workflows/security-audit.yml
-  schedule:
-    - cron: '23 6 * * 1'
   workflow_dispatch:
 permissions:
   contents: read

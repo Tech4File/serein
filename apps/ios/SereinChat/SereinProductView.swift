@@ -262,6 +262,38 @@ private struct SereinConversationSystemEvent: View {
     }
 }
 
+private struct SereinConversationWallpaper: View {
+    @Environment(\.colorScheme) private var colorScheme
+    var body: some View {
+        Canvas { context, size in
+            let dark = colorScheme == .dark
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(dark ? Color(red: 0.043, green: 0.078, blue: 0.102) : Color(red: 0.925, green: 0.918, blue: 0.886)))
+            let ink = dark ? Color(red: 0.12, green: 0.19, blue: 0.22).opacity(0.75) : Color(red: 0.69, green: 0.70, blue: 0.66).opacity(0.42)
+            var y: CGFloat = 24
+            var row = 0
+            while y < size.height + 70 {
+                var x: CGFloat = row.isMultiple(of: 2) ? 22 : 58
+                while x < size.width + 60 {
+                    let rect = CGRect(x: x, y: y, width: 30, height: 20)
+                    var bubble = Path(roundedRect: rect, cornerSize: CGSize(width: 6, height: 6))
+                    bubble.move(to: CGPoint(x: x + 8, y: y + 20)); bubble.addLine(to: CGPoint(x: x + 4, y: y + 25)); bubble.addLine(to: CGPoint(x: x + 14, y: y + 20))
+                    context.stroke(bubble, with: .color(ink), lineWidth: 1.2)
+                    let dotY = y + 10
+                    for offset in [CGFloat(10), CGFloat(15), CGFloat(20)] {
+                        var dot = Path(); dot.addEllipse(in: CGRect(x: x + offset - 1, y: dotY - 1, width: 2, height: 2))
+                        context.fill(dot, with: .color(ink))
+                    }
+                    var circle = Path(); circle.addEllipse(in: CGRect(x: x + 42, y: y + 2, width: 18, height: 18))
+                    context.stroke(circle, with: .color(ink), lineWidth: 1.1)
+                    x += 104
+                }
+                y += 78; row += 1
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
 private struct SereinNativeConversation: View {
     let contact: SereinContact
     @StateObject private var engine: SereinChatEngine
@@ -271,6 +303,10 @@ private struct SereinNativeConversation: View {
     @State private var showEmojiPicker = false
     @State private var pendingTrust: SereinPeerKey?
     @State private var fileToOpen: OpenAttachment?
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var outgoingBubble: Color { colorScheme == .dark ? Color(red: 0.02, green: 0.36, blue: 0.32) : Color(red: 0.84, green: 0.96, blue: 0.87) }
+    private var incomingBubble: Color { colorScheme == .dark ? Color(uiColor: .secondarySystemBackground) : Color.white }
 
     init(api: SereinAPI, contact: SereinContact) {
         self.contact = contact
@@ -285,36 +321,46 @@ private struct SereinNativeConversation: View {
                 if !contact.isDeleted && !engine.archived { Button { showKeys = true } label: { Label("Keys", systemImage: "key.horizontal").font(.system(size: 11, weight: .semibold, relativeTo: .body)) } }
             }
             Text(engine.status).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+            Label("Messages are encrypted for verified devices", systemImage: "lock.fill")
+                .font(.system(size: 10, weight: .medium, relativeTo: .body)).foregroundStyle(colorScheme == .dark ? Color.yellow.opacity(0.9) : Color(red: 0.42, green: 0.34, blue: 0.16))
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 11).padding(.vertical, 8)
+                .background(colorScheme == .dark ? Color(red: 0.22, green: 0.20, blue: 0.14) : Color(red: 1.0, green: 0.97, blue: 0.89), in: RoundedRectangle(cornerRadius: 11))
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         if let connected = contact.connected_at { SereinConversationSystemEvent(text: "You and \(engine.peerDisplayName.replacingOccurrences(of: " (Deleted User)", with: "")) are now friends.", timestamp: connected) }
                         ForEach(engine.messages) { message in
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(message.text).font(.system(size: 14, relativeTo: .body)).textSelection(.enabled)
-                                if let attachment = message.attachment {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: attachment.contentType.hasPrefix("audio/") ? "waveform" : attachment.contentType.hasPrefix("video/") ? "film" : "doc")
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(attachment.filename).font(.system(size: 12, weight: .semibold, relativeTo: .body)).lineLimit(2)
-                                            Text("\(attachment.contentType) · \(formatBytes(attachment.size))").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
-                                        }
-                                        Spacer(minLength: 4)
-                                        Button(engine.localFile(for: attachment) == nil ? "Download" : "Open") {
-                                            if let local = engine.localFile(for: attachment) { fileToOpen = OpenAttachment(url: local, mimeType: attachment.contentType) }
-                                            else { Task { if let saved = await engine.download(attachment) { fileToOpen = OpenAttachment(url: saved, mimeType: attachment.contentType) } } }
-                                        }.buttonStyle(.bordered).font(.system(size: 10, weight: .semibold, relativeTo: .body))
-                                    }.padding(9).background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                            HStack(alignment: .bottom, spacing: 7) {
+                                if message.mine { Spacer(minLength: 34) }
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(message.text).font(.system(size: 15, relativeTo: .body)).textSelection(.enabled)
+                                    if let attachment = message.attachment {
+                                        HStack(spacing: 8) {
+                                            Image(systemName: attachment.contentType.hasPrefix("audio/") ? "waveform" : attachment.contentType.hasPrefix("video/") ? "film" : "doc")
+                                            VStack(alignment: .leading, spacing: 3) {
+                                                Text(attachment.filename).font(.system(size: 12, weight: .semibold, relativeTo: .body)).lineLimit(2)
+                                                Text("\(attachment.contentType) · \(formatBytes(attachment.size))").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                                            }
+                                            Spacer(minLength: 4)
+                                            Button(engine.localFile(for: attachment) == nil ? "Download" : "Open") {
+                                                if let local = engine.localFile(for: attachment) { fileToOpen = OpenAttachment(url: local, mimeType: attachment.contentType) }
+                                                else { Task { if let saved = await engine.download(attachment) { fileToOpen = OpenAttachment(url: saved, mimeType: attachment.contentType) } } }
+                                            }.buttonStyle(.bordered).font(.system(size: 10, weight: .semibold, relativeTo: .body))
+                                        }.padding(9).background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.035), in: RoundedRectangle(cornerRadius: 10))
+                                    }
+                                    Text("\(message.mine ? "You" : message.sender) · \(message.status)").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity, alignment: .trailing)
                                 }
-                                Text("\(message.mine ? "You" : message.sender) · \(message.status)").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.tertiary)
-                            }.padding(11).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(message.mine ? SereinPalette.paleMint.opacity(0.7) : Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 13))
-                                .id(message.id)
+                                .padding(.horizontal, 12).padding(.vertical, 9)
+                                .frame(maxWidth: UIScreen.main.bounds.width * 0.82, alignment: .leading)
+                                .background(message.mine ? outgoingBubble : incomingBubble, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                                if !message.mine { Spacer(minLength: 34) }
+                            }.id(message.id)
                         }
                         if (contact.isDeleted || engine.archived), let deleted = engine.deletedAt ?? contact.deleted_at { SereinConversationSystemEvent(text: "\(engine.peerDisplayName.replacingOccurrences(of: " (Deleted User)", with: "")) deleted his account. No new messages are allowed.", timestamp: deleted) }
                     }.padding(.vertical, 8)
                 }.onChange(of: engine.messages.count) { _ in if let last = engine.messages.last { proxy.scrollTo(last.id, anchor: .bottom) } }
-            }
+            }.background(SereinConversationWallpaper())
             if showEmojiPicker {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack { Text("Emojis").font(.system(size: 12, weight: .semibold, relativeTo: .body)); Spacer(); Button("Choose GIF or image") { showFilePicker = true }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
