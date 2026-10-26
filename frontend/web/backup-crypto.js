@@ -92,8 +92,9 @@
   async function transform(bytes, mode) {
     const Stream = mode === 'compress' ? globalThis.CompressionStream : globalThis.DecompressionStream;
     if (typeof Stream !== 'function') {
-      if (mode === 'compress') return { bytes, compression: 'none' };
-      throw new Error('This browser cannot decompress this backup format.');
+      throw new Error(mode === 'compress'
+        ? 'This browser cannot create a compressed backup. Update the browser and try again.'
+        : 'This browser cannot decompress this backup format.');
     }
     const format = new Stream('deflate');
     const stream = new Blob([bytes]).stream().pipeThrough(format);

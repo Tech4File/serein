@@ -35,18 +35,21 @@ enum SereinBackupStore {
             "owner": ["accountId": id, "username": username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()],
             "created_at": createdAt, "snapshot_id": snapshotID, "data": snapshot,
         ]
-        let clear = try JSONSerialization.data(withJSONObject: payload, options: [.fragmentsAllowed])
+        var clear = try JSONSerialization.data(withJSONObject: payload, options: [.fragmentsAllowed])
+        defer { clear.resetBytes(in: 0..<clear.count) }
         guard clear.count <= maximumBytes else { throw BackupError.tooLarge }
+        var compressed = try compress(clear)
+        defer { compressed.resetBytes(in: 0..<compressed.count) }
         let nonceData = try SereinDeviceCrypto.randomData(count: 12)
         let nonce = try AES.GCM.Nonce(data: nonceData)
         let nonceText = base64URL(nonceData)
         let header: [String: Any] = [
             "format": format, "version": 2, "kdf": v2KDF, "key_derivation_version": 1,
-            "snapshot_id": snapshotID, "created_at": createdAt, "compression": "none", "payload_iv": nonceText,
+            "snapshot_id": snapshotID, "created_at": createdAt, "compression": "deflate", "payload_iv": nonceText,
         ]
         let aad = try v2AAD(accountID: id, header: header)
         let key = accountKey(id)
-        let sealed = try AES.GCM.seal(clear, using: key, nonce: nonce, authenticating: aad)
+        let sealed = try AES.GCM.seal(compressed, using: key, nonce: nonce, authenticating: aad)
         var ciphertext = sealed.ciphertext
         ciphertext.append(sealed.tag)
         let bytes = try pack(header: header, ciphertext: ciphertext)
@@ -75,9 +78,13 @@ enum SereinBackupStore {
         let (encrypted, tag) = try splitCiphertext(parsed.ciphertext)
         let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: nonceData), ciphertext: encrypted, tag: tag)
         var clear = try AES.GCM.open(box, using: accountKey(id), authenticating: aad)
+        defer { if !clear.isEmpty { clear.resetBytes(in: 0..<clear.count) } }
         if clear.count > maximumBytes { throw BackupError.tooLarge }
-        if compression == "deflate" { clear = try decompress(clear) }
-        else if compression != "none" { throw BackupError.malformed }
+        if compression == "deflate" {
+            let decompressed = try decompress(clear)
+            if !clear.isEmpty { clear.resetBytes(in: 0..<clear.count) }
+            clear = decompressed
+        } else if compression != "none" { throw BackupError.malformed }
         return try validatePayload(clear, accountID: id, header: parsed.header)
     }
 
@@ -99,9 +106,13 @@ enum SereinBackupStore {
         let (encrypted, tag) = try splitCiphertext(parsed.ciphertext)
         let payloadBox = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: payloadNonceData), ciphertext: encrypted, tag: tag)
         var clear = try AES.GCM.open(payloadBox, using: SymmetricKey(data: dataKeyData), authenticating: payloadAAD)
+        defer { if !clear.isEmpty { clear.resetBytes(in: 0..<clear.count) } }
         if clear.count > maximumBytes { throw BackupError.tooLarge }
-        if h["compression"] as? String == "deflate" { clear = try decompress(clear) }
-        else if h["compression"] as? String != "none" { throw BackupError.malformed }
+        if h["compression"] as? String == "deflate" {
+            let decompressed = try decompress(clear)
+            if !clear.isEmpty { clear.resetBytes(in: 0..<clear.count) }
+            clear = decompressed
+        } else if h["compression"] as? String != "none" { throw BackupError.malformed }
         return try validatePayload(clear, accountID: id, header: h, legacyUsername: username)
     }
 
@@ -170,7 +181,8 @@ enum SereinBackupStore {
 
     private static func pack(header: [String: Any], ciphertext: Data) throws -> Data {
         let encoded = try JSONSerialization.data(withJSONObject: header, options: [.fragmentsAllowed])
-        guard encoded.count <= maximumHeaderBytes, ciphertext.count <= maximumBytes else { throw BackupError.tooLarge }
+        let totalCount = magic.count + 4 + encoded.count + ciphertext.count
+        guard encoded.count <= maximumHeaderBytes, ciphertext.count >= 16, totalCount <= maximumBytes else { throw BackupError.tooLarge }
         var output = magic
         var length = UInt32(encoded.count).bigEndian
         withUnsafeBytes(of: &length) { output.append(contentsOf: $0) }
@@ -212,10 +224,29 @@ enum SereinBackupStore {
         return (combined.prefix(combined.count - 16), combined.suffix(16))
     }
 
+    private static func compress(_ input: Data) throws -> Data {
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: maximumBytes)
+        buffer.initialize(repeating: 0, count: maximumBytes)
+        defer {
+            buffer.update(repeating: 0, count: maximumBytes)
+            buffer.deallocate()
+        }
+        let count = input.withUnsafeBytes { raw -> Int in
+            guard let source = raw.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+            return compression_encode_buffer(buffer, maximumBytes, source, input.count, nil, COMPRESSION_ZLIB)
+        }
+        guard count > 0, count <= maximumBytes else { throw BackupError.tooLarge }
+        return Data(bytes: buffer, count: count)
+    }
+
     private static func decompress(_ input: Data) throws -> Data {
         guard !input.isEmpty else { return Data() }
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: maximumBytes)
-        defer { buffer.deallocate() }
+        buffer.initialize(repeating: 0, count: maximumBytes)
+        defer {
+            buffer.update(repeating: 0, count: maximumBytes)
+            buffer.deallocate()
+        }
         let count = input.withUnsafeBytes { raw -> Int in
             guard let source = raw.bindMemory(to: UInt8.self).baseAddress else { return 0 }
             return compression_decode_buffer(buffer, maximumBytes, source, input.count, nil, COMPRESSION_ZLIB)

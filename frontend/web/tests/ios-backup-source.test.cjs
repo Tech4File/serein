@@ -17,6 +17,8 @@ test('iOS portable codec uses stable account-ID v2 HKDF and restore-only legacy 
   assert.match(codec, /PBKDF2|pbkdf2/);
   assert.match(codec, /legacyIterations = 600_000/);
   assert.match(codec, /compression_decode_buffer/);
+  assert.match(codec, /compression_encode_buffer/);
+  assert.match(codec, /"compression": "deflate"/);
   assert.match(codec, /maximumBytes = 64 \* 1024 \* 1024/);
   assert.match(codec, /static func create\(accountID:/);
   assert.match(codec, /static func open\(accountID:/);

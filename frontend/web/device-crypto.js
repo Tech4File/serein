@@ -101,6 +101,19 @@
   async function deriveLayer2ConversationKey(privateKey, localUserId, localDeviceId, peerUserId, peerDeviceId, peerPublicJwk) {
     return deriveDevicePairKey(privateKey, localUserId, localDeviceId, peerUserId, peerDeviceId, peerPublicJwk, 'layer2');
   }
+  async function deriveRatchetBootstrapSecret(privateKey, localUserId, localDeviceId, peerUserId, peerDeviceId, peerPublicJwk, purpose) {
+    if (!['layer1', 'layer2'].includes(purpose)) throw new Error('Unknown ratchet bootstrap purpose.');
+    const peerPublicKey = await crypto.subtle.importKey('jwk', peerPublicJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+    const raw = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: peerPublicKey }, privateKey, 256));
+    const parties = [`${localUserId}:${localDeviceId}`, `${peerUserId}:${peerDeviceId}`].sort();
+    const context = `Serein/${purpose}/symmetric-ratchet-bootstrap/v1|${parties.join('|')}`;
+    const salt = new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(`Serein/${purpose}/symmetric-ratchet-salt/v1|${parties.join('|')}`)));
+    let material;
+    try {
+      material = await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveBits']);
+      return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info: encoder.encode(context) }, material, 256));
+    } finally { raw.fill(0); salt.fill(0); }
+  }
   async function deriveDevicePairKey(privateKey, localUserId, localDeviceId, peerUserId, peerDeviceId, peerPublicJwk, purpose) {
     const peerPublicKey = await crypto.subtle.importKey('jwk', peerPublicJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
     const sharedSecret = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerPublicKey }, privateKey, 256);
@@ -127,16 +140,38 @@
     if (cleartext.length > 8_000) throw new Error('Transfer manifest exceeds its size limit.');
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const aad = encoder.encode(JSON.stringify(['serein-transfer-manifest-v1', ...transferMetadata(metadata)]));
-    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, key, cleartext);
-    return { version: 1, algorithm: 'AES-256-GCM', iv: encodeBase64(iv), ciphertext: encodeBase64(new Uint8Array(ciphertext)) };
+    try {
+      const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, key, cleartext);
+      return { version: 1, algorithm: 'AES-256-GCM', iv: encodeBase64(iv), ciphertext: encodeBase64(new Uint8Array(ciphertext)) };
+    } finally { cleartext.fill(0); }
   }
   async function decryptTransferManifest(key, envelope, metadata) {
     if (envelope?.version !== 1 || envelope?.algorithm !== 'AES-256-GCM') throw new Error('Unsupported encrypted-transfer manifest.');
     const iv = decodeStandardBase64(envelope.iv), ciphertext = decodeStandardBase64(envelope.ciphertext);
     if (iv.length !== 12 || ciphertext.length < 16 || ciphertext.length > 8_016) throw new Error('Malformed encrypted-transfer manifest.');
     const aad = encoder.encode(JSON.stringify(['serein-transfer-manifest-v1', ...transferMetadata(metadata)]));
-    const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, key, ciphertext);
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext));
+    const plaintext = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, key, ciphertext));
+    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext)); }
+    finally { plaintext.fill(0); }
+  }
+  async function encryptTransferManifestLayer2(key, innerEnvelope, metadata) {
+    const cleartext = encoder.encode(JSON.stringify(innerEnvelope));
+    if (cleartext.length > 12_000) throw new Error('Nested transfer manifest exceeds its size limit.');
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const aad = encoder.encode(JSON.stringify(['serein-transfer-manifest-layer2-v1', ...transferMetadata(metadata)]));
+    try {
+      const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, key, cleartext);
+      return { version: 2, algorithm: 'AES-256-GCM-LAYER2', iv: encodeBase64(iv), ciphertext: encodeBase64(new Uint8Array(ciphertext)) };
+    } finally { cleartext.fill(0); }
+  }
+  async function decryptTransferManifestLayer2(key, envelope, metadata) {
+    if (envelope?.version !== 2 || envelope?.algorithm !== 'AES-256-GCM-LAYER2') throw new Error('Unsupported Layer 2 transfer manifest.');
+    const iv = decodeStandardBase64(envelope.iv), ciphertext = decodeStandardBase64(envelope.ciphertext);
+    if (iv.length !== 12 || ciphertext.length < 16 || ciphertext.length > 12_016) throw new Error('Malformed Layer 2 transfer manifest.');
+    const aad = encoder.encode(JSON.stringify(['serein-transfer-manifest-layer2-v1', ...transferMetadata(metadata)]));
+    const plaintext = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, key, ciphertext));
+    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext)); }
+    finally { plaintext.fill(0); }
   }
   async function generateTransferKey() {
     const rawKey = crypto.getRandomValues(new Uint8Array(32));
@@ -170,9 +205,25 @@
     if (!(iv instanceof Uint8Array) || iv.length !== 12 || !(ciphertext instanceof Uint8Array) || ciphertext.length < 16) throw new Error('Malformed encrypted-transfer chunk.');
     return crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: transferChunkAad(metadata, index, count), tagLength: 128 }, key, ciphertext);
   }
+  function transferChunkLayerAad(metadata,index,count,layer){
+    if(!Number.isInteger(index)||index<0||!Number.isInteger(count)||count<1||index>=count)throw new Error('Invalid transfer chunk position.');
+    return encoder.encode(JSON.stringify([`serein-transfer-chunk-${layer}-v2`,...transferMetadata(metadata).slice(0,4),index,count]));
+  }
+  async function encryptTransferChunkLayer2(layer1Key,layer2Key,plaintext,metadata,index,count,iv1,iv2){
+    if(!(iv1 instanceof Uint8Array)||iv1.length!==12||!(iv2 instanceof Uint8Array)||iv2.length!==12)throw new Error('Invalid two-layer transfer chunk nonce.');
+    const inner=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv:iv1,additionalData:transferChunkLayerAad(metadata,index,count,'layer1'),tagLength:128},layer1Key,plaintext));
+    try{const outer=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv:iv2,additionalData:transferChunkLayerAad(metadata,index,count,'layer2'),tagLength:128},layer2Key,inner));return{iv1,iv2,ciphertext:outer};}
+    finally{inner.fill(0);}
+  }
+  async function decryptTransferChunkLayer2(layer1Key,layer2Key,iv1,iv2,ciphertext,metadata,index,count){
+    if(!(iv1 instanceof Uint8Array)||iv1.length!==12||!(iv2 instanceof Uint8Array)||iv2.length!==12||!(ciphertext instanceof Uint8Array)||ciphertext.length<32)throw new Error('Malformed two-layer encrypted-transfer chunk.');
+    const inner=new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv:iv2,additionalData:transferChunkLayerAad(metadata,index,count,'layer2'),tagLength:128},layer2Key,ciphertext));
+    try{return await crypto.subtle.decrypt({name:'AES-GCM',iv:iv1,additionalData:transferChunkLayerAad(metadata,index,count,'layer1'),tagLength:128},layer1Key,inner);}
+    finally{inner.fill(0);}
+  }
   async function sha256Hex(bytes) {
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
     return [...digest].map(byte => byte.toString(16).padStart(2, '0')).join('');
   }
-  window.SereinDeviceCrypto = Object.freeze({ generateDeviceKeyPair, fingerprintP256, fingerprintDeviceKeyBundle, deriveCandidateConversationKey, deriveLayer2ConversationKey, encryptMessage, decryptMessage, encryptTransferManifest, decryptTransferManifest, generateTransferKey, importTransferKey, encryptTransferChunk, decryptTransferChunk, transferChunkIv, sha256Hex, encodeBase64, encodeBase64Url, decodeStandardBase64 });
+  window.SereinDeviceCrypto = Object.freeze({ generateDeviceKeyPair, fingerprintP256, fingerprintDeviceKeyBundle, deriveCandidateConversationKey, deriveLayer2ConversationKey, deriveRatchetBootstrapSecret, encryptMessage, decryptMessage, encryptTransferManifest, decryptTransferManifest, encryptTransferManifestLayer2, decryptTransferManifestLayer2, generateTransferKey, importTransferKey, encryptTransferChunk, decryptTransferChunk, encryptTransferChunkLayer2, decryptTransferChunkLayer2, transferChunkIv, sha256Hex, encodeBase64, encodeBase64Url, decodeStandardBase64 });
 })();

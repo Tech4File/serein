@@ -34,7 +34,7 @@ test('new backups use a stable account-specific key without asking for or storin
   const inspected = backupCrypto.inspect(result.bytes);
   assert.equal(inspected.version, 2);
   assert.equal(inspected.createdAt, '2026-10-25T04:30:00.000Z');
-  assert.ok(['deflate', 'none'].includes(inspected.compression));
+  assert.equal(inspected.compression, 'deflate', 'every new v2 backup must be compressed before encryption');
   const header = readHeader(result.bytes);
   assert.equal(header.format, 'SEREIN-BACKUP');
   assert.equal(header.kdf, 'HKDF-SHA256-ACCOUNT-UUID');
@@ -46,6 +46,16 @@ test('new backups use a stable account-specific key without asking for or storin
   assert.equal(raw.includes(alice.accountId), false);
   assert.equal(raw.includes(alice.username), false);
   assert.deepEqual((await backupCrypto.decrypt(alice, result.bytes)).data, snapshot);
+});
+
+test('new backup creation fails closed rather than emitting an uncompressed file when DEFLATE is unavailable', async () => {
+  const original = global.CompressionStream;
+  try {
+    global.CompressionStream = undefined;
+    await assert.rejects(backupCrypto.encrypt(alice, { messages: [] }), /cannot create a compressed backup/i);
+  } finally {
+    global.CompressionStream = original;
+  }
 });
 
 test('per-account key is stable across snapshots and username changes; each payload nonce is fresh', async () => {

@@ -46,7 +46,7 @@ type PeerMap = DashMap<Uuid, Peer>;
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct AddContactInput { identity: Option<String>, username: Option<String>, email: Option<String> }
 #[derive(Deserialize,Serialize,Default)] #[serde(deny_unknown_fields)] struct SettingsPatch { #[serde(skip_serializing_if="Option::is_none")] theme: Option<String>, #[serde(skip_serializing_if="Option::is_none")] font_scale: Option<String>, #[serde(skip_serializing_if="Option::is_none")] reduce_motion: Option<bool>, #[serde(skip_serializing_if="Option::is_none")] notifications: Option<bool>, #[serde(skip_serializing_if="Option::is_none")] presence_visibility: Option<String>, #[serde(skip_serializing_if="Option::is_none")] allow_contact_requests: Option<bool>, #[serde(skip_serializing_if="Option::is_none")] discoverable_by_email: Option<bool> }
 #[derive(Serialize)] struct ErrorBody { error: String }
-#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct DevicePublicKeyInput { algorithm: String, public_key: P256PublicJwk, layer2_public_key: P256PublicJwk }
+#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct DevicePublicKeyInput { algorithm: String, public_key: P256PublicJwk, layer2_public_key: P256PublicJwk, #[serde(default)] ratchet_version: Option<u8> }
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)] #[serde(deny_unknown_fields)] struct P256PublicJwk { kty: String, crv: String, x: String, y: String }
 #[derive(Serialize)] struct ContactRequestReply { id: Uuid, username: String, display_name: String, created_at: String, direction: String }
 #[derive(Serialize)] struct BlockReply { user_id: Uuid, username: String, display_name: String, created_at: String }
@@ -58,9 +58,10 @@ type PeerMap = DashMap<Uuid, Peer>;
 #[derive(Deserialize)] #[serde(tag = "type", rename_all = "snake_case")] enum ClientFrame { Message { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }, Ack { id: Uuid }, Heartbeat }
 #[derive(Deserialize)] struct HistoryQuery { after_created_at: Option<String>, after_id: Option<Uuid>, limit: Option<i64> }
 #[derive(Deserialize)] struct SendEnvelopeInput { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }
-#[derive(Deserialize)] struct CreateTransferInput { id: Uuid, recipient_user_id: Uuid, chunk_count: i32, total_ciphertext_bytes: i64, device_envelopes: Vec<TransferDeviceEnvelope> }
-#[derive(Deserialize)] struct TransferDeviceEnvelope { device_id: Uuid, iv: String, ciphertext: String }
-#[derive(Serialize)] struct TransferReply { id: Uuid, sender_user_id: Uuid, recipient_user_id: Uuid, sender_device_id: Uuid, chunk_count: i32, total_ciphertext_bytes: i64, received_chunks: i64, ready_at: Option<String>, expires_at: String, manifest_iv: String, manifest_ciphertext: String, acknowledged: bool }
+#[derive(Deserialize)] struct CreateTransferInput { id: Uuid, recipient_user_id: Uuid, chunk_count: i32, total_ciphertext_bytes: i64, #[serde(default = "legacy_transfer_crypto_version")] chunk_crypto_version: u8, device_envelopes: Vec<TransferDeviceEnvelope> }
+#[derive(Deserialize)] struct TransferDeviceEnvelope { device_id: Uuid, #[serde(default = "legacy_transfer_crypto_version")] crypto_version: u8, iv: String, ciphertext: String }
+fn legacy_transfer_crypto_version() -> u8 { 1 }
+#[derive(Serialize)] struct TransferReply { id: Uuid, sender_user_id: Uuid, recipient_user_id: Uuid, sender_device_id: Uuid, chunk_count: i32, chunk_crypto_version: u8, total_ciphertext_bytes: i64, received_chunks: i64, ready_at: Option<String>, expires_at: String, manifest_iv: String, manifest_ciphertext: String, manifest_crypto_version: u8, acknowledged: bool }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -69,10 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = PgPoolOptions::new().max_connections(20).connect(&database_url).await?;
     initialize_schema(&db).await?;
     let cookie_secure = env::var("COOKIE_SECURE").map(|v| v != "false").unwrap_or(true);
-    let allowed_origins = env::var("ALLOWED_WEB_ORIGINS").unwrap_or_else(|_| "http://localhost:8080".into())
-        .split(',').map(str::trim).filter(|value|!value.is_empty())
-        .map(normalize_web_origin).collect::<Result<Vec<_>,_>>().map_err(std::io::Error::other)?;
-    if allowed_origins.is_empty(){return Err(std::io::Error::other("ALLOWED_WEB_ORIGINS must contain at least one trusted origin").into());}
+    let allowed_origins = parse_web_origins(&env::var("ALLOWED_WEB_ORIGINS").unwrap_or_else(|_| "http://localhost:8080".into()))
+        .map_err(std::io::Error::other)?;
     let cors_origins = allowed_origins.iter().map(|origin|HeaderValue::try_from(origin.as_str()))
         .collect::<Result<Vec<_>,_>>()?;
     let cors = CorsLayer::new().allow_origin(AllowOrigin::list(cors_origins)).allow_methods([Method::GET,Method::POST,Method::PUT,Method::DELETE,Method::OPTIONS]).allow_headers([header::CONTENT_TYPE,HeaderName::from_static("x-chunk-sha256")]).expose_headers([header::RETRY_AFTER,HeaderName::from_static("x-chunk-sha256")]).allow_credentials(true);
@@ -92,6 +91,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(result) if result.rows_affected()>0=>info!(deleted=result.rows_affected(),"expired contact requests purged"),
                 Ok(_)=>{},
                 Err(_)=>warn!("contact request cleanup failed"),
+            }
+            match sqlx::query("DELETE FROM queued_ciphertexts WHERE (recipient_device_id,id) IN (SELECT recipient_device_id,id FROM queued_ciphertexts WHERE delivered_at IS NOT NULL ORDER BY delivered_at,recipient_device_id,id LIMIT 500)").execute(&cleanup_db).await {
+                Ok(result) if result.rows_affected()>0=>info!(deleted=result.rows_affected(),"legacy acknowledged ciphertext packets purged"),
+                Ok(_)=>{},
+                Err(_)=>warn!("acknowledged ciphertext cleanup failed"),
+            }
+            match sqlx::query("DELETE FROM queued_ciphertexts WHERE (recipient_device_id,id) IN (SELECT recipient_device_id,id FROM queued_ciphertexts WHERE delivered_at IS NULL AND created_at<=now()-interval '30 days' ORDER BY created_at,recipient_device_id,id LIMIT 500)").execute(&cleanup_db).await {
+                Ok(result) if result.rows_affected()>0=>info!(deleted=result.rows_affected(),"expired ciphertext packets purged"),
+                Ok(_)=>{},
+                Err(_)=>warn!("expired ciphertext cleanup failed"),
             }
         }
     });
@@ -179,8 +188,11 @@ async fn initialize_schema(db: &PgPool) -> Result<(), sqlx::Error> {
         "CREATE TABLE IF NOT EXISTS accounts (id UUID PRIMARY KEY, username TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, email_verified BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
         "CREATE TABLE IF NOT EXISTS devices (id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, label TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ NULL)",
         "CREATE INDEX IF NOT EXISTS devices_by_user ON devices(user_id, created_at DESC)",
-        "CREATE TABLE IF NOT EXISTS device_public_keys (device_id UUID PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL CHECK(algorithm='ECDH-P256'), public_key JSONB NOT NULL, layer2_public_key JSONB, fingerprint TEXT NOT NULL, key_version INTEGER NOT NULL DEFAULT 1 CHECK(key_version IN (1,2)), registered_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        "CREATE TABLE IF NOT EXISTS device_public_keys (device_id UUID PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL CHECK(algorithm='ECDH-P256'), public_key JSONB NOT NULL, layer2_public_key JSONB, fingerprint TEXT NOT NULL, key_version INTEGER NOT NULL DEFAULT 1 CHECK(key_version IN (1,2)), ratchet_version SMALLINT NOT NULL DEFAULT 2 CHECK(ratchet_version IN (2,3)), registered_at TIMESTAMPTZ NOT NULL DEFAULT now())",
         "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS layer2_public_key JSONB",
+        "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS ratchet_version SMALLINT NOT NULL DEFAULT 2",
+        "ALTER TABLE device_public_keys DROP CONSTRAINT IF EXISTS device_public_keys_ratchet_version_check",
+        "ALTER TABLE device_public_keys ADD CONSTRAINT device_public_keys_ratchet_version_check CHECK(ratchet_version IN (2,3))",
         "ALTER TABLE device_public_keys DROP CONSTRAINT IF EXISTS device_public_keys_key_version_check",
         "ALTER TABLE device_public_keys ADD CONSTRAINT device_public_keys_key_version_check CHECK(key_version IN (1,2))",
         "CREATE INDEX IF NOT EXISTS device_public_keys_by_user ON device_public_keys(user_id,registered_at)",
@@ -207,8 +219,13 @@ async fn initialize_schema(db: &PgPool) -> Result<(), sqlx::Error> {
         "ALTER TABLE queued_ciphertexts ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ NULL",
         "CREATE INDEX IF NOT EXISTS queued_ciphertexts_delivery ON queued_ciphertexts(recipient_device_id, delivered_at, created_at, id)",
         "CREATE INDEX IF NOT EXISTS queued_ciphertexts_created_at ON queued_ciphertexts(created_at)",
-        "CREATE TABLE IF NOT EXISTS encrypted_transfers (id UUID PRIMARY KEY, sender_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, sender_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, recipient_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, chunk_count INTEGER NOT NULL CHECK(chunk_count BETWEEN 1 AND 512), total_ciphertext_bytes BIGINT NOT NULL CHECK(total_ciphertext_bytes BETWEEN 1 AND 67108864), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, ready_at TIMESTAMPTZ NULL)",
-        "CREATE TABLE IF NOT EXISTS encrypted_transfer_device_envelopes (transfer_id UUID NOT NULL REFERENCES encrypted_transfers(id) ON DELETE CASCADE, target_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, target_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, iv TEXT NOT NULL, ciphertext TEXT NOT NULL, acknowledged_at TIMESTAMPTZ NULL, PRIMARY KEY(transfer_id,target_device_id))",
+        "CREATE INDEX IF NOT EXISTS queued_ciphertexts_delivered_cleanup ON queued_ciphertexts(delivered_at,recipient_device_id,id) WHERE delivered_at IS NOT NULL",
+        "CREATE TABLE IF NOT EXISTS encrypted_transfers (id UUID PRIMARY KEY, sender_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, sender_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, recipient_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, chunk_count INTEGER NOT NULL CHECK(chunk_count BETWEEN 1 AND 512), chunk_crypto_version SMALLINT NOT NULL DEFAULT 1 CHECK(chunk_crypto_version IN (1,2)), total_ciphertext_bytes BIGINT NOT NULL CHECK(total_ciphertext_bytes BETWEEN 1 AND 67108864), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, ready_at TIMESTAMPTZ NULL)",
+        "ALTER TABLE encrypted_transfers ADD COLUMN IF NOT EXISTS chunk_crypto_version SMALLINT NOT NULL DEFAULT 1",
+        "ALTER TABLE encrypted_transfers DROP CONSTRAINT IF EXISTS encrypted_transfers_chunk_crypto_version_check",
+        "ALTER TABLE encrypted_transfers ADD CONSTRAINT encrypted_transfers_chunk_crypto_version_check CHECK(chunk_crypto_version IN (1,2))",
+        "CREATE TABLE IF NOT EXISTS encrypted_transfer_device_envelopes (transfer_id UUID NOT NULL REFERENCES encrypted_transfers(id) ON DELETE CASCADE, target_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, target_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, iv TEXT NOT NULL, ciphertext TEXT NOT NULL, crypto_version SMALLINT NOT NULL DEFAULT 1, acknowledged_at TIMESTAMPTZ NULL, PRIMARY KEY(transfer_id,target_device_id))",
+        "ALTER TABLE encrypted_transfer_device_envelopes ADD COLUMN IF NOT EXISTS crypto_version SMALLINT NOT NULL DEFAULT 1",
         "CREATE TABLE IF NOT EXISTS encrypted_transfer_chunks (transfer_id UUID NOT NULL REFERENCES encrypted_transfers(id) ON DELETE CASCADE, chunk_index INTEGER NOT NULL CHECK(chunk_index >= 0), ciphertext BYTEA NOT NULL, sha256 BYTEA NOT NULL CHECK(octet_length(sha256)=32), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(transfer_id,chunk_index))",
         "CREATE INDEX IF NOT EXISTS encrypted_transfers_sender_expiry ON encrypted_transfers(sender_user_id,expires_at)",
         "CREATE INDEX IF NOT EXISTS encrypted_transfers_recipient_expiry ON encrypted_transfers(recipient_user_id,expires_at)",
@@ -230,6 +247,15 @@ fn normalize_web_origin(raw:&str)->Result<String,String>{
         return Err("ALLOWED_WEB_ORIGINS must contain HTTPS origins (HTTP only for localhost), without paths or credentials".into());
     }
     Ok(url.origin().ascii_serialization())
+}
+
+fn parse_web_origins(raw:&str)->Result<Vec<String>,String>{
+    let origins=raw.split(',').map(str::trim).filter(|value|!value.is_empty())
+        .map(normalize_web_origin).collect::<Result<Vec<_>,_>>()?;
+    if origins.is_empty(){return Err("ALLOWED_WEB_ORIGINS must contain at least one trusted origin".into());}
+    let mut unique=Vec::with_capacity(origins.len());
+    for origin in origins{if !unique.contains(&origin){unique.push(origin);}}
+    Ok(unique)
 }
 
 async fn security_headers(State(state):State<AppState>,request:Request,next:Next)->Response{
@@ -553,16 +579,17 @@ fn p256_key_bundle_fingerprint(layer1:&P256PublicJwk,layer2:&P256PublicJwk)->Opt
 async fn register_device_public_key(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<DevicePublicKeyInput>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     if input.algorithm!="ECDH-P256"{return api_error(StatusCode::BAD_REQUEST,"unsupported device key algorithm");}
+    let ratchet_version=input.ratchet_version.unwrap_or(2);if !matches!(ratchet_version,2..=3){return api_error(StatusCode::BAD_REQUEST,"unsupported device ratchet version");}
     let Some(fingerprint)=p256_key_bundle_fingerprint(&input.public_key,&input.layer2_public_key)else{return api_error(StatusCode::BAD_REQUEST,"invalid public device key bundle");};
     let public_key=match serde_json::to_value(&input.public_key){Ok(v)=>v,Err(_)=>return api_error(StatusCode::BAD_REQUEST,"invalid public device key")};
     let layer2_public_key=match serde_json::to_value(&input.layer2_public_key){Ok(v)=>v,Err(_)=>return api_error(StatusCode::BAD_REQUEST,"invalid layer-2 public device key")};
-    let inserted=sqlx::query("INSERT INTO device_public_keys(device_id,user_id,algorithm,public_key,layer2_public_key,fingerprint,key_version) SELECT d.id,d.user_id,'ECDH-P256',$3,$4,$5,2 FROM devices d WHERE d.id=$1 AND d.user_id=$2 AND d.revoked_at IS NULL ON CONFLICT(device_id) DO UPDATE SET layer2_public_key=EXCLUDED.layer2_public_key,fingerprint=EXCLUDED.fingerprint,key_version=2 WHERE device_public_keys.user_id=EXCLUDED.user_id AND device_public_keys.public_key=EXCLUDED.public_key AND (device_public_keys.layer2_public_key IS NULL OR device_public_keys.layer2_public_key=EXCLUDED.layer2_public_key)")
-        .bind(ctx.device_id).bind(ctx.user_id).bind(public_key).bind(layer2_public_key).bind(&fingerprint).execute(&state.db).await;
+    let inserted=sqlx::query("INSERT INTO device_public_keys(device_id,user_id,algorithm,public_key,layer2_public_key,fingerprint,key_version,ratchet_version) SELECT d.id,d.user_id,'ECDH-P256',$3,$4,$5,2,$6 FROM devices d WHERE d.id=$1 AND d.user_id=$2 AND d.revoked_at IS NULL ON CONFLICT(device_id) DO UPDATE SET layer2_public_key=EXCLUDED.layer2_public_key,fingerprint=EXCLUDED.fingerprint,key_version=2,ratchet_version=EXCLUDED.ratchet_version WHERE device_public_keys.user_id=EXCLUDED.user_id AND device_public_keys.public_key=EXCLUDED.public_key AND (device_public_keys.layer2_public_key IS NULL OR device_public_keys.layer2_public_key=EXCLUDED.layer2_public_key)")
+        .bind(ctx.device_id).bind(ctx.user_id).bind(public_key).bind(layer2_public_key).bind(&fingerprint).bind(ratchet_version as i16).execute(&state.db).await;
     if inserted.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key could not be registered");}
-    let stored=sqlx::query_as::<_,(Value,Option<Value>,String,i32)>("SELECT public_key,layer2_public_key,fingerprint,key_version FROM device_public_keys WHERE device_id=$1 AND user_id=$2")
+    let stored=sqlx::query_as::<_,(Value,Option<Value>,String,i32,i16)>("SELECT public_key,layer2_public_key,fingerprint,key_version,ratchet_version FROM device_public_keys WHERE device_id=$1 AND user_id=$2")
         .bind(ctx.device_id).bind(ctx.user_id).fetch_optional(&state.db).await;
     match stored{
-        Ok(Some((stored_key,Some(stored_layer2),stored_fingerprint,2))) if stored_key==serde_json::to_value(&input.public_key).unwrap_or(Value::Null)&&stored_layer2==serde_json::to_value(&input.layer2_public_key).unwrap_or(Value::Null)&&stored_fingerprint==fingerprint=>Json(serde_json::json!({"registered":true,"algorithm":"ECDH-P256","fingerprint":fingerprint,"key_version":2})).into_response(),
+        Ok(Some((stored_key,Some(stored_layer2),stored_fingerprint,2,stored_ratchet_version))) if stored_ratchet_version==ratchet_version as i16&&stored_key==serde_json::to_value(&input.public_key).unwrap_or(Value::Null)&&stored_layer2==serde_json::to_value(&input.layer2_public_key).unwrap_or(Value::Null)&&stored_fingerprint==fingerprint=>Json(serde_json::json!({"registered":true,"algorithm":"ECDH-P256","fingerprint":fingerprint,"key_version":2,"ratchet_version":ratchet_version})).into_response(),
         Ok(Some(_))=>api_error(StatusCode::CONFLICT,"a different key is already registered for this device; key rotation requires verification"),
         Ok(None)=>api_error(StatusCode::FORBIDDEN,"active device session required"),
         Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"device key status unavailable"),
@@ -574,9 +601,9 @@ async fn list_contact_device_public_keys(State(state):State<AppState>,headers:He
         .bind(ctx.user_id).bind(contact_id).fetch_one(&state.db).await;
     if !matches!(allowed,Ok(true)){return api_error(StatusCode::NOT_FOUND,"contact key directory unavailable");}
     let username=match sqlx::query_scalar::<_,String>("SELECT username FROM accounts WHERE id=$1").bind(contact_id).fetch_optional(&state.db).await{Ok(Some(value))=>value,Ok(None)=>return api_error(StatusCode::NOT_FOUND,"contact key directory unavailable"),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact key directory unavailable")};
-    let rows=sqlx::query_as::<_,(Uuid,Value,Option<Value>,String,String,i32)>("SELECT k.device_id,k.public_key,k.layer2_public_key,k.fingerprint,k.algorithm,k.key_version FROM device_public_keys k JOIN devices d ON d.id=k.device_id AND d.revoked_at IS NULL WHERE k.user_id=$1 ORDER BY d.created_at ASC,d.id ASC")
+    let rows=sqlx::query_as::<_,(Uuid,Value,Option<Value>,String,String,i32,i16)>("SELECT k.device_id,k.public_key,k.layer2_public_key,k.fingerprint,k.algorithm,k.key_version,k.ratchet_version FROM device_public_keys k JOIN devices d ON d.id=k.device_id AND d.revoked_at IS NULL WHERE k.user_id=$1 ORDER BY d.created_at ASC,d.id ASC")
         .bind(contact_id).fetch_all(&state.db).await;
-    match rows{Ok(devices)=>Json(serde_json::json!({"user_id":contact_id,"username":username,"devices":devices.into_iter().map(|(device_id,public_key,layer2_public_key,fingerprint,algorithm,key_version)|serde_json::json!({"device_id":device_id,"public_key":public_key,"layer2_public_key":layer2_public_key,"fingerprint":fingerprint,"algorithm":algorithm,"key_version":key_version})).collect::<Vec<_>>()})).into_response(),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"contact key directory unavailable")}
+    match rows{Ok(devices)=>Json(serde_json::json!({"user_id":contact_id,"username":username,"devices":devices.into_iter().map(|(device_id,public_key,layer2_public_key,fingerprint,algorithm,key_version,ratchet_version)|serde_json::json!({"device_id":device_id,"public_key":public_key,"layer2_public_key":layer2_public_key,"fingerprint":fingerprint,"algorithm":algorithm,"key_version":key_version,"ratchet_version":ratchet_version})).collect::<Vec<_>>()})).into_response(),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"contact key directory unavailable")}
 }
 async fn require_user(state:&AppState,headers:&HeaderMap)->Result<AuthContext,Response>{match authenticate(&state.db,headers).await{Ok(Some(ctx))=>Ok(ctx),Ok(None)=>Err(api_error(StatusCode::UNAUTHORIZED,"sign in required")),Err(_)=>{warn!("session validation failed");Err(api_error(StatusCode::SERVICE_UNAVAILABLE,"account service unavailable"))}}}
 async fn session_is_active(db:&PgPool,ctx:&AuthContext)->bool{sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM auth_sessions s JOIN devices d ON d.id=s.device_id JOIN accounts a ON a.id=s.user_id AND a.email_verified=TRUE WHERE s.token_hash=$1 AND s.device_id=$2 AND s.user_id=$3 AND s.expires_at>now() AND d.revoked_at IS NULL)").bind(&ctx.session_hash).bind(ctx.device_id).bind(ctx.user_id).fetch_one(db).await.unwrap_or(false)}
@@ -612,13 +639,16 @@ async fn list_messages(State(state):State<AppState>,headers:HeaderMap,Query(quer
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     let limit=history_page_limit(query.limit);let after_time=query.after_created_at.as_deref();let after_id=query.after_id;
     if after_time.is_some()!=after_id.is_some(){return api_error(StatusCode::BAD_REQUEST,"history cursor requires both timestamp and message id");}
-    let rows=match sqlx::query_as::<_,(Uuid,Value,String)>("SELECT id,payload,created_at::text FROM queued_ciphertexts WHERE recipient_device_id=$1 AND ($2::timestamptz IS NULL OR (created_at,id)>($2::timestamptz,$3::uuid)) ORDER BY created_at,id LIMIT $4").bind(ctx.device_id).bind(after_time).bind(after_id).bind(limit).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message history unavailable")};
+    let rows=match sqlx::query_as::<_,(Uuid,Value,String)>("SELECT id,payload,created_at::text FROM queued_ciphertexts WHERE recipient_device_id=$1 AND delivered_at IS NULL AND ($2::timestamptz IS NULL OR (created_at,id)>($2::timestamptz,$3::uuid)) ORDER BY created_at,id LIMIT $4").bind(ctx.device_id).bind(after_time).bind(after_id).bind(limit+1).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message history unavailable")};
+    let mut rows=rows;let has_more=rows.len() as i64>limit;if has_more{rows.pop();}
     let mut items=Vec::with_capacity(rows.len());let mut next=None;for(id,payload,created_at)in rows{next=Some(serde_json::json!({"after_created_at":created_at,"after_id":id}));items.push(serde_json::json!({"id":id,"payload":payload,"created_at":created_at}));}
-    Json(serde_json::json!({"items":items,"next":next,"has_more":items.len() as i64==limit})).into_response()
+    Json(serde_json::json!({"items":items,"next":next,"has_more":has_more})).into_response()
 }
 async fn ack_message_api(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<Uuid>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
-    match sqlx::query("UPDATE queued_ciphertexts SET delivered_at=COALESCE(delivered_at,now()) WHERE recipient_device_id=$1 AND id=$2").bind(ctx.device_id).bind(id).execute(&state.db).await{
+    // Idempotent ACK: after the client has durably committed the authenticated
+    // message locally, delete only this device's queued ciphertext copy.
+    match sqlx::query("DELETE FROM queued_ciphertexts WHERE recipient_device_id=$1 AND id=$2").bind(ctx.device_id).bind(id).execute(&state.db).await{
         Ok(_)=>Json(serde_json::json!({"ok":true})).into_response(),
         Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"message acknowledgement unavailable")
     }
@@ -626,7 +656,7 @@ async fn ack_message_api(State(state):State<AppState>,headers:HeaderMap,Path(id)
 async fn send_message_api(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<SendEnvelopeInput>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     let crypto_version=input.crypto_version.unwrap_or(1);
-    if !matches!(crypto_version,1|2)||input.to==ctx.device_id||!valid_ciphertext_parts(&input.iv,&input.ciphertext){return api_error(StatusCode::BAD_REQUEST,"invalid encrypted envelope");}
+    if !matches!(crypto_version,1..=3)||input.to==ctx.device_id||!valid_ciphertext_parts(&input.iv,&input.ciphertext){return api_error(StatusCode::BAD_REQUEST,"invalid encrypted envelope");}
     let target_user=match sqlx::query_scalar::<_,Uuid>("SELECT user_id FROM devices WHERE id=$1 AND revoked_at IS NULL").bind(input.to).fetch_optional(&state.db).await{Ok(Some(v))=>v,Ok(None)=>return api_error(StatusCode::NOT_FOUND,"recipient device not found"),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message service unavailable")};
     let allowed=match sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message authorization unavailable")};
     if !allowed{return api_error(StatusCode::FORBIDDEN,"recipient is not a contact");}
@@ -662,16 +692,17 @@ fn hex_lower(bytes:&[u8])->String{
 
 async fn create_encrypted_transfer(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<CreateTransferInput>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    let minimum_tag_bytes=match input.chunk_crypto_version{1=>16,2=>32,_=>return api_error(StatusCode::BAD_REQUEST,"unsupported encrypted-transfer chunk version")};
     if input.id.is_nil()||input.recipient_user_id.is_nil()||input.chunk_count<1||input.chunk_count>MAX_TRANSFER_CHUNKS
         ||input.total_ciphertext_bytes<1||input.total_ciphertext_bytes>MAX_TRANSFER_BYTES
         ||input.total_ciphertext_bytes>i64::from(input.chunk_count)*MAX_TRANSFER_CHUNK_BYTES as i64
-        ||input.total_ciphertext_bytes<i64::from(input.chunk_count)
+        ||input.total_ciphertext_bytes<i64::from(input.chunk_count)*minimum_tag_bytes
         ||input.device_envelopes.is_empty()||input.device_envelopes.len()>MAX_TRANSFER_DEVICES{
         return api_error(StatusCode::BAD_REQUEST,"invalid encrypted transfer manifest or size limits");
     }
     let mut supplied=BTreeSet::new();
     for envelope in &input.device_envelopes{
-        if envelope.device_id.is_nil()||!supplied.insert(envelope.device_id)
+        if envelope.device_id.is_nil()||!supplied.insert(envelope.device_id)||!matches!(envelope.crypto_version,1..=2)
             ||envelope.ciphertext.len()>16_384||!valid_ciphertext_parts(&envelope.iv,&envelope.ciphertext){
             return api_error(StatusCode::BAD_REQUEST,"invalid or duplicate per-device encrypted manifest");
         }
@@ -709,17 +740,17 @@ async fn create_encrypted_transfer(State(state):State<AppState>,headers:HeaderMa
         let _=tx.rollback().await;return api_error(StatusCode::INSUFFICIENT_STORAGE,"active encrypted-transfer quota exceeded");
     }
     let expires_days=TRANSFER_TTL_DAYS as i32;
-    if let Err(error)=sqlx::query("INSERT INTO encrypted_transfers(id,sender_user_id,sender_device_id,recipient_user_id,chunk_count,total_ciphertext_bytes,expires_at) VALUES($1,$2,$3,$4,$5,$6,now()+make_interval(days => $7))").bind(input.id).bind(ctx.user_id).bind(ctx.device_id).bind(input.recipient_user_id).bind(input.chunk_count).bind(input.total_ciphertext_bytes).bind(expires_days).execute(&mut *tx).await{
+    if let Err(error)=sqlx::query("INSERT INTO encrypted_transfers(id,sender_user_id,sender_device_id,recipient_user_id,chunk_count,chunk_crypto_version,total_ciphertext_bytes,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()+make_interval(days => $8))").bind(input.id).bind(ctx.user_id).bind(ctx.device_id).bind(input.recipient_user_id).bind(input.chunk_count).bind(input.chunk_crypto_version as i16).bind(input.total_ciphertext_bytes).bind(expires_days).execute(&mut *tx).await{
         let _=tx.rollback().await;
         if error.as_database_error().is_some_and(|e|e.is_unique_violation()){return api_error(StatusCode::CONFLICT,"transfer ID already exists");}
         warn!("encrypted transfer creation failed");return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer could not be created");
     }
     for envelope in &input.device_envelopes{
         let Some(target_user)=active_devices.iter().find(|pair|pair.0==envelope.device_id).map(|pair|pair.1) else {let _=tx.rollback().await;return api_error(StatusCode::BAD_REQUEST,"manifest references an unavailable device");};
-        if sqlx::query("INSERT INTO encrypted_transfer_device_envelopes(transfer_id,target_device_id,target_user_id,iv,ciphertext) VALUES($1,$2,$3,$4,$5)").bind(input.id).bind(envelope.device_id).bind(target_user).bind(&envelope.iv).bind(&envelope.ciphertext).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"per-device transfer envelopes could not be saved");}
+        if sqlx::query("INSERT INTO encrypted_transfer_device_envelopes(transfer_id,target_device_id,target_user_id,iv,ciphertext,crypto_version) VALUES($1,$2,$3,$4,$5,$6)").bind(input.id).bind(envelope.device_id).bind(target_user).bind(&envelope.iv).bind(&envelope.ciphertext).bind(envelope.crypto_version as i16).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"per-device transfer envelopes could not be saved");}
     }
     if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer could not be committed");}
-    transfer_no_store((StatusCode::CREATED,Json(serde_json::json!({"id":input.id,"chunk_count":input.chunk_count,"total_ciphertext_bytes":input.total_ciphertext_bytes,"expires_in_days":TRANSFER_TTL_DAYS,"state":"uploading","server_can_decrypt":false}))).into_response())
+    transfer_no_store((StatusCode::CREATED,Json(serde_json::json!({"id":input.id,"chunk_count":input.chunk_count,"chunk_crypto_version":input.chunk_crypto_version,"total_ciphertext_bytes":input.total_ciphertext_bytes,"expires_in_days":TRANSFER_TTL_DAYS,"state":"uploading","server_can_decrypt":false}))).into_response())
 }
 
 async fn upload_transfer_chunk(State(state):State<AppState>,headers:HeaderMap,Path((transfer_id,index)):Path<(Uuid,i32)>,body:Bytes)->Response{
@@ -757,8 +788,8 @@ async fn upload_transfer_chunk(State(state):State<AppState>,headers:HeaderMap,Pa
 
 async fn list_encrypted_transfers(State(state):State<AppState>,headers:HeaderMap)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
-    let rows=match sqlx::query_as::<_,(Uuid,Uuid,Uuid,Uuid,i32,i64,i64,Option<String>,String,String,String,bool)>("SELECT f.id,f.sender_user_id,f.recipient_user_id,f.sender_device_id,f.chunk_count,f.total_ciphertext_bytes,(SELECT COUNT(*) FROM encrypted_transfer_chunks c WHERE c.transfer_id=f.id),f.ready_at::text,f.expires_at::text,e.iv,e.ciphertext,e.acknowledged_at IS NOT NULL FROM encrypted_transfers f JOIN encrypted_transfer_device_envelopes e ON e.transfer_id=f.id JOIN devices d ON d.id=e.target_device_id JOIN accounts a ON a.id=e.target_user_id WHERE e.target_device_id=$1 AND d.revoked_at IS NULL AND a.email_verified=TRUE AND f.expires_at>now() AND (f.sender_device_id=$1 OR f.ready_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.owner_id=f.sender_user_id AND b.blocked_user_id=f.recipient_user_id) OR (b.owner_id=f.recipient_user_id AND b.blocked_user_id=f.sender_user_id)) ORDER BY f.created_at DESC LIMIT 50").bind(ctx.device_id).fetch_all(&state.db).await{Ok(rows)=>rows,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer list unavailable")};
-    transfer_no_store(Json(rows.into_iter().map(|(id,sender_user_id,recipient_user_id,sender_device_id,chunk_count,total_ciphertext_bytes,received_chunks,ready_at,expires_at,manifest_iv,manifest_ciphertext,acknowledged)|TransferReply{id,sender_user_id,recipient_user_id,sender_device_id,chunk_count,total_ciphertext_bytes,received_chunks,ready_at,expires_at,manifest_iv,manifest_ciphertext,acknowledged}).collect::<Vec<_>>()).into_response())
+    let rows=match sqlx::query_as::<_,(Uuid,Uuid,Uuid,Uuid,i32,i16,i64,i64,Option<String>,String,String,String,i16,bool)>("SELECT f.id,f.sender_user_id,f.recipient_user_id,f.sender_device_id,f.chunk_count,f.chunk_crypto_version,f.total_ciphertext_bytes,(SELECT COUNT(*) FROM encrypted_transfer_chunks c WHERE c.transfer_id=f.id),f.ready_at::text,f.expires_at::text,e.iv,e.ciphertext,e.crypto_version,e.acknowledged_at IS NOT NULL FROM encrypted_transfers f JOIN encrypted_transfer_device_envelopes e ON e.transfer_id=f.id JOIN devices d ON d.id=e.target_device_id JOIN accounts a ON a.id=e.target_user_id WHERE e.target_device_id=$1 AND d.revoked_at IS NULL AND a.email_verified=TRUE AND f.expires_at>now() AND (f.sender_device_id=$1 OR f.ready_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.owner_id=f.sender_user_id AND b.blocked_user_id=f.recipient_user_id) OR (b.owner_id=f.recipient_user_id AND b.blocked_user_id=f.sender_user_id)) ORDER BY f.created_at DESC LIMIT 50").bind(ctx.device_id).fetch_all(&state.db).await{Ok(rows)=>rows,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer list unavailable")};
+    transfer_no_store(Json(rows.into_iter().map(|(id,sender_user_id,recipient_user_id,sender_device_id,chunk_count,chunk_crypto_version,total_ciphertext_bytes,received_chunks,ready_at,expires_at,manifest_iv,manifest_ciphertext,manifest_crypto_version,acknowledged)|TransferReply{id,sender_user_id,recipient_user_id,sender_device_id,chunk_count,chunk_crypto_version:chunk_crypto_version as u8,total_ciphertext_bytes,received_chunks,ready_at,expires_at,manifest_iv,manifest_ciphertext,manifest_crypto_version:manifest_crypto_version as u8,acknowledged}).collect::<Vec<_>>()).into_response())
 }
 
 async fn download_transfer_chunk(State(state):State<AppState>,headers:HeaderMap,Path((transfer_id,index)):Path<(Uuid,i32)>)->Response{
@@ -951,7 +982,7 @@ async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
         incoming=ws_rx.next()=>match incoming{Some(Ok(Message::Text(text)))=>{
             if !session_is_active(&state.db,&ctx).await{let _=ws_tx.send(Message::Close(None)).await;break;}if text.len()>MAX_CIPHERTEXT_CHARS+1024{continue;}let Ok(frame)=serde_json::from_str::<ClientFrame>(&text)else{continue;};
             match frame{ClientFrame::Message{id,to,iv,ciphertext,crypto_version}=>{
-                let crypto_version=crypto_version.unwrap_or(1);if !matches!(crypto_version,1|2)||to==ctx.device_id||!valid_ciphertext_parts(&iv,&ciphertext){continue;}let target_user=sqlx::query_scalar::<_,Uuid>("SELECT d.user_id FROM devices d WHERE d.id=$1 AND d.revoked_at IS NULL").bind(to).fetch_optional(&state.db).await.ok().flatten();let Some(target_user)=target_user else{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"recipient device is unavailable"}).to_string().into())).await;continue;};let allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&state.db).await.unwrap_or(false);if !allowed{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"message":"recipient is not a contact"}).to_string().into())).await;continue;}
+                let crypto_version=crypto_version.unwrap_or(1);if !matches!(crypto_version,1..=3)||to==ctx.device_id||!valid_ciphertext_parts(&iv,&ciphertext){continue;}let target_user=sqlx::query_scalar::<_,Uuid>("SELECT d.user_id FROM devices d WHERE d.id=$1 AND d.revoked_at IS NULL").bind(to).fetch_optional(&state.db).await.ok().flatten();let Some(target_user)=target_user else{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"recipient device is unavailable"}).to_string().into())).await;continue;};let allowed=sqlx::query_scalar::<_,bool>("SELECT ($1=$2 OR EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(target_user).fetch_one(&state.db).await.unwrap_or(false);if !allowed{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"message":"recipient is not a contact"}).to_string().into())).await;continue;}
                 let payload=serde_json::json!({"type":"message","id":id,"from":ctx.device_id,"crypto_version":crypto_version,"iv":iv,"ciphertext":ciphertext});
                 let mut tx=match state.db.begin().await{Ok(tx)=>tx,Err(_)=>{let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"message service unavailable"}).to_string().into())).await;continue;}};
                 let account_locks=sqlx::query_scalar::<_,Uuid>("SELECT id FROM accounts WHERE id IN ($1,$2) ORDER BY id FOR SHARE").bind(ctx.user_id).bind(target_user).fetch_all(&mut *tx).await;let expected_locks=if ctx.user_id==target_user{1}else{2};if !account_locks.is_ok_and(|ids|ids.len()==expected_locks){let _=tx.rollback().await;continue;}
@@ -970,7 +1001,7 @@ async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
 
 #[cfg(test)]
 mod tests {
-    use super::{account_unique_conflict, cooldown_seconds, history_page_limit, normalise_username, normalize_web_origin, p256_key_bundle_fingerprint, registration_password_requirements, token_hash, valid_ciphertext_parts, valid_email, valid_font_scale, valid_theme, valid_username, LoginInput, VerifyLoginInput, P256PublicJwk};
+    use super::{account_unique_conflict, cooldown_seconds, history_page_limit, normalise_username, normalize_web_origin, parse_web_origins, p256_key_bundle_fingerprint, registration_password_requirements, token_hash, valid_ciphertext_parts, valid_email, valid_font_scale, valid_theme, valid_username, LoginInput, VerifyLoginInput, P256PublicJwk, TransferDeviceEnvelope, DevicePublicKeyInput, CreateTransferInput};
     #[test] fn duplicate_username_and_email_return_distinct_safe_messages(){assert!(account_unique_conflict(Some("accounts_username_key")).unwrap().contains("username"));assert!(account_unique_conflict(Some("accounts_email_key")).unwrap().contains("email"));assert!(account_unique_conflict(Some("unrelated_constraint")).is_none());}
     #[test] fn username_normalisation_is_ascii_lowercase(){assert_eq!(normalise_username("  Alice_7 "),"alice_7");}
     #[test] fn username_validation_rejects_short_and_unsafe_values(){assert!(valid_username("alice.7"));assert!(!valid_username("ab"));assert!(!valid_username("bad name"));assert!(!valid_username("Upper"));}
@@ -979,6 +1010,9 @@ mod tests {
     #[test] fn history_page_size_is_defaulted_and_bounded(){assert_eq!(history_page_limit(None),100);assert_eq!(history_page_limit(Some(0)),1);assert_eq!(history_page_limit(Some(500)),200);}
     #[test] fn account_setting_values_are_allowlisted(){assert!(valid_theme("dark"));assert!(!valid_theme("ultraviolet"));assert!(valid_font_scale("system"));assert!(valid_font_scale("large"));assert!(valid_font_scale("extra_large"));assert!(!valid_font_scale("huge"));}
     #[test] fn ciphertext_envelopes_require_gcm_iv_and_tag(){assert!(valid_ciphertext_parts("AAAAAAAAAAAAAAAA","AAAAAAAAAAAAAAAAAAAAAA=="));assert!(!valid_ciphertext_parts("short","AAAAAAAAAAAAAAAAAAAAAA=="));assert!(!valid_ciphertext_parts("AAAAAAAAAAAAAAAA","AA=="));}
+    #[test] fn device_ratchet_capability_defaults_to_legacy_static_and_accepts_web_v3(){let public=r#"{"kty":"EC","crv":"P-256","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","y":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"}"#;let legacy:DevicePublicKeyInput=serde_json::from_str(&format!(r#"{{"algorithm":"ECDH-P256","public_key":{public},"layer2_public_key":{public}}}"#)).unwrap();assert_eq!(legacy.ratchet_version,None);let web:DevicePublicKeyInput=serde_json::from_str(&format!(r#"{{"algorithm":"ECDH-P256","public_key":{public},"layer2_public_key":{public},"ratchet_version":3}}"#)).unwrap();assert_eq!(web.ratchet_version,Some(3));}
+    #[test] fn transfer_manifest_crypto_version_is_explicit_and_legacy_defaults_to_one(){let legacy:TransferDeviceEnvelope=serde_json::from_str(r#"{"device_id":"11111111-1111-4111-8111-111111111111","iv":"AAAAAAAAAAAAAAAA","ciphertext":"AAAAAAAAAAAAAAAAAAAAAA=="}"#).unwrap();assert_eq!(legacy.crypto_version,1);let layered:TransferDeviceEnvelope=serde_json::from_str(r#"{"device_id":"11111111-1111-4111-8111-111111111111","crypto_version":2,"iv":"AAAAAAAAAAAAAAAA","ciphertext":"AAAAAAAAAAAAAAAAAAAAAA=="}"#).unwrap();assert_eq!(layered.crypto_version,2);}
+    #[test] fn transfer_chunk_crypto_version_defaults_legacy_and_accepts_nested_v2(){let base=r#"{"id":"11111111-1111-4111-8111-111111111111","recipient_user_id":"22222222-2222-4222-8222-222222222222","chunk_count":1,"total_ciphertext_bytes":32,"device_envelopes":[]}"#;let legacy:CreateTransferInput=serde_json::from_str(base).unwrap();assert_eq!(legacy.chunk_crypto_version,1);let v2:CreateTransferInput=serde_json::from_str(&base.replace("\"total_ciphertext_bytes\":32","\"chunk_crypto_version\":2,\"total_ciphertext_bytes\":32")).unwrap();assert_eq!(v2.chunk_crypto_version,2);}
     #[test] fn layer2_fingerprint_binds_both_ordered_device_public_keys(){let first=P256PublicJwk{kty:"EC".into(),crv:"P-256".into(),x:"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),y:"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE".into()};let second=P256PublicJwk{kty:"EC".into(),crv:"P-256".into(),x:"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI".into(),y:"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM".into()};let ab=p256_key_bundle_fingerprint(&first,&second).unwrap();let ba=p256_key_bundle_fingerprint(&second,&first).unwrap();assert_eq!(ab.len(),64);assert_ne!(ab,ba);}
     #[test] fn registration_password_policy_requires_length_case_digit_and_byte_limit(){assert_eq!(registration_password_requirements("Serein123"),[true,true,true,true,true]);assert_eq!(registration_password_requirements("password1"),[true,false,true,true,true]);assert_eq!(registration_password_requirements("PASSWORD1"),[true,true,false,true,true]);assert_eq!(registration_password_requirements("Password"),[true,true,true,false,true]);assert_eq!(registration_password_requirements("Abc123"),[false,true,true,true,true]);assert!(!registration_password_requirements(&format!("{}Aa1", "x".repeat(1022)))[4]);}
     #[test] fn resend_cooldown_seconds_are_parsed_and_bounded_by_response(){assert_eq!(cooldown_seconds("cooldown:59"),Some(59));assert_eq!(cooldown_seconds("cooldown"),Some(60));assert_eq!(cooldown_seconds("send_limit"),None);}
@@ -989,4 +1023,5 @@ mod tests {
         assert!(serde_json::from_str::<VerifyLoginInput>(r#"{"identity":"person@example.test","password":"secret"}"#).is_err());
     }
     #[test] fn web_origins_are_exact_https_origins_and_local_http_only(){assert_eq!(normalize_web_origin("https://web.example.org/" ).unwrap(),"https://web.example.org");assert_eq!(normalize_web_origin("https://web.example.org:8443").unwrap(),"https://web.example.org:8443");assert!(normalize_web_origin("https://web.example.org/path").is_err());assert!(normalize_web_origin("http://web.example.org").is_err());assert_eq!(normalize_web_origin("http://localhost:8080").unwrap(),"http://localhost:8080");}
+    #[test] fn comma_separated_web_origins_accept_multiple_exact_origins_and_reject_bad_entries(){assert_eq!(parse_web_origins("https://app.example.org, https://preview.example.org:8443, https://app.example.org").unwrap(),vec!["https://app.example.org","https://preview.example.org:8443"]);assert!(parse_web_origins("https://app.example.org,https://evil.example.org/path").is_err());assert!(parse_web_origins(" , ").is_err());}
 }

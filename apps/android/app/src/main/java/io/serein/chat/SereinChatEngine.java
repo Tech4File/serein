@@ -22,16 +22,18 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /** Foreground native chat/transfer flow. All cleartext is encrypted before API storage. */
 final class SereinChatEngine {
     interface Listener { void changed(); }
     static final class Peer {
         final String userId, deviceId, name, fingerprint;
-        final JSONObject publicJwk;
+        final JSONObject publicJwk, layer2PublicJwk;
         final byte[] conversationKey, layer2Key;
+        final int ratchetVersion;
         final boolean trusted;
-        Peer(String userId,String deviceId,String name,String fingerprint,JSONObject publicJwk,byte[] key,byte[] layer2Key,boolean trusted){this.userId=userId;this.deviceId=deviceId;this.name=name;this.fingerprint=fingerprint;this.publicJwk=publicJwk;this.conversationKey=key;this.layer2Key=layer2Key;this.trusted=trusted;}
+        Peer(String userId,String deviceId,String name,String fingerprint,JSONObject publicJwk,JSONObject layer2PublicJwk,byte[] key,byte[] layer2Key,int ratchetVersion,boolean trusted){this.userId=userId;this.deviceId=deviceId;this.name=name;this.fingerprint=fingerprint;this.publicJwk=publicJwk;this.layer2PublicJwk=layer2PublicJwk;this.conversationKey=key;this.layer2Key=layer2Key;this.ratchetVersion=ratchetVersion;this.trusted=trusted;}
     }
     private final Context context;
     private final SereinApi api;
@@ -40,7 +42,9 @@ final class SereinChatEngine {
     private final Listener listener;
     private final Map<String,Peer> peers=new HashMap<>();
     private volatile KeyPair pair, layer2Pair;
+    private volatile String ownFingerprint="";
     private volatile SereinLocalStore local;
+    private final Object ratchetLock=new Object();
     private volatile String status="Preparing protected device keys…";
     private volatile boolean ready;
     private volatile boolean notificationsArmed;
@@ -59,17 +63,18 @@ final class SereinChatEngine {
     String contactId(){return contactId;}
     synchronized List<Peer> peers(){return new ArrayList<>(peers.values());}
     String previousFingerprint(String targetDeviceId){return local==null?"":local.trustedFingerprint(contactId,targetDeviceId);}
+    int previousRatchetVersion(String targetDeviceId){return local==null?2:local.trustedRatchetVersion(contactId,targetDeviceId);}
     JSONArray messages() throws Exception { return local==null?new JSONArray():local.messages(contactId); }
     private void notifyUi(){if(listener!=null)listener.changed();}
 
     CompletableFuture<Void> initialize(){
         if(contact.optBoolean("deleted")){return CompletableFuture.runAsync(()->{try{if(userId.isEmpty()||contactId.isEmpty())throw new IllegalStateException("Archived conversation identity is unavailable.");local=new SereinLocalStore(context,userId);ready=true;status="Archived conversation · this account was deleted · read-only";notifyUi();}catch(Exception error){throw new java.util.concurrent.CompletionException(error);}});}
         return CompletableFuture.supplyAsync(()->{
-            try{if(userId.isEmpty()||deviceId.isEmpty())throw new IllegalStateException("Signed-in device identity is unavailable.");SereinAttachmentStore.cleanTemporaryFiles(context);pair=SereinDeviceCrypto.loadOrCreate(context,userId,deviceId);layer2Pair=SereinDeviceCrypto.loadOrCreateLayer2(context,userId,deviceId);local=new SereinLocalStore(context,userId);return null;}
+            try{if(userId.isEmpty()||deviceId.isEmpty())throw new IllegalStateException("Signed-in device identity is unavailable.");SereinAttachmentStore.cleanTemporaryFiles(context);pair=SereinDeviceCrypto.loadOrCreate(context,userId,deviceId);layer2Pair=SereinDeviceCrypto.loadOrCreateLayer2(context,userId,deviceId);ownFingerprint=SereinDeviceCrypto.fingerprintBundle(SereinDeviceCrypto.publicJwk(pair),SereinDeviceCrypto.publicJwk(layer2Pair));local=new SereinLocalStore(context,userId);return null;}
             catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
         }).thenComposeAsync(ignored->{
-            try{return api.enrollDeviceKey(SereinDeviceCrypto.publicJwk(pair),SereinDeviceCrypto.publicJwk(layer2Pair)).thenApplyAsync(reply->{
-                try{String fp=SereinDeviceCrypto.fingerprintBundle(SereinDeviceCrypto.publicJwk(pair),SereinDeviceCrypto.publicJwk(layer2Pair));if(!fp.equals(reply.optString("fingerprint")))throw new IllegalStateException("Server fingerprint did not match this device key bundle.");return null;}
+            try{return api.enrollDeviceKey(SereinDeviceCrypto.publicJwk(pair),SereinDeviceCrypto.publicJwk(layer2Pair),SereinCoreNative.isLoaded()?3:2).thenApplyAsync(reply->{
+                try{if(!ownFingerprint.equals(reply.optString("fingerprint")))throw new IllegalStateException("Server fingerprint did not match this device key bundle.");return null;}
                 catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
             });}catch(Exception error){return failed(error);}
         }).thenComposeAsync(ignored->refreshPeers()).thenRunAsync(()->{
@@ -97,8 +102,8 @@ final class SereinChatEngine {
                     JSONObject d=active.optJSONObject(i);if(d==null)continue;String id=d.optString("id");JSONObject entry=publishedById.get(id);if(entry==null)continue;
                     JSONObject jwk=entry.optJSONObject("public_key"),layer2Jwk=entry.optJSONObject("layer2_public_key");if(jwk==null||layer2Jwk==null||entry.optInt("key_version")!=2||!"ECDH-P256".equals(entry.optString("algorithm")))throw new IllegalStateException("A contact device has not published both E2EE key layers.");
                     String fingerprint=SereinDeviceCrypto.fingerprintBundle(jwk,layer2Jwk);if(!fingerprint.equals(entry.optString("fingerprint")))throw new IllegalStateException("A contact device key-bundle fingerprint is inconsistent.");
-                    String trusted=local.trustedFingerprint(contactId,id);byte[] key=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,contactId,id,jwk);byte[] layer2Key=SereinDeviceCrypto.layer2ConversationKey(layer2Pair.getPrivate(),userId,deviceId,contactId,id,layer2Jwk);
-                    next.put(id,new Peer(contactId,id,d.optString("name","Device"),fingerprint,jwk,key,layer2Key,fingerprint.equals(trusted)));
+                    int ratchetVersion=entry.optInt("ratchet_version",2);if(ratchetVersion!=2&&ratchetVersion!=3)throw new IllegalStateException("A contact device advertises an unsupported ratchet capability.");String trusted=local.trustedFingerprint(contactId,id);boolean trustedCapability=local.trustedRatchetVersion(contactId,id)==ratchetVersion;byte[] key=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,contactId,id,jwk);byte[] layer2Key=SereinDeviceCrypto.layer2ConversationKey(layer2Pair.getPrivate(),userId,deviceId,contactId,id,layer2Jwk);
+                    next.put(id,new Peer(contactId,id,d.optString("name","Device"),fingerprint,jwk,layer2Jwk,key,layer2Key,ratchetVersion,fingerprint.equals(trusted)&&trustedCapability));
                 }
                 if(publishedById.keySet().stream().anyMatch(id->{for(int i=0;i<active.length();i++)if(id.equals(active.optJSONObject(i)==null?"":active.optJSONObject(i).optString("id")))return false;return true;}))throw new IllegalStateException("The contact device list changed. Refresh Contacts and reopen this chat.");
                 synchronized(this){peers.clear();peers.putAll(next);}status=peerStatus();notifyUi();
@@ -113,7 +118,7 @@ final class SereinChatEngine {
     }
     CompletableFuture<Void> trust(String targetDeviceId){
         return CompletableFuture.runAsync(()->{
-            try{Peer peer; synchronized(this){peer=peers.get(targetDeviceId);}if(peer==null)throw new IllegalStateException("Device key is no longer available.");local.trustFingerprint(contactId,targetDeviceId,peer.fingerprint);synchronized(this){peers.put(targetDeviceId,new Peer(peer.userId,peer.deviceId,peer.name,peer.fingerprint,peer.publicJwk,peer.conversationKey,peer.layer2Key,true));}status=peerStatus();notifyUi();}
+            try{Peer peer; synchronized(this){peer=peers.get(targetDeviceId);}if(peer==null)throw new IllegalStateException("Device key is no longer available.");local.trustFingerprint(contactId,targetDeviceId,peer.fingerprint,peer.ratchetVersion);synchronized(this){peers.put(targetDeviceId,new Peer(peer.userId,peer.deviceId,peer.name,peer.fingerprint,peer.publicJwk,peer.layer2PublicJwk,peer.conversationKey,peer.layer2Key,peer.ratchetVersion,true));}status=peerStatus();notifyUi();}
             catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
         });
     }
@@ -124,15 +129,25 @@ final class SereinChatEngine {
         if(text==null||text.trim().isEmpty())return failed(new IllegalArgumentException("Message cannot be empty."));
         if(text.codePointCount(0,text.length())>4000)return failed(new IllegalArgumentException("Messages are limited to 4,000 characters."));
         return CompletableFuture.supplyAsync(()->{
-            try{
-                List<Peer> targets=trustedTargets();String messageId=UUID.randomUUID().toString().toLowerCase(Locale.ROOT),createdAt=java.time.Instant.now().toString();JSONArray envelopes=new JSONArray();
-                for(Peer target:targets){JSONObject content=new JSONObject().put("version",1).put("text",text).put("conversation_id",contactId).put("sender_user_id",userId).put("sender_device_id",deviceId).put("recipient_user_id",contactId).put("recipient_device_id",target.deviceId);if(attachment!=null)content.put("attachment",attachment);
-                    JSONObject encrypted=SereinDeviceCrypto.encryptLayeredMessage(target.conversationKey,target.layer2Key,content,contactId,messageId,userId,deviceId,contactId,target.deviceId);
-                    envelopes.put(new JSONObject().put("to",target.deviceId).put("crypto_version",2).put("iv",encrypted.getString("iv")).put("ciphertext",encrypted.getString("ciphertext")));
-                }
-                JSONObject localMessage=new JSONObject().put("id",messageId).put("conversation_id",contactId).put("created_at",createdAt).put("text",text).put("mine",true).put("sender",user.optString("display_name","You")).put("status","pending").put("envelopes",envelopes);if(attachment!=null)localMessage.put("attachment",attachment);
-                local.saveMessage(localMessage);notifyUi();return localMessage;
-            }catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
+            synchronized(ratchetLock){
+                Map<String,byte[]> snapshots=new HashMap<>();List<SereinRatchetSession> opened=new ArrayList<>();
+                try{
+                    List<Peer> targets=trustedTargets();String messageId=UUID.randomUUID().toString().toLowerCase(Locale.ROOT),createdAt=java.time.Instant.now().toString(),conversation=canonicalConversationId(userId,contactId);JSONArray envelopes=new JSONArray();
+                    for(Peer target:targets){JSONObject content=new JSONObject().put("version",1).put("text",text).put("conversation_id",conversation).put("sender_user_id",userId).put("sender_device_id",deviceId).put("recipient_user_id",contactId).put("recipient_device_id",target.deviceId);if(attachment!=null)content.put("attachment",attachment);
+                        JSONObject encrypted;int cryptoVersion;
+                        if(target.ratchetVersion>=3&&SereinCoreNative.isLoaded()){
+                            SereinRatchetSession session=SereinRatchetSession.open(local,pair.getPrivate(),layer2Pair.getPrivate(),userId,deviceId,ownFingerprint,target);opened.add(session);
+                            JSONObject route=route(conversation,messageId,userId,deviceId,contactId,target.deviceId);
+                            encrypted=session.encrypt(content.toString().getBytes(StandardCharsets.UTF_8),route);cryptoVersion=3;
+                            for(Map.Entry<String,byte[]> row:session.snapshots().entrySet())snapshots.put(row.getKey(),row.getValue());
+                        }else{encrypted=SereinDeviceCrypto.encryptLayeredMessage(target.conversationKey,target.layer2Key,content,conversation,messageId,userId,deviceId,contactId,target.deviceId);cryptoVersion=2;}
+                        envelopes.put(new JSONObject().put("to",target.deviceId).put("crypto_version",cryptoVersion).put("iv",encrypted.getString("iv")).put("ciphertext",encrypted.getString("ciphertext")));
+                    }
+                    JSONObject localMessage=new JSONObject().put("id",messageId).put("conversation_id",contactId).put("created_at",createdAt).put("text",text).put("mine",true).put("sender",user.optString("display_name","You")).put("status","pending").put("envelopes",envelopes);if(attachment!=null)localMessage.put("attachment",attachment);
+                    if(snapshots.isEmpty())local.saveMessage(localMessage);else local.saveRatchetMessage(localMessage,snapshots);notifyUi();return localMessage;
+                }catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
+                finally{for(byte[] snapshot:snapshots.values())Arrays.fill(snapshot,(byte)0);for(SereinRatchetSession session:opened)session.close();}
+            }
         }).thenComposeAsync(message->deliver(message));
     }
     private List<Peer> trustedTargets(){
@@ -172,18 +187,46 @@ final class SereinChatEngine {
                 if(packet==null||!"message".equals(packet.optString("type"))) {advance(created,id);return;}
                 String senderDevice=packet.optString("from");boolean belongs=false;JSONArray active=contact.optJSONArray("devices");if(active!=null)for(int i=0;i<active.length();i++){JSONObject d=active.optJSONObject(i);if(d!=null&&senderDevice.equals(d.optString("id")))belongs=true;}
                 if(!belongs){advance(created,id);return;}
-                if(local.containsMessage(id)){api.acknowledgeFuture(id);advance(created,id);return;}
+                if(local.containsMessage(id)){api.acknowledgeFuture(id).get(20,TimeUnit.SECONDS);advance(created,id);return;}
                 Peer peer; synchronized(this){peer=peers.get(senderDevice);}if(peer==null||!peer.trusted){status=peer==null?"Refresh Contacts: the sender device is not in the accepted contact list.":"Message is held until you verify the sender-device fingerprint.";notifyUi();throw new IllegalStateException(status);}
-                JSONObject content=SereinDeviceCrypto.decryptLayeredMessage(peer.conversationKey,peer.layer2Key,packet.optInt("crypto_version",1),packet.optString("iv"),packet.optString("ciphertext"),contactId,id,contactId,senderDevice,userId,deviceId);
-                if(content.optInt("version")!=1||!contactId.equals(content.optString("conversation_id"))||!contactId.equals(content.optString("sender_user_id"))||!senderDevice.equals(content.optString("sender_device_id"))||!userId.equals(content.optString("recipient_user_id"))||!deviceId.equals(content.optString("recipient_device_id")))throw new SecurityException("Encrypted message routing did not match this device.");
-                String text=content.optString("text","");if(text.isEmpty()||text.codePointCount(0,text.length())>4000)throw new SecurityException("Encrypted message text exceeded the protocol limit.");
-                JSONObject message=new JSONObject().put("id",id).put("conversation_id",contactId).put("created_at",created).put("text",text).put("mine",false).put("sender",contactName).put("status","received");
-                if(content.has("attachment")){JSONObject attachment=validateAttachment(content.getJSONObject("attachment"));message.put("attachment",attachment);}
-                local.saveMessage(message);if(notificationsArmed)SereinNotifications.showIncoming(context,context.getSharedPreferences("serein",Context.MODE_PRIVATE).getBoolean("notification_sound",true));api.acknowledgeFuture(id);advance(created,id);status="Encrypted message received and stored on this device.";notifyUi();
+                JSONObject message=decryptAndStoreIncoming(peer,packet,id,senderDevice,created);
+                // Local message and ratchet advancement are durable before ACK deletes the server queue copy.
+                api.acknowledgeFuture(id).get(20,TimeUnit.SECONDS);advance(created,id);if(notificationsArmed)SereinNotifications.showIncoming(context,context.getSharedPreferences("serein",Context.MODE_PRIVATE).getBoolean("notification_sound",true));status="Encrypted message received and stored on this device.";notifyUi();
             }catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
         });
     }
+    private JSONObject decryptAndStoreIncoming(Peer peer,JSONObject packet,String messageId,String senderDevice,String createdAt) throws Exception {
+        String conversation=canonicalConversationId(userId,contactId);int version=packet.optInt("crypto_version",1);JSONObject content;JSONObject message;
+        if(version<1||version>3)throw new SecurityException("Encrypted message uses an unsupported protocol version.");
+        if(version==3){
+            if(peer.ratchetVersion<3)throw new SecurityException("Sender used ratchet v3 without advertising that capability in the trusted device directory.");
+            synchronized(ratchetLock){
+                SereinRatchetSession session=SereinRatchetSession.open(local,pair.getPrivate(),layer2Pair.getPrivate(),userId,deviceId,ownFingerprint,peer);byte[] clear=null;Map<String,byte[]> snapshots=new HashMap<>();
+                try{
+                    clear=session.decrypt(packet.optString("iv"),packet.optString("ciphertext"),route(conversation,messageId,contactId,senderDevice,userId,deviceId));
+                    content=new JSONObject(SereinDeviceCrypto.decodeUtf8Strict(clear));message=validatedIncomingMessage(content,conversation,messageId,senderDevice,createdAt);
+                    for(Map.Entry<String,byte[]> row:session.snapshots().entrySet())snapshots.put(row.getKey(),row.getValue());
+                    local.saveRatchetMessage(message,snapshots);
+                }finally{if(clear!=null)Arrays.fill(clear,(byte)0);for(byte[] snapshot:snapshots.values())Arrays.fill(snapshot,(byte)0);session.close();}
+            }
+        }else{
+            try{content=SereinDeviceCrypto.decryptLayeredMessage(peer.conversationKey,peer.layer2Key,version,packet.optString("iv"),packet.optString("ciphertext"),conversation,messageId,contactId,senderDevice,userId,deviceId);}
+            catch(Exception currentRouteFailure){content=SereinDeviceCrypto.decryptLayeredMessage(peer.conversationKey,peer.layer2Key,version,packet.optString("iv"),packet.optString("ciphertext"),userId,messageId,contactId,senderDevice,userId,deviceId);}
+            message=validatedIncomingMessage(content,conversation,messageId,senderDevice,createdAt);local.saveMessage(message);
+        }
+        return message;
+    }
+    private JSONObject validatedIncomingMessage(JSONObject content,String conversation,String messageId,String senderDevice,String createdAt) throws Exception {
+        if(content.optInt("version")!=1||!(conversation.equals(content.optString("conversation_id"))||userId.equals(content.optString("conversation_id")))||!contactId.equals(content.optString("sender_user_id"))||!senderDevice.equals(content.optString("sender_device_id"))||!userId.equals(content.optString("recipient_user_id"))||!deviceId.equals(content.optString("recipient_device_id")))throw new SecurityException("Encrypted message routing did not match this device.");
+        String text=content.optString("text","");if(text.isEmpty()||text.codePointCount(0,text.length())>4000)throw new SecurityException("Encrypted message text exceeded the protocol limit.");
+        JSONObject message=new JSONObject().put("id",messageId).put("conversation_id",contactId).put("created_at",createdAt).put("text",text).put("mine",false).put("sender",contactName).put("status","received");
+        if(content.has("attachment"))message.put("attachment",validateAttachment(content.getJSONObject("attachment")));return message;
+    }
+    private static JSONObject route(String conversation,String messageId,String senderUser,String senderDevice,String recipientUser,String recipientDevice) throws Exception {
+        return new JSONObject().put("conversationId",conversation).put("messageId",messageId).put("senderUserId",senderUser).put("senderDeviceId",senderDevice).put("recipientUserId",recipientUser).put("recipientDeviceId",recipientDevice);
+    }
     private synchronized void advance(String time,String id){if(time!=null&&!time.isEmpty()&&id!=null&&!id.isEmpty()){cursorTime=time;cursorId=id;}}
+    private static String canonicalConversationId(String first,String second){String[] pair={first,second};Arrays.sort(pair);return pair[0]+":"+pair[1];}
     private static JSONObject validateAttachment(JSONObject source) throws Exception {
         String id=source.optString("transfer_id"),filename=source.optString("filename"),type=source.optString("content_type");long size=source.optLong("size",-1);
         if(!id.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")||filename.getBytes(StandardCharsets.UTF_8).length>1024||type.getBytes(StandardCharsets.UTF_8).length>128||size<0||size>MAX_CLEAR_BYTES)throw new SecurityException("Encrypted attachment details are invalid.");
@@ -193,7 +236,7 @@ final class SereinChatEngine {
 
     CompletableFuture<File> downloadAttachment(JSONObject attachment){
         return CompletableFuture.supplyAsync(()->{
-            File temporary=null;byte[] contentKey=null,prefix=null;
+            File temporary=null;byte[] contentKey=null,prefix=null,layer2ContentKey=null,layer2Prefix=null;
             try{
                 String transferId=attachment.getString("transfer_id"),filename=attachment.getString("filename");long expected=attachment.getLong("size");
                 File existing=SereinAttachmentStore.existing(context,userId,transferId,filename,expected);if(existing!=null)return existing;
@@ -202,25 +245,31 @@ final class SereinChatEngine {
                 if(transfer==null||transfer.isNull("ready_at"))throw new IllegalStateException("Encrypted transfer is incomplete, expired, or unavailable on this device.");
                 String senderUser=transfer.optString("sender_user_id"),senderDevice=transfer.optString("sender_device_id"),recipientUser=transfer.optString("recipient_user_id");
                 if(!userId.equals(recipientUser)&&!userId.equals(senderUser))throw new SecurityException("Transfer account binding did not match this session.");
-                byte[] manifestKey;
+                byte[] manifestKey,manifestLayer2Key;
                 if(senderUser.equals(userId)){
                     if(!senderDevice.equals(deviceId))throw new SecurityException("This transfer belongs to another sending device.");
                     manifestKey=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,userId,deviceId,SereinDeviceCrypto.publicJwk(pair));
+                    manifestLayer2Key=SereinDeviceCrypto.layer2ConversationKey(layer2Pair.getPrivate(),userId,deviceId,userId,deviceId,SereinDeviceCrypto.publicJwk(layer2Pair));
                 }else{
-                    if(!contactId.equals(senderUser))throw new SecurityException("The sender is not the selected contact.");Peer peer; synchronized(this){peer=peers.get(senderDevice);}if(peer==null||!peer.trusted)throw new SecurityException("Verify the sender-device fingerprint before downloading.");manifestKey=peer.conversationKey;
+                    if(!contactId.equals(senderUser))throw new SecurityException("The sender is not the selected contact.");Peer peer; synchronized(this){peer=peers.get(senderDevice);}if(peer==null||!peer.trusted)throw new SecurityException("Verify the sender-device fingerprint before downloading.");manifestKey=peer.conversationKey;manifestLayer2Key=peer.layer2Key;
                 }
-                JSONObject manifest=SereinDeviceCrypto.decryptManifest(manifestKey,transfer.optString("manifest_iv"),transfer.optString("manifest_ciphertext"),transferId,senderUser,senderDevice,recipientUser,deviceId);
+                int manifestVersion=transfer.optInt("manifest_crypto_version",1);if(manifestVersion!=1&&manifestVersion!=2)throw new SecurityException("Encrypted transfer uses an unsupported manifest version.");
+                JSONObject innerManifestEnvelope=manifestVersion==2?SereinDeviceCrypto.decryptManifestLayer2(manifestLayer2Key,transfer.optString("manifest_iv"),transfer.optString("manifest_ciphertext"),transferId,senderUser,senderDevice,recipientUser,deviceId):new JSONObject().put("version",1).put("algorithm","AES-256-GCM").put("iv",transfer.optString("manifest_iv")).put("ciphertext",transfer.optString("manifest_ciphertext"));
+                JSONObject manifest=SereinDeviceCrypto.decryptManifest(manifestKey,innerManifestEnvelope.getString("iv"),innerManifestEnvelope.getString("ciphertext"),transferId,senderUser,senderDevice,recipientUser,deviceId);
                 if(expected<0||expected>MAX_CLEAR_BYTES)throw new SecurityException("Attachment size is outside the allowed limit.");
-                int count=manifest.optInt("chunk_count",-1);int expectedCount=(int)Math.max(1,(expected+SereinDeviceCrypto.CHUNK_PLAINTEXT_BYTES-1)/SereinDeviceCrypto.CHUNK_PLAINTEXT_BYTES);
+                int chunkCryptoVersion=transfer.optInt("chunk_crypto_version",manifest.optInt("chunk_crypto_version",1));if((chunkCryptoVersion!=1&&chunkCryptoVersion!=2)||manifest.optInt("chunk_crypto_version",1)!=chunkCryptoVersion)throw new SecurityException("Unsupported or inconsistent transfer chunk version.");
+                int chunkPlaintextBytes=SereinDeviceCrypto.CHUNK_CIPHERTEXT_BYTES-(chunkCryptoVersion==2?32:16);
+                int count=manifest.optInt("chunk_count",-1);int expectedCount=(int)Math.max(1,(expected+chunkPlaintextBytes-1)/chunkPlaintextBytes);
                 if(manifest.optInt("version")!=1||!transferId.equals(manifest.optString("transfer_id"))||manifest.optLong("size",-1)!=expected||count<1||count>SereinDeviceCrypto.MAX_CHUNKS||count!=expectedCount||count!=transfer.optInt("chunk_count")||!filename.equals(manifest.optString("filename"))||!attachment.optString("content_type").equals(manifest.optString("content_type")))throw new SecurityException("Authenticated file manifest did not match the chat notice or transfer limits.");
-                if(transfer.optLong("total_ciphertext_bytes",-1)!=expected+(long)count*16)throw new SecurityException("Encrypted transfer byte count did not match its manifest.");
+                int tagBytes=chunkCryptoVersion==2?32:16;if(transfer.optLong("total_ciphertext_bytes",-1)!=expected+(long)count*tagBytes)throw new SecurityException("Encrypted transfer byte count did not match its manifest.");
                 contentKey=android.util.Base64.decode(manifest.getString("content_key"),android.util.Base64.DEFAULT);prefix=android.util.Base64.decode(manifest.getString("nonce_prefix"),android.util.Base64.DEFAULT);if(contentKey.length!=32||prefix.length!=4)throw new SecurityException("Encrypted transfer key material is malformed.");
+                if(chunkCryptoVersion==2){layer2ContentKey=android.util.Base64.decode(manifest.getString("layer2_content_key"),android.util.Base64.DEFAULT);layer2Prefix=android.util.Base64.decode(manifest.getString("layer2_nonce_prefix"),android.util.Base64.DEFAULT);if(layer2ContentKey.length!=32||layer2Prefix.length!=4)throw new SecurityException("Layer 2 transfer chunk key material is malformed.");}
                 temporary=File.createTempFile("serein-clear-",".part",context.getCacheDir());long clearBytes=0;
                 try(FileOutputStream output=new FileOutputStream(temporary,false)){
                     for(int index=0;index<count;index++){
                         SereinApi.BinaryReply reply=api.transferChunk("GET",transferId,index,null,null).join();byte[] encrypted=reply.bytes;
                         if(reply.sha256==null||!SereinDeviceCrypto.sha256Hex(encrypted).equalsIgnoreCase(reply.sha256))throw new SecurityException("Encrypted chunk checksum did not match the server response.");
-                        byte[] clear=SereinDeviceCrypto.decryptChunk(contentKey,prefix,index,encrypted,transferId,senderUser,senderDevice,recipientUser,count);
+                        byte[] clear=chunkCryptoVersion==2?SereinDeviceCrypto.decryptChunkLayer2(contentKey,layer2ContentKey,prefix,layer2Prefix,index,encrypted,transferId,senderUser,senderDevice,recipientUser,count):SereinDeviceCrypto.decryptChunk(contentKey,prefix,index,encrypted,transferId,senderUser,senderDevice,recipientUser,count);
                         try{clearBytes+=clear.length;if(clearBytes>expected)throw new SecurityException("Decrypted attachment exceeded its authenticated size.");output.write(clear);}finally{Arrays.fill(clear,(byte)0);Arrays.fill(encrypted,(byte)0);}
                     }
                     output.flush();output.getFD().sync();
@@ -229,7 +278,7 @@ final class SereinChatEngine {
                 File saved;try(InputStream input=new FileInputStream(temporary)){saved=SereinAttachmentStore.save(context,userId,transferId,filename,input,expected);}
                 api.acknowledgeTransfer(transferId).join();status="Download saved. Tap Open to hand it to a compatible app.";notifyUi();return saved;
             }catch(Throwable error){throw new java.util.concurrent.CompletionException(unwrap(error));}
-            finally{if(contentKey!=null)Arrays.fill(contentKey,(byte)0);if(prefix!=null)Arrays.fill(prefix,(byte)0);if(temporary!=null)temporary.delete();}
+            finally{if(contentKey!=null)Arrays.fill(contentKey,(byte)0);if(prefix!=null)Arrays.fill(prefix,(byte)0);if(layer2ContentKey!=null)Arrays.fill(layer2ContentKey,(byte)0);if(layer2Prefix!=null)Arrays.fill(layer2Prefix,(byte)0);if(temporary!=null)temporary.delete();}
         });
     }
 
@@ -237,30 +286,30 @@ final class SereinChatEngine {
         final String selectedName=filename==null?"attachment":filename;
         final String selectedType=contentType==null?"application/octet-stream":contentType;
         return CompletableFuture.runAsync(()->{
-            byte[] contentKey=SereinDeviceCrypto.randomBytes(32),prefix=SereinDeviceCrypto.randomBytes(4);String transferId=UUID.randomUUID().toString().toLowerCase(Locale.ROOT);boolean created=false,uploaded=false;
+            byte[] contentKey=SereinDeviceCrypto.randomBytes(32),prefix=SereinDeviceCrypto.randomBytes(4),layer2ContentKey=SereinDeviceCrypto.randomBytes(32),layer2Prefix=SereinDeviceCrypto.randomBytes(4);String transferId=UUID.randomUUID().toString().toLowerCase(Locale.ROOT);boolean created=false,uploaded=false;
             try{
                 long size=source.length();if(size<0||size>MAX_CLEAR_BYTES)throw new IllegalArgumentException("This file exceeds the 64 MiB transfer limit.");
                 String cleanFilename=safeFilename(selectedName),safeContentType=selectedType.isEmpty()||selectedType.length()>128?"application/octet-stream":selectedType;
-                int count=(int)Math.max(1,(size+SereinDeviceCrypto.CHUNK_PLAINTEXT_BYTES-1)/SereinDeviceCrypto.CHUNK_PLAINTEXT_BYTES);long cipherBytes=size+count*16L;
+                int count=(int)Math.max(1,(size+SereinDeviceCrypto.CHUNK_PLAINTEXT_BYTES-1)/SereinDeviceCrypto.CHUNK_PLAINTEXT_BYTES);long cipherBytes=size+count*32L;
                 if(count>SereinDeviceCrypto.MAX_CHUNKS||cipherBytes>SereinDeviceCrypto.MAX_FILE_CIPHERTEXT_BYTES)throw new IllegalArgumentException("This file exceeds the encrypted-transfer limit.");
-                List<Peer> targets=trustedTargets();JSONObject manifest=new JSONObject().put("version",1).put("transfer_id",transferId).put("filename",cleanFilename).put("content_type",safeContentType).put("size",size).put("chunk_count",count).put("content_key",android.util.Base64.encodeToString(contentKey,android.util.Base64.NO_WRAP)).put("nonce_prefix",android.util.Base64.encodeToString(prefix,android.util.Base64.NO_WRAP));
-                JSONArray envelopes=new JSONArray();JSONObject selfJwk=SereinDeviceCrypto.publicJwk(pair);byte[] selfKey=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,userId,deviceId,selfJwk);
-                JSONObject own=SereinDeviceCrypto.encryptManifest(selfKey,manifest,transferId,userId,deviceId,contactId,deviceId);envelopes.put(new JSONObject().put("device_id",deviceId).put("iv",own.getString("iv")).put("ciphertext",own.getString("ciphertext")));Arrays.fill(selfKey,(byte)0);
-                for(Peer target:targets){JSONObject wrapped=SereinDeviceCrypto.encryptManifest(target.conversationKey,manifest,transferId,userId,deviceId,contactId,target.deviceId);envelopes.put(new JSONObject().put("device_id",target.deviceId).put("iv",wrapped.getString("iv")).put("ciphertext",wrapped.getString("ciphertext")));}
-                JSONObject request=new JSONObject().put("id",transferId).put("recipient_user_id",contactId).put("chunk_count",count).put("total_ciphertext_bytes",cipherBytes).put("device_envelopes",envelopes);
+                List<Peer> targets=trustedTargets();JSONObject manifest=new JSONObject().put("version",1).put("chunk_crypto_version",2).put("transfer_id",transferId).put("filename",cleanFilename).put("content_type",safeContentType).put("size",size).put("chunk_count",count).put("content_key",android.util.Base64.encodeToString(contentKey,android.util.Base64.NO_WRAP)).put("nonce_prefix",android.util.Base64.encodeToString(prefix,android.util.Base64.NO_WRAP)).put("layer2_content_key",android.util.Base64.encodeToString(layer2ContentKey,android.util.Base64.NO_WRAP)).put("layer2_nonce_prefix",android.util.Base64.encodeToString(layer2Prefix,android.util.Base64.NO_WRAP));
+                JSONArray envelopes=new JSONArray();JSONObject selfJwk=SereinDeviceCrypto.publicJwk(pair),selfLayer2Jwk=SereinDeviceCrypto.publicJwk(layer2Pair);byte[] selfKey=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,userId,deviceId,selfJwk),selfLayer2Key=SereinDeviceCrypto.layer2ConversationKey(layer2Pair.getPrivate(),userId,deviceId,userId,deviceId,selfLayer2Jwk);
+                JSONObject ownInner=SereinDeviceCrypto.encryptManifest(selfKey,manifest,transferId,userId,deviceId,contactId,deviceId),own=SereinDeviceCrypto.encryptManifestLayer2(selfLayer2Key,ownInner,transferId,userId,deviceId,contactId,deviceId);envelopes.put(new JSONObject().put("device_id",deviceId).put("crypto_version",2).put("iv",own.getString("iv")).put("ciphertext",own.getString("ciphertext")));Arrays.fill(selfKey,(byte)0);Arrays.fill(selfLayer2Key,(byte)0);
+                for(Peer target:targets){JSONObject inner=SereinDeviceCrypto.encryptManifest(target.conversationKey,manifest,transferId,userId,deviceId,contactId,target.deviceId),wrapped=SereinDeviceCrypto.encryptManifestLayer2(target.layer2Key,inner,transferId,userId,deviceId,contactId,target.deviceId);envelopes.put(new JSONObject().put("device_id",target.deviceId).put("crypto_version",2).put("iv",wrapped.getString("iv")).put("ciphertext",wrapped.getString("ciphertext")));}
+                JSONObject request=new JSONObject().put("id",transferId).put("recipient_user_id",contactId).put("chunk_count",count).put("chunk_crypto_version",2).put("total_ciphertext_bytes",cipherBytes).put("device_envelopes",envelopes);
                 api.createTransfer(request).join();created=true;
                 byte[] buffer=new byte[SereinDeviceCrypto.CHUNK_PLAINTEXT_BYTES];
                 try(RandomAccessFile input=new RandomAccessFile(source,"r")){
                     for(int index=0;index<count;index++){
                         int wanted=(int)Math.min(buffer.length,size-(long)index*buffer.length),read=0;while(read<wanted){int n=input.read(buffer,read,wanted-read);if(n<0)throw new java.io.IOException("Selected file changed while being encrypted.");read+=n;}
-                        byte[] clear=Arrays.copyOf(buffer,wanted);byte[] encrypted=SereinDeviceCrypto.encryptChunk(contentKey,prefix,index,clear,transferId,userId,deviceId,contactId,count);Arrays.fill(clear,(byte)0);
-                        String hash=SereinDeviceCrypto.sha256Hex(encrypted);api.transferChunk("PUT",transferId,index,encrypted,hash).join();Arrays.fill(encrypted,(byte)0);
+                        byte[] clear=Arrays.copyOf(buffer,wanted),encrypted;try{encrypted=SereinDeviceCrypto.encryptChunkLayer2(contentKey,layer2ContentKey,prefix,layer2Prefix,index,clear,transferId,userId,deviceId,contactId,count);}finally{Arrays.fill(clear,(byte)0);}
+                        String hash=SereinDeviceCrypto.sha256Hex(encrypted);try{api.transferChunk("PUT",transferId,index,encrypted,hash).join();}finally{Arrays.fill(encrypted,(byte)0);}
                     }
                     if(input.read()!=-1)throw new java.io.IOException("Selected file changed while being encrypted.");
-                }
+                }finally{Arrays.fill(buffer,(byte)0);}
                 uploaded=true;JSONObject attachment=new JSONObject().put("transfer_id",transferId).put("filename",cleanFilename).put("content_type",safeContentType).put("size",size);sendMessage("📎 "+cleanFilename,attachment).join();
             }catch(Throwable error){if(created&&!uploaded)try{api.abortTransfer(transferId).join();}catch(Throwable ignored){}throw new java.util.concurrent.CompletionException(unwrap(error));}
-            finally{Arrays.fill(contentKey,(byte)0);Arrays.fill(prefix,(byte)0);}
+            finally{Arrays.fill(contentKey,(byte)0);Arrays.fill(prefix,(byte)0);Arrays.fill(layer2ContentKey,(byte)0);Arrays.fill(layer2Prefix,(byte)0);}
         });
     }
 

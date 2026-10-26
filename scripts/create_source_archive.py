@@ -16,8 +16,9 @@ EXCLUDED_COMPONENTS = {
     ".playwright-cli", ".pytest_cache", ".ruff_cache", ".svelte-kit", ".swiftpm", ".tox",
     ".turbo", ".venv", ".vite", ".xcarchive", "Carthage", "DerivedData", "Pods",
     "__pycache__", "build", "coverage", "dist", "node_modules", "out", "target",
-    "xcuserdata",
+    "xcuserdata", ".aws", ".azure", ".docker", ".ssh",
 }
+EXCLUDED_NAMES = {".netrc", ".git-credentials", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "id_ecdsa"}
 EXCLUDED_SUFFIXES = {
     ".a", ".aab", ".apk", ".bak", ".cer", ".class", ".crt", ".db", ".der", ".dylib",
     ".ipa", ".jks", ".keystore", ".log", ".mobileprovision", ".o", ".orig", ".p12",
@@ -36,6 +37,8 @@ def included(path: Path, output: Path) -> bool:
     if any(part in EXCLUDED_COMPONENTS for part in relative.parts):
         return False
     if path.suffix.lower() in EXCLUDED_SUFFIXES:
+        return False
+    if relative.name in EXCLUDED_NAMES:
         return False
     if relative.name == ".env" or (relative.name.startswith(".env.") and relative.name != ".env.example"):
         return False
@@ -66,6 +69,11 @@ def main() -> int:
         return 2
 
     candidates = {ROOT / os.fsdecode(item) for item in listed if item}
+    # The WASM runtime is generated and ignored by Git, but the static web app
+    # cannot run the shared Rust core without this matching deployable asset.
+    wasm_runtime = ROOT / "frontend/web/serein_core.wasm"
+    if wasm_runtime.is_file():
+        candidates.add(wasm_runtime)
     # Markdown is broadly Git-ignored in this project, so explicitly include
     # every safe Markdown file, not only the central docs/ directory.
     candidates.update(ROOT.rglob("*.md"))

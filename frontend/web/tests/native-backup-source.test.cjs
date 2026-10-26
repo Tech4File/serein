@@ -16,6 +16,9 @@ test('Android backup source uses stable account-ID v2 keying and retains v1 rest
   assert.match(codec, /V1_ITERATIONS\s*=\s*600_000/);
   assert.match(codec, /static byte\[\] create\(String accountId/);
   assert.match(codec, /static JSONObject open\(String accountId/);
+  assert.match(codec, /String compression="deflate"/);
+  assert.match(codec, /DeflaterOutputStream/);
+  assert.doesNotMatch(codec, /compressed=clear\.clone\(\)/, 'new Android backups must not fall back to uncompressed data');
 });
 
 test('Android restore prompt is post-auth, one-time, explicit about final skip, and uses system document pickers', () => {

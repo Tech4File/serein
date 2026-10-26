@@ -19,11 +19,15 @@ test('minimum supported OS floors are exercised by native CI rather than only do
   assert.match(workflow, /Launch the built app in an available iOS simulator/);
 });
 
-test('mobile core targets are cross-compiled in CI, with native linking still explicit as a separate gate', () => {
+test('mobile core is cross-checked and native static-library builds are linked into the app targets in CI', () => {
   assert.match(workflow, /aarch64-linux-android/);
   assert.match(workflow, /aarch64-apple-ios/);
   assert.match(workflow, /aarch64-apple-ios-sim/);
   assert.match(workflow, /cargo check --manifest-path crates\/serein-core\/Cargo.toml --target/);
+  assert.match(workflow, /scripts\/build_native_core\.sh android/);
+  assert.match(workflow, /scripts\/build_native_core\.sh ios/);
+  assert.match(gradle, /externalNativeBuild/);
+  assert.match(xcode, /SereinCore\.xcframework in Frameworks/);
 });
 
 test('Android minimum-API instrumentation tests exercise backup, identity binding, and idempotent restore', () => {

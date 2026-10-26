@@ -43,9 +43,12 @@ final class SereinLocalStore {
             let clear = try AES.GCM.open(sealed, using: localKey, authenticating: aad)
             guard let decoded = try JSONSerialization.jsonObject(with: clear) as? [String: Any],
                   decoded["version"] as? Int == 1, decoded["messages"] is [[String: Any]],
-                  decoded["trust"] is [String: String] else { throw StoreError.historyUnavailable }
-            self.root = decoded
-        } else { self.root = ["version": 1, "messages": [[String: Any]](), "trust": [String: String]()] }
+                  decoded["trust"] is [String: Any] else { throw StoreError.historyUnavailable }
+            var migrated = decoded
+            if migrated["ratchets"] == nil { migrated["ratchets"] = [String: String]() }
+            else if !(migrated["ratchets"] is [String: String]) { throw StoreError.historyUnavailable }
+            self.root = migrated
+        } else { self.root = ["version": 1, "messages": [[String: Any]](), "trust": [String: Any](), "ratchets": [String: String]() }
     }
 
     static func delete(accountID: String) throws {
@@ -62,21 +65,39 @@ final class SereinLocalStore {
         (root["messages"] as? [[String: Any]] ?? []).contains { $0["id"] as? String == messageID }
     }
     func previousFingerprint(userID: String, deviceID: String) -> String {
-        (root["trust"] as? [String: String] ?? [:])["\(userID):\(deviceID)"] ?? ""
+        let value = (root["trust"] as? [String: Any] ?? [:])["\(userID):\(deviceID)"]
+        return (value as? String) ?? (value as? [String: Any])?["fingerprint"] as? String ?? ""
     }
-    func trust(userID: String, deviceID: String, fingerprint: String) throws {
-        var values = root["trust"] as? [String: String] ?? [:]
-        values["\(userID):\(deviceID)"] = fingerprint
-        root["trust"] = values
-        try flush()
+    func previousRatchetVersion(userID: String, deviceID: String) -> Int {
+        let value = (root["trust"] as? [String: Any] ?? [:])["\(userID):\(deviceID)"]
+        return (value as? [String: Any])?["ratchet_version"] as? Int ?? 2
     }
-    func save(_ message: [String: Any]) throws {
-        guard let id = message["id"] as? String else { throw StoreError.invalidMessage }
+    func trust(userID: String, deviceID: String, fingerprint: String, ratchetVersion: Int) throws {
+        guard ratchetVersion == 2 || ratchetVersion == 3 else { throw StoreError.invalidMessage }
+        var values = root["trust"] as? [String: Any] ?? [:]
+        values["\(userID):\(deviceID)"] = ["fingerprint": fingerprint, "ratchet_version": ratchetVersion]
+        let previous = root; root["trust"] = values
+        do { try flush() } catch { root = previous; throw error }
+    }
+    func ratchetSnapshot(_ name: String) throws -> Data? {
+        guard !name.isEmpty, name.utf8.count <= 512 else { throw StoreError.invalidMessage }
+        guard let encoded = (root["ratchets"] as? [String: String] ?? [:])[name] else { return nil }
+        guard let data = Data(base64Encoded: encoded), !data.isEmpty, data.count <= 1_048_576 else { throw StoreError.historyUnavailable }
+        return data
+    }
+    func save(_ message: [String: Any]) throws { try save(message, ratchetSnapshots: [:]) }
+    func save(_ message: [String: Any], ratchetSnapshots: [String: Data]) throws {
+        guard let id = message["id"] as? String, ratchetSnapshots.count <= 64 else { throw StoreError.invalidMessage }
+        let previous = root
         var messages = root["messages"] as? [[String: Any]] ?? []
-        messages.removeAll { $0["id"] as? String == id }
-        messages.append(message)
-        root["messages"] = messages
-        try flush()
+        messages.removeAll { $0["id"] as? String == id }; messages.append(message)
+        var ratchets = root["ratchets"] as? [String: String] ?? [:]
+        for (name, snapshot) in ratchetSnapshots {
+            guard !name.isEmpty, name.utf8.count <= 512, !snapshot.isEmpty, snapshot.count <= 1_048_576 else { throw StoreError.invalidMessage }
+            ratchets[name] = snapshot.base64EncodedString()
+        }
+        root["messages"] = messages; root["ratchets"] = ratchets
+        do { try flush() } catch { root = previous; throw error }
     }
 
     func backupMessages() -> [[String: Any]] {

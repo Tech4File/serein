@@ -43,6 +43,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (!verifySharedCore()) return;
         defaultWindowAnimations=getWindow().getAttributes().windowAnimations;
         applyReducedMotion(getSharedPreferences("serein",MODE_PRIVATE).getBoolean("reduce_motion",false));
         api = new SereinApi(this);
@@ -58,6 +59,16 @@ public final class MainActivity extends Activity {
                 syncAccountPreferences();
             }
         });
+    }
+    private boolean verifySharedCore(){
+        try {
+            String appVersion=getPackageManager().getPackageInfo(getPackageName(),0).versionName;
+            if(appVersion==null||!appVersion.equals(SereinCoreNative.version()))throw new IllegalStateException("Shared core/app version mismatch.");
+            return true;
+        }catch(Exception | LinkageError error){
+            Toast.makeText(this,"This build's shared core is unavailable or mismatched. Update the app before continuing.",Toast.LENGTH_LONG).show();
+            finish();return false;
+        }
     }
     private void applyReducedMotion(boolean enabled){if(getWindow()!=null)getWindow().setWindowAnimations(enabled?0:defaultWindowAnimations);}
     @Override protected void onResume(){super.onResume();if(account!=null){syncAccountPreferences();if("Settings".equals(activePage))renderMain("Settings");}}

@@ -101,6 +101,7 @@ if ref.startswith("refs/tags/v"):
         check=True,
         capture_output=True,
         text=True,
+        cwd=ROOT,
     ).stdout.splitlines()
     stable = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
     prior_versions = []

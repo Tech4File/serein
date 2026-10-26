@@ -92,6 +92,20 @@ final class SereinDeviceCrypto {
                                peerDeviceID: String, peerJWK: [String: Any]) throws -> SymmetricKey {
         try deriveDevicePairKey(localUserID: localUserID, localDeviceID: localDeviceID, peerUserID: peerUserID, peerDeviceID: peerDeviceID, peerJWK: peerJWK, layer2: true)
     }
+    func ratchetBootstrapSecret(localUserID: String, localDeviceID: String, peerUserID: String,
+                                peerDeviceID: String, peerJWK: [String: Any], purpose: String) throws -> Data {
+        guard purpose == "layer1" || purpose == "layer2",
+              let xText = peerJWK["x"] as? String, let yText = peerJWK["y"] as? String,
+              let x = Self.base64URLDecode(xText), let y = Self.base64URLDecode(yText), x.count == 32, y.count == 32 else { throw CryptoError.invalidPublicKey }
+        let peer = try P256.KeyAgreement.PublicKey(x963Representation: Data([4]) + x + y)
+        let secret = try privateMaterial.sharedSecret(with: peer)
+        let parties = ["\(localUserID):\(localDeviceID)", "\(peerUserID):\(peerDeviceID)"].sorted()
+        let joined = parties.joined(separator: "|")
+        let salt = Data(SHA256.hash(data: Data("Serein/\(purpose)/symmetric-ratchet-salt/v1|\(joined)".utf8)))
+        let info = Data("Serein/\(purpose)/symmetric-ratchet-bootstrap/v1|\(joined)".utf8)
+        let derived = secret.hkdfDerivedSymmetricKey(using: SHA256.self, salt: salt, sharedInfo: info, outputByteCount: 32)
+        return derived.withUnsafeBytes { Data($0) }
+    }
     private func deriveDevicePairKey(localUserID: String, localDeviceID: String, peerUserID: String,
                                      peerDeviceID: String, peerJWK: [String: Any], layer2: Bool) throws -> SymmetricKey {
         guard let xText = peerJWK["x"] as? String, let yText = peerJWK["y"] as? String,
@@ -166,6 +180,26 @@ final class SereinDeviceCrypto {
         guard let value = try JSONSerialization.jsonObject(with: clear) as? [String: Any] else { throw CryptoError.invalidEnvelope }
         return value
     }
+    func encryptManifestLayer2(_ innerEnvelope: [String: Any], key: SymmetricKey, transferID: String, senderUserID: String,
+                              senderDeviceID: String, recipientUserID: String, recipientDeviceID: String) throws -> [String: String] {
+        guard let innerIV = innerEnvelope["iv"] as? String, let innerCiphertext = innerEnvelope["ciphertext"] as? String else { throw CryptoError.invalidEnvelope }
+        let normalized: [String: Any] = ["version": 1, "algorithm": "AES-256-GCM", "iv": innerIV, "ciphertext": innerCiphertext]
+        let clear = try JSONSerialization.data(withJSONObject: normalized)
+        guard clear.count <= 12_000 else { throw CryptoError.invalidEnvelope }
+        let aad = Self.jsonArray(["serein-transfer-manifest-layer2-v1", transferID, senderUserID, senderDeviceID, recipientUserID, recipientDeviceID])
+        let sealed = try seal(clear, key: key, aad: aad)
+        return ["version": "2", "algorithm": "AES-256-GCM-LAYER2", "iv": sealed["iv"] ?? "", "ciphertext": sealed["ciphertext"] ?? ""]
+    }
+    func decryptManifestLayer2(iv: String, ciphertext: String, key: SymmetricKey, transferID: String, senderUserID: String,
+                               senderDeviceID: String, recipientUserID: String, recipientDeviceID: String) throws -> [String: Any] {
+        guard iv.utf8.count <= 24, ciphertext.utf8.count <= 16_024 else { throw CryptoError.invalidEnvelope }
+        let aad = Self.jsonArray(["serein-transfer-manifest-layer2-v1", transferID, senderUserID, senderDeviceID, recipientUserID, recipientDeviceID])
+        let clear = try open(iv: iv, ciphertext: ciphertext, key: key, aad: aad)
+        guard let envelope = try JSONSerialization.jsonObject(with: clear) as? [String: Any],
+              envelope["version"] as? Int == 1, envelope["algorithm"] as? String == "AES-256-GCM",
+              envelope["iv"] is String, envelope["ciphertext"] is String else { throw CryptoError.invalidEnvelope }
+        return envelope
+    }
 
     static func randomKey() -> SymmetricKey { SymmetricKey(size: .bits256) }
     static func randomData(count: Int) throws -> Data {
@@ -180,15 +214,40 @@ final class SereinDeviceCrypto {
     static func encryptChunk(_ clear: Data, key: SymmetricKey, noncePrefix: Data, index: Int, count: Int,
                              transferID: String, senderUserID: String, senderDeviceID: String, recipientUserID: String) throws -> Data {
         let aad = chunkAAD(transferID: transferID, senderUserID: senderUserID, senderDeviceID: senderDeviceID, recipientUserID: recipientUserID, index: index, count: count)
-        let nonce = try chunkNonce(prefix: noncePrefix, index: index)
-        let sealed = try AES.GCM.seal(clear, using: key, nonce: nonce, authenticating: aad)
-        return sealed.ciphertext + sealed.tag
+        return try encryptChunkLayer(clear, key: key, noncePrefix: noncePrefix, index: index, aad: aad)
     }
 
     static func decryptChunk(_ ciphertext: Data, key: SymmetricKey, noncePrefix: Data, index: Int, count: Int,
                              transferID: String, senderUserID: String, senderDeviceID: String, recipientUserID: String) throws -> Data {
-        guard ciphertext.count >= 16 else { throw CryptoError.invalidEnvelope }
         let aad = chunkAAD(transferID: transferID, senderUserID: senderUserID, senderDeviceID: senderDeviceID, recipientUserID: recipientUserID, index: index, count: count)
+        return try decryptChunkLayer(ciphertext, key: key, noncePrefix: noncePrefix, index: index, aad: aad)
+    }
+
+    static func encryptChunkLayer2(_ clear: Data, layer1Key: SymmetricKey, layer2Key: SymmetricKey, layer1Prefix: Data, layer2Prefix: Data, index: Int, count: Int,
+                                   transferID: String, senderUserID: String, senderDeviceID: String, recipientUserID: String) throws -> Data {
+        let aad1 = chunkLayerAAD(layer: "layer1", transferID: transferID, senderUserID: senderUserID, senderDeviceID: senderDeviceID, recipientUserID: recipientUserID, index: index, count: count)
+        let aad2 = chunkLayerAAD(layer: "layer2", transferID: transferID, senderUserID: senderUserID, senderDeviceID: senderDeviceID, recipientUserID: recipientUserID, index: index, count: count)
+        var inner = try encryptChunkLayer(clear, key: layer1Key, noncePrefix: layer1Prefix, index: index, aad: aad1)
+        defer { inner.resetBytes(in: 0..<inner.count) }
+        return try encryptChunkLayer(inner, key: layer2Key, noncePrefix: layer2Prefix, index: index, aad: aad2)
+    }
+
+    static func decryptChunkLayer2(_ ciphertext: Data, layer1Key: SymmetricKey, layer2Key: SymmetricKey, layer1Prefix: Data, layer2Prefix: Data, index: Int, count: Int,
+                                   transferID: String, senderUserID: String, senderDeviceID: String, recipientUserID: String) throws -> Data {
+        let aad1 = chunkLayerAAD(layer: "layer1", transferID: transferID, senderUserID: senderUserID, senderDeviceID: senderDeviceID, recipientUserID: recipientUserID, index: index, count: count)
+        let aad2 = chunkLayerAAD(layer: "layer2", transferID: transferID, senderUserID: senderUserID, senderDeviceID: senderDeviceID, recipientUserID: recipientUserID, index: index, count: count)
+        var inner = try decryptChunkLayer(ciphertext, key: layer2Key, noncePrefix: layer2Prefix, index: index, aad: aad2)
+        defer { inner.resetBytes(in: 0..<inner.count) }
+        return try decryptChunkLayer(inner, key: layer1Key, noncePrefix: layer1Prefix, index: index, aad: aad1)
+    }
+
+    private static func encryptChunkLayer(_ clear: Data, key: SymmetricKey, noncePrefix: Data, index: Int, aad: Data) throws -> Data {
+        let nonce = try chunkNonce(prefix: noncePrefix, index: index)
+        let sealed = try AES.GCM.seal(clear, using: key, nonce: nonce, authenticating: aad)
+        return sealed.ciphertext + sealed.tag
+    }
+    private static func decryptChunkLayer(_ ciphertext: Data, key: SymmetricKey, noncePrefix: Data, index: Int, aad: Data) throws -> Data {
+        guard ciphertext.count >= 16 else { throw CryptoError.invalidEnvelope }
         let nonce = try chunkNonce(prefix: noncePrefix, index: index)
         let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ciphertext.dropLast(16), tag: ciphertext.suffix(16))
         return try AES.GCM.open(box, using: key, authenticating: aad)
@@ -203,6 +262,10 @@ final class SereinDeviceCrypto {
     }
     static func chunkAAD(transferID: String, senderUserID: String, senderDeviceID: String, recipientUserID: String, index: Int, count: Int) -> Data {
         jsonArray(["serein-transfer-chunk-v1", transferID, senderUserID, senderDeviceID, recipientUserID, index, count])
+    }
+    static func chunkLayerAAD(layer: String, transferID: String, senderUserID: String, senderDeviceID: String, recipientUserID: String, index: Int, count: Int) -> Data {
+        precondition((layer == "layer1" || layer == "layer2") && index >= 0 && count > 0 && index < count)
+        jsonArray(["serein-transfer-chunk-\(layer)-v2", transferID, senderUserID, senderDeviceID, recipientUserID, index, count])
     }
 
     private func seal(_ clear: Data, key: SymmetricKey, aad: Data) throws -> [String: String] {

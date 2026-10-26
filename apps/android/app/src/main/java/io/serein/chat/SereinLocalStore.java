@@ -28,7 +28,7 @@ final class SereinLocalStore {
     static boolean deleteForAccount(Context context,String accountId){try{String id=UUID.fromString(accountId).toString();File file=new File(context.getApplicationContext().getFilesDir(),"serein-history-"+id+".bin");return !file.exists()||file.delete();}catch(Exception ignored){return false;}}
     private static final long MAX_LOCAL_HISTORY_BYTES = 64L * 1024 * 1024;
     private synchronized void load() throws Exception {
-        if (!file.isFile()) { root = new JSONObject().put("version", 1).put("messages", new JSONArray()).put("trust", new JSONObject()); return; }
+        if (!file.isFile()) { root = new JSONObject().put("version", 1).put("messages", new JSONArray()).put("trust", new JSONObject()).put("ratchets", new JSONObject()); return; }
         byte[] packed = new byte[(int) Math.min(file.length(), MAX_LOCAL_HISTORY_BYTES)];
         if (file.length() > MAX_LOCAL_HISTORY_BYTES) throw new IllegalStateException("Local message history exceeds its safe size limit.");
         try (FileInputStream in = new FileInputStream(file)) { int at=0,n; while ((n=in.read(packed,at,packed.length-at))>0) at+=n; if(at!=packed.length)throw new java.io.IOException("Local message history was truncated."); }
@@ -36,6 +36,8 @@ final class SereinLocalStore {
         try { root = new JSONObject(new String(clear, StandardCharsets.UTF_8)); }
         finally { java.util.Arrays.fill(clear,(byte)0); java.util.Arrays.fill(packed,(byte)0); }
         if (root.optInt("version") != 1 || !(root.opt("messages") instanceof JSONArray) || !(root.opt("trust") instanceof JSONObject)) throw new IllegalStateException("Local message history format is unsupported.");
+        if (!root.has("ratchets")) root.put("ratchets", new JSONObject());
+        else if (!(root.opt("ratchets") instanceof JSONObject)) throw new IllegalStateException("Stored ratchet state format is unsupported; refusing to reset sessions.");
     }
     synchronized JSONArray messages(String conversationId) throws Exception {
         JSONArray result = new JSONArray(), all = root.getJSONArray("messages");
@@ -50,6 +52,30 @@ final class SereinLocalStore {
         for(int i=0;i<all.length();i++){JSONObject row=all.optJSONObject(i);if(row!=null&&!id.equals(row.optString("id")))next.put(row);}
         next.put(new JSONObject(message.toString()));
         root.put("messages",next);flush();
+    }
+    synchronized byte[] ratchetSnapshot(String name) throws Exception {
+        if (name == null || name.isEmpty() || name.length() > 512) throw new IllegalArgumentException("Invalid ratchet snapshot key.");
+        JSONObject ratchets=root.getJSONObject("ratchets");if(!ratchets.has(name))return null;
+        Object raw=ratchets.opt(name);if(!(raw instanceof String)||((String)raw).isEmpty()||((String)raw).length()>1_398_104)throw new IllegalStateException("Stored ratchet snapshot encoding is invalid; refusing to reset the session.");
+        String encoded=(String)raw;byte[] snapshot=android.util.Base64.decode(encoded,android.util.Base64.NO_WRAP);
+        if(snapshot.length==0||snapshot.length>1024*1024||!android.util.Base64.encodeToString(snapshot,android.util.Base64.NO_WRAP).equals(encoded)){java.util.Arrays.fill(snapshot,(byte)0);throw new IllegalStateException("Stored ratchet snapshot exceeds its safety limit or is non-canonical.");}
+        return snapshot;
+    }
+    synchronized void saveRatchetMessage(JSONObject message, java.util.Map<String, byte[]> snapshots) throws Exception {
+        if (snapshots == null || snapshots.size() > 64) throw new IllegalArgumentException("Invalid ratchet snapshot batch.");
+        JSONObject previous = new JSONObject(root.toString());
+        try {
+            JSONArray all = root.getJSONArray("messages"), next = new JSONArray(); String id = message.getString("id");
+            for (int i=0;i<all.length();i++) { JSONObject row=all.optJSONObject(i); if(row!=null&&!id.equals(row.optString("id"))) next.put(row); }
+            next.put(new JSONObject(message.toString())); root.put("messages", next);
+            JSONObject ratchets=root.getJSONObject("ratchets");
+            for (java.util.Map.Entry<String,byte[]> item:snapshots.entrySet()) {
+                String name=item.getKey();byte[] snapshot=item.getValue();
+                if(name==null||name.isEmpty()||name.length()>512||snapshot==null||snapshot.length==0||snapshot.length>1024*1024)throw new IllegalArgumentException("Invalid ratchet snapshot.");
+                ratchets.put(name,android.util.Base64.encodeToString(snapshot,android.util.Base64.NO_WRAP));
+            }
+            flush();
+        } catch (Exception error) { root=previous; throw error; }
     }
     synchronized JSONArray backupMessages() throws Exception {
         JSONArray source=root.getJSONArray("messages"), copy=new JSONArray();
@@ -75,10 +101,16 @@ final class SereinLocalStore {
         root.put("messages",merged);flush();return added;
     }
     synchronized String trustedFingerprint(String peerUserId,String peerDeviceId) {
-        return root.optJSONObject("trust").optString(peerUserId+":"+peerDeviceId,"");
+        Object value=root.optJSONObject("trust").opt(peerUserId+":"+peerDeviceId);
+        return value instanceof JSONObject?((JSONObject)value).optString("fingerprint",""):value instanceof String?(String)value:"";
     }
-    synchronized void trustFingerprint(String peerUserId,String peerDeviceId,String fingerprint) throws Exception {
-        root.getJSONObject("trust").put(peerUserId+":"+peerDeviceId,fingerprint);flush();
+    synchronized int trustedRatchetVersion(String peerUserId,String peerDeviceId) {
+        Object value=root.optJSONObject("trust").opt(peerUserId+":"+peerDeviceId);
+        return value instanceof JSONObject?((JSONObject)value).optInt("ratchet_version",2):2;
+    }
+    synchronized void trustFingerprint(String peerUserId,String peerDeviceId,String fingerprint,int ratchetVersion) throws Exception {
+        if(ratchetVersion!=2&&ratchetVersion!=3)throw new IllegalArgumentException("Unsupported trusted ratchet capability.");
+        JSONObject previous=new JSONObject(root.toString());try{root.getJSONObject("trust").put(peerUserId+":"+peerDeviceId,new JSONObject().put("fingerprint",fingerprint).put("ratchet_version",ratchetVersion));flush();}catch(Exception error){root=previous;throw error;}
     }
     private void flush() throws Exception {
         byte[] clear=root.toString().getBytes(StandardCharsets.UTF_8);

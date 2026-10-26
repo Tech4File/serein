@@ -18,6 +18,11 @@ jobs:
           python-version: '3.12'
       - name: Cross-check VERSION, Cargo manifests, Android/iOS settings, and pushed release tag
         run: python3 scripts/check_versions.py
+      - name: Validate repository automation scripts
+        run: |
+          python3 -m py_compile scripts/*.py
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          bash -n scripts/build_native_core.sh scripts/test_core_ffi.sh
 
   web:
     needs: version-consistency
@@ -62,6 +67,8 @@ jobs:
       - run: cargo check --manifest-path backend/Cargo.toml
       - run: cargo test --manifest-path backend/Cargo.toml
       - run: cargo test --manifest-path Cargo.toml -p serein-core
+      - name: Link and exercise the shared core C ABI
+        run: scripts/test_core_ffi.sh
       - run: cargo test --manifest-path Cargo.toml -p serein-moq-engine
       # The manual auth smoke test needs two real inboxes and live mail-provider credentials.
       # Keep it out of CI so test messages and secrets are never sent to a fake endpoint.
@@ -94,6 +101,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/sync-version
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -106,8 +116,10 @@ jobs:
           # The upstream v3 default includes the retired `tools` package.
           # Command-line tools are installed by the action; install only adb here.
           packages: platform-tools
-      - name: Install Android SDK targets
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'platform-tools'
+      - name: Install Android SDK, NDK and CMake
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'platform-tools' 'ndk;27.2.12479018' 'cmake;3.22.1'
+      - name: Build native Rust crypto core for Android ABIs
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018" scripts/build_native_core.sh android
       - name: Build APKs
         working-directory: apps/android
         run: gradle --no-daemon :app:assembleDebug :app:assembleRelease
@@ -131,6 +143,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/sync-version
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -141,8 +156,8 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
-      - name: Install compile SDK and build tools
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'platform-tools'
+      - name: Install Android compile SDK, NDK and CMake
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'platform-tools' 'ndk;27.2.12479018' 'cmake;3.22.1'
       - name: Run native backup/storage tests on API ${{ matrix.api-level }}
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -170,6 +185,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/sync-version
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
       - name: Select stable Xcode and report runner architecture
         run: |
           set -euo pipefail
@@ -179,6 +197,20 @@ jobs:
           uname -a
           xcodebuild -version
           xcodebuild -showsdks
+      - name: Install iOS platform and simulator components
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          # macOS 15 runner images prune older Xcode platform tools; install the
+          # iOS SDK/runtime explicitly so generic iOS Simulator builds do not
+          # fail or crash while resolving a missing platform.
+          sudo xcodebuild -downloadPlatform iOS
+          xcodebuild -showsdks | tee "$RUNNER_TEMP/ios-sdks.log"
+          grep -Eiq 'iOS Simulator' "$RUNNER_TEMP/ios-sdks.log"
+          xcrun simctl list runtimes | tee "$RUNNER_TEMP/ios-runtimes.log"
+          grep -Eiq 'iOS.*\(available\)' "$RUNNER_TEMP/ios-runtimes.log"
+      - name: Build iOS Rust core XCFramework
+        run: scripts/build_native_core.sh ios
       - name: Preflight Xcode project resolution
         run: |
           set -euo pipefail

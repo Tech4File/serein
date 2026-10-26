@@ -1,6 +1,10 @@
-//! First-party, dependency-free Serein domain primitives shared by the Rust API,
-//! WebAssembly clients, and native FFI adapters. Cryptographic protocols do not
-//! belong here until independently reviewed and selected.
+//! Shared Serein core for Rust services, WebAssembly clients, and native FFI.
+//! It includes validation primitives and a development-stage symmetric message
+//! ratchet. The ratchet is not yet a complete Double Ratchet and is not an
+//! independently reviewed production security claim.
+
+pub mod double_ratchet;
+pub mod ratchet;
 
 use std::{slice, str};
 
@@ -194,7 +198,7 @@ fn base64_value(byte: u8) -> Option<u8> {
 /// Accept canonical padded RFC 4648 Base64 and return the decoded byte length.
 pub fn canonical_base64_len(value: &str) -> Option<usize> {
     let bytes=value.as_bytes();
-    if bytes.is_empty() || bytes.len()%4!=0 { return None; }
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) { return None; }
     let padding=if bytes.ends_with(b"=="){2}else if bytes.ends_with(b"="){1}else{0};
     let data_len=bytes.len().checked_sub(padding)?;
     if data_len==0 { return None; }
@@ -224,6 +228,8 @@ pub extern "C" fn serein_core_max_message_characters() -> u32 { MAX_MESSAGE_CHAR
 pub extern "C" fn serein_core_message_warning_characters() -> u32 { MESSAGE_COUNTER_WARNING_CHARACTERS as u32 }
 /// Count Unicode scalar values in UTF-8 text. Returns `u32::MAX` for invalid input.
 /// A null pointer is accepted only for an empty string.
+/// # Safety
+/// If `len` is nonzero, `data` must be readable for `len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn serein_core_message_character_count(data: *const u8, len: usize) -> u32 {
     if data.is_null() { return if len == 0 { 0 } else { u32::MAX }; }
@@ -231,18 +237,24 @@ pub unsafe extern "C" fn serein_core_message_character_count(data: *const u8, le
     let bytes = unsafe { slice::from_raw_parts(data, len) };
     str::from_utf8(bytes).map(|value| message_character_count(value) as u32).unwrap_or(u32::MAX)
 }
+/// # Safety
+/// If `data` is non-null and `len` is nonzero, it must be readable for `len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn serein_core_validate_username(data: *const u8, len: usize) -> u8 {
     if data.is_null() || len>32 { return 0; }
     let bytes=unsafe { slice::from_raw_parts(data,len) };
     str::from_utf8(bytes).ok().filter(|s|valid_username(s)).map_or(0,|_|1)
 }
+/// # Safety
+/// If `data` is non-null and `len` is nonzero, it must be readable for `len` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn serein_core_validate_email(data: *const u8, len: usize) -> u8 {
     if data.is_null() || len>254 { return 0; }
     let bytes=unsafe { slice::from_raw_parts(data,len) };
     str::from_utf8(bytes).ok().filter(|s|valid_email(s)).map_or(0,|_|1)
 }
+/// # Safety
+/// If non-null, `iv`/`cipher` must be readable for their respective lengths.
 #[no_mangle]
 pub unsafe extern "C" fn serein_core_validate_ciphertext(iv: *const u8, iv_len: usize, cipher: *const u8, cipher_len: usize) -> u8 {
     if iv.is_null() || cipher.is_null() || iv_len>24 || cipher_len>MAX_CIPHERTEXT_CHARS { return 0; }
@@ -262,9 +274,16 @@ pub extern "C" fn serein_core_alloc(len: usize) -> *mut u8 {
     if len==0 { return std::ptr::null_mut(); }
     Box::into_raw(vec![0u8;len].into_boxed_slice()) as *mut u8
 }
+/// Deallocate a buffer previously returned by `serein_core_alloc`.
+/// # Safety
+/// A non-null pointer must be the live allocation returned for this exact `len`.
 #[no_mangle]
 pub unsafe extern "C" fn serein_core_dealloc(data: *mut u8, len: usize) {
-    if !data.is_null() && len>0 { unsafe { drop(Box::from_raw(slice::from_raw_parts_mut(data,len))); } }
+    if !data.is_null() && len>0 {
+        let bytes = unsafe { slice::from_raw_parts_mut(data,len) };
+        bytes.fill(0);
+        unsafe { drop(Box::from_raw(bytes)); }
+    }
 }
 
 #[cfg(test)]

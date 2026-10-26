@@ -106,9 +106,10 @@ final class SereinApi {
     CompletableFuture<JSONObject> deviceKeyDirectory(String contactId) {
         return future("GET", "/api/v1/contacts/" + contactId + "/device-keys", null).thenApply(value -> (JSONObject) value);
     }
-    CompletableFuture<JSONObject> enrollDeviceKey(JSONObject publicKey, JSONObject layer2PublicKey) {
+    CompletableFuture<JSONObject> enrollDeviceKey(JSONObject publicKey, JSONObject layer2PublicKey, int ratchetVersion) {
+        if (ratchetVersion != 2 && ratchetVersion != 3) throw new IllegalArgumentException("Unsupported ratchet capability.");
         JSONObject body = json("algorithm", "ECDH-P256");
-        try { body.put("public_key", publicKey); body.put("layer2_public_key", layer2PublicKey); } catch (Exception ignored) { }
+        try { body.put("public_key", publicKey); body.put("layer2_public_key", layer2PublicKey); body.put("ratchet_version", ratchetVersion); } catch (Exception ignored) { }
         return future("PUT", "/api/v1/device-key", body).thenApply(value -> (JSONObject) value);
     }
     CompletableFuture<Object> historyPage(String afterCreatedAt, String afterId) {

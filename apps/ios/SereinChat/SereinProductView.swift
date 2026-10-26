@@ -268,6 +268,7 @@ private struct SereinNativeConversation: View {
     @State private var draft = ""
     @State private var showKeys = false
     @State private var showFilePicker = false
+    @State private var showEmojiPicker = false
     @State private var pendingTrust: SereinPeerKey?
     @State private var fileToOpen: OpenAttachment?
 
@@ -314,10 +315,25 @@ private struct SereinNativeConversation: View {
                     }.padding(.vertical, 8)
                 }.onChange(of: engine.messages.count) { _ in if let last = engine.messages.last { proxy.scrollTo(last.id, anchor: .bottom) } }
             }
-            HStack(alignment: .bottom, spacing: 8) {
-                Button { showFilePicker = true } label: { Image(systemName: "paperclip").font(.system(size: 19, relativeTo: .body)).frame(width: 38, height: 40) }
-                    .buttonStyle(.bordered).disabled(!engine.ready || contact.isDeleted || engine.archived)
-                TextField("Write an encrypted message…", text: $draft).textFieldStyle(.roundedBorder).disabled(!engine.ready || contact.isDeleted || engine.archived)
+            if showEmojiPicker {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack { Text("Emojis").font(.system(size: 12, weight: .semibold, relativeTo: .body)); Spacer(); Button("Choose GIF or image") { showFilePicker = true }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 8), spacing: 5) {
+                        ForEach(Self.commonEmojis, id: \.self) { emoji in
+                            Button { insertEmoji(emoji) } label: { Text(emoji).font(.system(size: 23)).frame(maxWidth: .infinity).frame(height: 34).contentShape(Rectangle()) }
+                                .buttonStyle(.plain).accessibilityLabel("Insert \(emoji)")
+                        }
+                    }.frame(maxHeight: 128).clipped()
+                    Text("Keyboard emojis stay in the message. Pasted GIFs and images use encrypted attachments.").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                }.padding(9).background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+            }
+            HStack(alignment: .bottom, spacing: 6) {
+                Button { showEmojiPicker.toggle() } label: { Image(systemName: "face.smiling").font(.system(size: 19, relativeTo: .body)).frame(width: 36, height: 40) }
+                    .buttonStyle(.bordered).accessibilityLabel("Choose an emoji").accessibilityHint("Insert an emoji or choose a GIF file").disabled(!engine.ready || contact.isDeleted || engine.archived)
+                Button { showFilePicker = true } label: { Image(systemName: "paperclip").font(.system(size: 18, relativeTo: .body)).frame(width: 36, height: 40) }
+                    .buttonStyle(.bordered).accessibilityLabel("Attach a file, GIF, or image").disabled(!engine.ready || contact.isDeleted || engine.archived)
+                SereinEmojiComposer(text: $draft, isEnabled: engine.ready && !contact.isDeleted && !engine.archived, onPastedFile: sendPastedImage)
+                    .frame(height: 40)
                 Button { let value = draft; draft = ""; Task { await engine.sendText(value) } } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 28, relativeTo: .body)) }
                     .disabled(!engine.ready || contact.isDeleted || engine.archived || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -344,10 +360,11 @@ private struct SereinNativeConversation: View {
                         ForEach(engine.peerKeys) { peer in
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(peer.name).font(.system(size: 12, weight: .semibold, relativeTo: .body))
+                                Text("Message capability: \(peer.ratchetVersion >= 3 ? "experimental ratchet v3" : "two-layer static v2")").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
                                 Text(peer.fingerprint.groupedFingerprint).font(.system(size: 10, design: .monospaced, relativeTo: .body)).textSelection(.enabled)
-                                Text(peer.trusted ? "Verified on this iPhone" : (peer.previousFingerprint.isEmpty ? "Not verified" : "Key changed · verify again"))
+                                Text(peer.trusted ? "Verified on this iPhone" : (peer.previousFingerprint.isEmpty ? "Not verified" : (peer.previousFingerprint != peer.fingerprint ? "Key changed · verify again" : "Capability changed · verify again")))
                                     .font(.system(size: 10, relativeTo: .body)).foregroundStyle(peer.trusted ? SereinPalette.green : .orange)
-                                if !peer.trusted { Button("I compared this fingerprint") { pendingTrust = peer }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
+                                if !peer.trusted { Button("I compared this fingerprint and capability") { pendingTrust = peer }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
                             }.padding(.vertical, 4)
                         }
                     }
@@ -357,8 +374,9 @@ private struct SereinNativeConversation: View {
         }
         .alert(item: $pendingTrust) { peer in
             let changed = !peer.previousFingerprint.isEmpty && peer.previousFingerprint != peer.fingerprint
-            return Alert(title: Text(changed ? "Device key changed" : "Trust this device?"),
-                         message: Text("Verify this complete fingerprint with \(contact.display_name) through a separate trusted channel before continuing.\n\n\(peer.fingerprint.groupedFingerprint)" + (changed ? "\n\nPreviously trusted: \(peer.previousFingerprint.groupedFingerprint)" : "")),
+            let capabilityChanged = peer.previousRatchetVersion != peer.ratchetVersion
+            return Alert(title: Text(changed ? "Device key changed" : (capabilityChanged ? "Message capability changed" : "Trust this device?")),
+                         message: Text("Verify the complete fingerprint and reported capability with \(contact.display_name) through a separate trusted channel before continuing.\n\nCapability: \(peer.ratchetVersion >= 3 ? "experimental ratchet v3" : "two-layer static v2")\n\n\(peer.fingerprint.groupedFingerprint)" + (changed ? "\n\nPreviously trusted: \(peer.previousFingerprint.groupedFingerprint)" : "") + (capabilityChanged ? "\n\nRatchet capability changed from v\(peer.previousRatchetVersion) to v\(peer.ratchetVersion)." : "")),
                          primaryButton: .default(Text("Trust after comparison")) { do { try engine.trust(peer) } catch { } },
                          secondaryButton: .cancel())
         }
@@ -372,10 +390,85 @@ private struct SereinNativeConversation: View {
         .sheet(item: $fileToOpen) { item in SereinDocumentOpenSheet(url: item.url) { fileToOpen = nil } }
     }
 
+    private static let commonEmojis = ["😀","😃","😄","😁","😆","😅","😂","🙂","🙃","😉","😊","😍","🥰","😘","😋","😎","🤔","🥳","😴","😭","😡","🤗","🤩","🤝","👋","🙌","👏","👍","👎","👌","✌️","🤞","🙏","💪","❤️","🧡","💛","💚","💙","💜","🖤","🤍","💔","💕","💖","💯","🔥","✨","🎉","🎂","☕","🍕","🌈","🌻","🐱","🐶","🦋","🌍","🚀","🎵"]
+    private func insertEmoji(_ emoji: String) { draft.append(emoji) }
+    private func sendPastedImage(_ url: URL) {
+        let filename = url.lastPathComponent
+        let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? (url.pathExtension.lowercased() == "gif" ? "image/gif" : "application/octet-stream")
+        Task { defer { try? FileManager.default.removeItem(at: url) }; await engine.sendFile(url: url, filename: filename, contentType: mime) }
+    }
+
     private func formatBytes(_ size: Int64) -> String {
         if size < 1024 { return "\(size) B" }
         if size < 1024 * 1024 { return String(format: "%.1f KB", Double(size) / 1024) }
         return String(format: "%.1f MB", Double(size) / 1048576)
+    }
+}
+
+private struct SereinEmojiComposer: UIViewRepresentable {
+    @Binding var text: String
+    let isEnabled: Bool
+    let onPastedFile: (URL) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIView(context: Context) -> SereinGIFTextView {
+        let view = SereinGIFTextView()
+        view.delegate = context.coordinator
+        view.onPastedFile = onPastedFile
+        view.font = UIFont.preferredFont(forTextStyle: .body)
+        view.textContainerInset = UIEdgeInsets(top: 8, left: 7, bottom: 8, right: 7)
+        view.textContainer.lineFragmentPadding = 0
+        view.layer.cornerRadius = 8
+        view.layer.borderWidth = 0.7
+        view.layer.borderColor = UIColor.separator.cgColor
+        view.backgroundColor = .secondarySystemBackground
+        view.isScrollEnabled = true
+        view.accessibilityLabel = "Message, including emoji"
+        view.accessibilityHint = "Emoji keyboard input is sent as text. Pasted GIFs and images are sent as encrypted attachments."
+        return view
+    }
+    func updateUIView(_ view: SereinGIFTextView, context: Context) {
+        context.coordinator.parent = self
+        if view.text != text { view.text = text }
+        view.isEditable = isEnabled
+        view.isSelectable = true
+        view.onPastedFile = onPastedFile
+    }
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: SereinEmojiComposer
+        init(_ parent: SereinEmojiComposer) { self.parent = parent }
+        func textViewDidChange(_ textView: UITextView) { parent.text = textView.text }
+    }
+}
+
+private final class SereinGIFTextView: UITextView {
+    var onPastedFile: ((URL) -> Void)?
+    override func paste(_ sender: Any?) {
+        let providers = UIPasteboard.general.itemProviders
+        let gif = providers.first { $0.hasItemConformingToTypeIdentifier(UTType.gif.identifier) }
+        let image = gif ?? providers.first { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
+        guard let provider = image else { super.paste(sender); return }
+        let type = gif != nil ? UTType.gif.identifier : UTType.image.identifier
+        provider.loadFileRepresentation(forTypeIdentifier: type) { [weak self] source, _ in
+            if let source {
+                let ext = gif != nil ? "gif" : (source.pathExtension.isEmpty ? "png" : source.pathExtension)
+                let staged = FileManager.default.temporaryDirectory.appendingPathComponent("serein-keyboard-\(UUID().uuidString).\(ext)")
+                do {
+                    try FileManager.default.copyItem(at: source, to: staged)
+                    DispatchQueue.main.async { guard let self else { try? FileManager.default.removeItem(at: staged); return }; self.onPastedFile?(staged) }
+                    return
+                } catch { }
+            }
+            provider.loadDataRepresentation(forTypeIdentifier: type) { [weak self] data, _ in
+                guard let data, data.count <= 64 * 1024 * 1024 else { return }
+                let ext = gif != nil ? "gif" : "png"
+                let staged = FileManager.default.temporaryDirectory.appendingPathComponent("serein-keyboard-\(UUID().uuidString).\(ext)")
+                do {
+                    try data.write(to: staged, options: .atomic)
+                    DispatchQueue.main.async { guard let self else { try? FileManager.default.removeItem(at: staged); return }; self.onPastedFile?(staged) }
+                } catch { }
+            }
+        }
     }
 }
 
@@ -504,7 +597,7 @@ private struct SereinNativeSettings: View {
                     ForEach(api.devices) { device in HStack { VStack(alignment: .leading, spacing: 3) { Text(device.name).font(.system(size: 12, weight: .semibold, relativeTo: .body)); Text(device.online == true ? "Online" : (device.last_seen_at ?? "Last active unavailable")).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Spacer(); if device.current == true { Text("THIS DEVICE").font(.system(size: 10, weight: .bold, relativeTo: .body)).foregroundStyle(SereinPalette.green) } else { Button("Revoke", role: .destructive) { Task { await api.revoke(device) } }.font(.system(size: 10, relativeTo: .body)) } } }
                     Button("Revoke other devices", role: .destructive) { confirmRevokeOthers = true }
                 }
-                Section("Security status") { Text("Web and native chat use separate Layer 1/Layer 2 per-device P-256 ECDH key pairs, HKDF-SHA256, and nested AES-GCM after combined local fingerprint verification. Native private keys use Secure Enclave when available and otherwise Keychain-protected CryptoKit keys; local history uses a device-only Keychain key. This implementation has not been independently reviewed and does not provide forward secrecy, automatic key rotation/recovery, or background message delivery. Use test data only.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery is not configured.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
+                Section("Security status") { Text("Web and native chat use separate Layer 1/Layer 2 per-device P-256 ECDH key pairs, HKDF-SHA256, and nested AES-GCM after combined local fingerprint verification. Native private keys use Secure Enclave when available and otherwise Keychain-protected CryptoKit keys; local history uses a device-only Keychain key. Capability-3 messages use an experimental symmetric ratchet with static P-256 bootstrap; there are no DH ratchet turns or forward secrecy. This implementation has not been independently reviewed and does not provide automatic key rotation/recovery or background message delivery. Use test data only.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery is not configured.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
                 Section("Danger zone") { Text("Account deletion removes server records, sessions, device keys, and this iPhone’s account-scoped local history. Contacts retain a read-only archived chat. Legacy downloads in shared Serein/Downloads cannot yet be attributed to this account and may remain; newer downloads are account-scoped.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Button("Permanently delete account", role: .destructive) { showDeleteAccount = true }.sheet(isPresented: $showDeleteAccount) { SereinDeleteAccountSheet(api: api) } }
                 Section { Button("Sign out", role: .destructive) { Task { _ = await api.signOut() } } }
             }.listStyle(.insetGrouped).navigationTitle("Settings")

@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { webcrypto, createHash } = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 
 global.crypto = webcrypto;
 global.window = {};
@@ -107,6 +109,24 @@ test('legacy Layer 1-only queued messages remain readable after Layer 2 rollout'
   assert.equal(await deviceCrypto.decryptMessage(layer1Bob, layer2Bob, envelope, metadata), JSON.stringify({ version: 1, text: 'legacy message' }));
 });
 
+test('static-P256 bootstrap secrets agree per participant and are domain-separated by layer', async () => {
+  const alice = await generateDeviceBundle();
+  const bob = await generateDeviceBundle();
+  const bootstrap = async (own, ownUser, ownDevice, peer, peerUser, peerDevice, layer2 = false) =>
+    deviceCrypto.deriveRatchetBootstrapSecret(
+      layer2 ? own.layer2PrivateKey : own.privateKey, ownUser, ownDevice, peerUser, peerDevice,
+      layer2 ? peer.layer2PublicJwk : peer.publicJwk, layer2 ? 'layer2' : 'layer1',
+    );
+  const a1 = await bootstrap(alice, 'account-a', 'device-a', bob, 'account-b', 'device-b');
+  const b1 = await bootstrap(bob, 'account-b', 'device-b', alice, 'account-a', 'device-a');
+  const a2 = await bootstrap(alice, 'account-a', 'device-a', bob, 'account-b', 'device-b', true);
+  const b2 = await bootstrap(bob, 'account-b', 'device-b', alice, 'account-a', 'device-a', true);
+  assert.deepEqual(a1, b1);
+  assert.deepEqual(a2, b2);
+  assert.notDeepEqual(a1, a2);
+  a1.fill(0); b1.fill(0); a2.fill(0); b2.fill(0);
+});
+
 test('independent Layer 2 keys match only for the same device pair and are distinct from Layer 1', async () => {
   const alice = await generateDeviceBundle();
   const bob = await generateDeviceBundle();
@@ -130,6 +150,13 @@ test('encrypted transfer manifests and chunk data bind identity, position, and t
   const manifest = { version: 1, transfer_id: metadata.transferId, filename: 'test.webm', content_type: 'video/webm', size: 10, content_key: deviceCrypto.encodeBase64(rawKey), chunk_count: 1, nonce_prefix: deviceCrypto.encodeBase64(new Uint8Array([1, 2, 3, 4])) };
   const wrapped = await deviceCrypto.encryptTransferManifest(key, manifest, metadata);
   assert.deepEqual(await deviceCrypto.decryptTransferManifest(key, wrapped, metadata), manifest);
+  const alice = await generateDeviceBundle(), bob = await generateDeviceBundle();
+  const layer2Alice = await deriveOwnAndPeer(alice, 'account-a', 'device-a', bob, 'account-b', 'device-b', true);
+  const layer2Bob = await deriveOwnAndPeer(bob, 'account-b', 'device-b', alice, 'account-a', 'device-a', true);
+  const nested = await deviceCrypto.encryptTransferManifestLayer2(layer2Alice, wrapped, metadata);
+  const inner = await deviceCrypto.decryptTransferManifestLayer2(layer2Bob, nested, metadata);
+  assert.deepEqual(await deviceCrypto.decryptTransferManifest(key, inner, metadata), manifest);
+  await assert.rejects(deviceCrypto.decryptTransferManifestLayer2(layer2Bob, nested, { ...metadata, recipientDeviceId: 'substituted-device' }));
   await assert.rejects(deviceCrypto.decryptTransferManifest(key, wrapped, { ...metadata, recipientDeviceId: 'substituted-device' }));
   const prefix = new Uint8Array([1, 2, 3, 4]);
   const iv = deviceCrypto.transferChunkIv(prefix, 0);
@@ -146,6 +173,25 @@ test('encrypted transfer manifests and chunk data bind identity, position, and t
   assert.match(await deviceCrypto.sha256Hex(encrypted.ciphertext), /^[0-9a-f]{64}$/);
 });
 
+test('v2 file chunks match the published deterministic two-layer AES-GCM vector', async () => {
+  const vector = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/transfer-chunk-v2-vector.json'), 'utf8'));
+  const metadata = { transferId: vector.metadata.transfer_id, senderUserId: vector.metadata.sender_user_id, senderDeviceId: vector.metadata.sender_device_id, recipientUserId: vector.metadata.recipient_user_id, recipientDeviceId: 'recipient-device-vector' };
+  const fromHex = value => new Uint8Array(Buffer.from(value, 'hex'));
+  const key1 = await deviceCrypto.importTransferKey(fromHex(vector.layer1_key_hex));
+  const key2 = await deviceCrypto.importTransferKey(fromHex(vector.layer2_key_hex));
+  const plain = textEncoder.encode(vector.plaintext_utf8);
+  const encrypted = await deviceCrypto.encryptTransferChunkLayer2(key1, key2, plain, metadata, vector.index, vector.count,
+    deviceCrypto.transferChunkIv(fromHex(vector.layer1_nonce_prefix_hex), vector.index),
+    deviceCrypto.transferChunkIv(fromHex(vector.layer2_nonce_prefix_hex), vector.index));
+  assert.equal(Buffer.from(encrypted.ciphertext).toString('hex'), vector.ciphertext_hex);
+  const opened = await deviceCrypto.decryptTransferChunkLayer2(key1, key2, encrypted.iv1, encrypted.iv2, encrypted.ciphertext, metadata, vector.index, vector.count);
+  assert.equal(new TextDecoder().decode(opened), vector.plaintext_utf8);
+  await assert.rejects(deviceCrypto.decryptTransferChunkLayer2(key1, key2, encrypted.iv1, encrypted.iv2, encrypted.ciphertext, { ...metadata, recipientUserId: 'wrong-account' }, vector.index, vector.count));
+  await assert.rejects(deviceCrypto.decryptTransferChunkLayer2(key1, key2, encrypted.iv1, encrypted.iv2, encrypted.ciphertext, metadata, vector.index + 1, vector.count));
+  const corrupted = new Uint8Array(encrypted.ciphertext); corrupted[0] ^= 0x80;
+  await assert.rejects(deviceCrypto.decryptTransferChunkLayer2(key1, key2, encrypted.iv1, encrypted.iv2, corrupted, metadata, vector.index, vector.count));
+});
+
 test('derived conversation keys are bound to the account/device pair context', async () => {
   const alice = await deviceCrypto.generateDeviceKeyPair();
   const bob = await deviceCrypto.generateDeviceKeyPair();
@@ -154,4 +200,18 @@ test('derived conversation keys are bound to the account/device pair context', a
   const iv = webcrypto.getRandomValues(new Uint8Array(12));
   const ciphertext = await webcrypto.subtle.encrypt({ name: 'AES-GCM', iv }, first, textEncoder.encode('pair binding'));
   await assert.rejects(webcrypto.subtle.decrypt({ name: 'AES-GCM', iv }, wrongContext, ciphertext));
+});
+
+test('Android encrypted JSON rejects malformed UTF-8 rather than replacement-decoding authenticated bytes', () => {
+  const androidCrypto = fs.readFileSync(path.join(__dirname, '../../../apps/android/app/src/main/java/io/serein/chat/SereinDeviceCrypto.java'), 'utf8');
+  assert.match(androidCrypto, /newDecoder\(\)[\s\S]*?onMalformedInput\(CodingErrorAction\.REPORT\)[\s\S]*?onUnmappableCharacter\(CodingErrorAction\.REPORT\)/);
+  assert.ok((androidCrypto.match(/decodeUtf8Strict\(/g) || []).length >= 6, 'saved key material and decrypted message/manifest JSON must use strict UTF-8');
+  assert.match(androidCrypto, /xCoordinate\.compareTo\(prime\) >= 0 \|\| yCoordinate\.compareTo\(prime\) >= 0/);
+  assert.match(androidCrypto, /if \(!lhs\.equals\(rhs\)\) throw new IllegalArgumentException\("P-256 public point is not on the curve\."\)/);
+  const androidCryptoTest = fs.readFileSync(path.join(__dirname, '../../../apps/android/app/src/androidTest/java/io/serein/chat/SereinDeviceCryptoTest.java'), 'utf8');
+  assert.match(androidCryptoTest, /testValidP256GeneratorPointIsAccepted/);
+  assert.match(androidCryptoTest, /testOffCurveP256PointIsRejectedBeforeAgreement/);
+  assert.match(androidCryptoTest, /testNativeEcdhAndNestedAesGcmRoundTripRejectsTampering/);
+  assert.match(androidCryptoTest, /catch \(AEADBadTagException expected\)/);
+  assert.match(androidCryptoTest, /testAuthenticatedPayloadMustBeValidUtf8/);
 });

@@ -1,11 +1,17 @@
 [package]
 name = "serein-core"
-version = "0.4.0-dev.16"
+version.workspace = true
 edition = "2021"
 license = "UNLICENSED"
 description = "First-party shared Serein validation and protocol primitives"
 
 [lib]
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+hkdf = "0.13"
+hmac = "0.13"
+sha2 = "0.11"
+x25519-dalek = { version = "3.0", features = ["static_secrets"] }
+zeroize = "1.8"

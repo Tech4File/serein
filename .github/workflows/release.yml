@@ -123,6 +123,9 @@ jobs:
           echo "APPSTORE_UUID=$APPSTORE_UUID" >> "$GITHUB_ENV"
           echo "ADHOC_UUID=$ADHOC_UUID" >> "$GITHUB_ENV"
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+      - name: Install iOS SDK components
+        timeout-minutes: 30
+        run: sudo xcodebuild -downloadPlatform iOS
       - name: Archive and export App Store IPA
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

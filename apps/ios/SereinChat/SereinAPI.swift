@@ -279,8 +279,9 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         } catch { errorMessage = error.localizedDescription }
     }
     func contactsData() async throws -> Data { try await request("/api/v1/contacts") }
-    func registerDeviceKey(_ publicJWK: [String: String], layer2PublicJWK: [String: String]) async throws -> [String: Any] {
-        let data = try await request("/api/v1/device-key", method: "PUT", values: ["algorithm": "ECDH-P256", "public_key": publicJWK, "layer2_public_key": layer2PublicJWK])
+    func registerDeviceKey(_ publicJWK: [String: String], layer2PublicJWK: [String: String], ratchetVersion: Int) async throws -> [String: Any] {
+        guard ratchetVersion == 2 || ratchetVersion == 3 else { throw APIError.invalidResponse }
+        let data = try await request("/api/v1/device-key", method: "PUT", values: ["algorithm": "ECDH-P256", "public_key": publicJWK, "layer2_public_key": layer2PublicJWK, "ratchet_version": ratchetVersion])
         return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
     }
     func contactDeviceKeys(_ contactID: String) async throws -> [String: Any] {

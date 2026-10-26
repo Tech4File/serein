@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(serein_core_jni C)
+
+if(NOT DEFINED SEREIN_REPOSITORY_ROOT)
+  get_filename_component(SEREIN_REPOSITORY_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../../" ABSOLUTE)
+endif()
+set(SEREIN_RUST_ARCHIVE "${SEREIN_REPOSITORY_ROOT}/target/native-core/android/${ANDROID_ABI}/libserein_core.a")
+set(SEREIN_CORE_HEADER "${SEREIN_REPOSITORY_ROOT}/crates/serein-core/include")
+if(NOT EXISTS "${SEREIN_RUST_ARCHIVE}")
+  message(FATAL_ERROR "Missing Rust core archive: ${SEREIN_RUST_ARCHIVE}. Build it with scripts/build_native_core.sh android.")
+endif()
+
+add_library(serein_core_rust STATIC IMPORTED GLOBAL)
+set_target_properties(serein_core_rust PROPERTIES IMPORTED_LOCATION "${SEREIN_RUST_ARCHIVE}")
+add_library(serein_core_jni SHARED serein_core_jni.c)
+target_include_directories(serein_core_jni PRIVATE "${SEREIN_CORE_HEADER}")
+target_link_libraries(serein_core_jni PRIVATE serein_core_rust log android dl m)

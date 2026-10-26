@@ -10,9 +10,21 @@ android {
         applicationId 'io.serein.chat'
         minSdk 26
         targetSdk 35
+        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64' }
+        externalNativeBuild {
+            cmake {
+                arguments "-DSEREIN_REPOSITORY_ROOT=${rootProject.projectDir.parentFile.parentFile.absolutePath}"
+            }
+        }
         testInstrumentationRunner 'android.test.InstrumentationTestRunner'
         versionCode buildNumber.toInteger()
         versionName repoVersion
+    }
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
     }
     signingConfigs {
         release {
@@ -37,4 +49,14 @@ dependencies { }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+}
+
+def buildSereinCoreAndroid = tasks.register('buildSereinCoreAndroid', Exec) {
+    workingDir rootProject.projectDir
+    commandLine 'bash', '../../scripts/build_native_core.sh', 'android'
+}
+tasks.configureEach {
+    if (name.startsWith('configureCMake') || name.startsWith('buildCMake')) {
+        dependsOn buildSereinCoreAndroid
+    }
 }

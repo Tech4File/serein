@@ -7,6 +7,8 @@ import org.json.JSONObject;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -15,6 +17,7 @@ import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.SecureRandom;
+import java.security.spec.ECFieldFp;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.ECPrivateKeySpec;
 import java.security.spec.ECPublicKeySpec;
@@ -29,7 +32,7 @@ import javax.crypto.spec.SecretKeySpec;
 /** Built-in JCA implementation of the Serein P-256/HKDF-SHA256/AES-GCM wire protocol. */
 final class SereinDeviceCrypto {
     static final int CHUNK_CIPHERTEXT_BYTES = 256 * 1024;
-    static final int CHUNK_PLAINTEXT_BYTES = CHUNK_CIPHERTEXT_BYTES - 16;
+    static final int CHUNK_PLAINTEXT_BYTES = CHUNK_CIPHERTEXT_BYTES - 32;
     static final int MAX_CHUNKS = 512;
     static final long MAX_FILE_CIPHERTEXT_BYTES = 64L * 1024L * 1024L;
     private static final String LOCAL_KEY_PREFIX = "device-key-v1:";
@@ -44,7 +47,7 @@ final class SereinDeviceCrypto {
         String storeKey = prefix + userId + ":" + deviceId;
         byte[] saved = SereinSecureVault.get(context, storeKey);
         if (saved != null) {
-            JSONObject value = new JSONObject(new String(saved, StandardCharsets.UTF_8));
+            JSONObject value = new JSONObject(decodeUtf8Strict(saved));
             byte[] pkcs8 = Base64.decode(value.getString("private_pkcs8"), Base64.NO_WRAP);
             PrivateKey privateKey = KeyFactory.getInstance("EC").generatePrivate(new java.security.spec.PKCS8EncodedKeySpec(pkcs8));
             PublicKey publicKey = publicKey(value.getJSONObject("public_jwk"));
@@ -73,7 +76,15 @@ final class SereinDeviceCrypto {
         if (x.length != 32 || y.length != 32) throw new IllegalArgumentException("Malformed P-256 public key.");
         AlgorithmParameters parameters = AlgorithmParameters.getInstance("EC"); parameters.init(new ECGenParameterSpec("secp256r1"));
         java.security.spec.ECParameterSpec ec = parameters.getParameterSpec(java.security.spec.ECParameterSpec.class);
-        return KeyFactory.getInstance("EC").generatePublic(new ECPublicKeySpec(new java.security.spec.ECPoint(new BigInteger(1, x), new BigInteger(1, y)), ec));
+        if (!(ec.getCurve().getField() instanceof ECFieldFp)) throw new IllegalStateException("P-256 provider returned a non-prime field.");
+        BigInteger xCoordinate = new BigInteger(1, x), yCoordinate = new BigInteger(1, y);
+        BigInteger prime = ((ECFieldFp) ec.getCurve().getField()).getP();
+        if (xCoordinate.compareTo(prime) >= 0 || yCoordinate.compareTo(prime) >= 0) throw new IllegalArgumentException("P-256 public point is outside the field.");
+        BigInteger lhs = yCoordinate.multiply(yCoordinate).mod(prime);
+        BigInteger rhs = xCoordinate.multiply(xCoordinate).multiply(xCoordinate)
+                .add(ec.getCurve().getA().multiply(xCoordinate)).add(ec.getCurve().getB()).mod(prime);
+        if (!lhs.equals(rhs)) throw new IllegalArgumentException("P-256 public point is not on the curve.");
+        return KeyFactory.getInstance("EC").generatePublic(new ECPublicKeySpec(new java.security.spec.ECPoint(xCoordinate, yCoordinate), ec));
     }
 
     static String fingerprint(JSONObject jwk) throws Exception {
@@ -104,6 +115,16 @@ final class SereinDeviceCrypto {
                                        String peerUser, String peerDevice, JSONObject peerJwk) throws Exception {
         return deriveDevicePairKey(localPrivate,localUser,localDevice,peerUser,peerDevice,peerJwk,true);
     }
+    static byte[] ratchetBootstrapSecret(PrivateKey localPrivate,String localUser,String localDevice,
+                                         String peerUser,String peerDevice,JSONObject peerJwk,String purpose) throws Exception {
+        if (!"layer1".equals(purpose) && !"layer2".equals(purpose)) throw new IllegalArgumentException("Unknown ratchet bootstrap layer.");
+        KeyAgreement agreement=KeyAgreement.getInstance("ECDH");agreement.init(localPrivate);agreement.doPhase(publicKey(peerJwk),true);
+        byte[] raw=agreement.generateSecret();String[] parties={localUser+":"+localDevice,peerUser+":"+peerDevice};Arrays.sort(parties);
+        String pair=parties[0]+"|"+parties[1],saltLabel="Serein/"+purpose+"/symmetric-ratchet-salt/v1|"+pair,info="Serein/"+purpose+"/symmetric-ratchet-bootstrap/v1|"+pair;
+        byte[] salt=MessageDigest.getInstance("SHA-256").digest(saltLabel.getBytes(StandardCharsets.UTF_8));
+        try{return hkdf(raw,salt,info.getBytes(StandardCharsets.UTF_8),32);}finally{Arrays.fill(raw,(byte)0);Arrays.fill(salt,(byte)0);}
+    }
+
     private static byte[] deriveDevicePairKey(PrivateKey localPrivate,String localUser,String localDevice,
                                               String peerUser,String peerDevice,JSONObject peerJwk,boolean layer2) throws Exception {
         PublicKey peerPublic = publicKey(peerJwk);
@@ -138,7 +159,7 @@ final class SereinDeviceCrypto {
         JSONArray fields = new JSONArray().put("serein-message-v1").put(conversationId).put(messageId)
                 .put(senderUserId).put(senderDeviceId).put(recipientUserId).put(recipientDeviceId);
         byte[] clear = decrypt(key, Base64.decode(ivBase64, Base64.DEFAULT), Base64.decode(ciphertextBase64, Base64.DEFAULT), fields.toString().getBytes(StandardCharsets.UTF_8));
-        try { return new JSONObject(new String(clear, StandardCharsets.UTF_8)); }
+        try { return new JSONObject(decodeUtf8Strict(clear)); }
         finally { Arrays.fill(clear, (byte) 0); }
     }
 
@@ -161,11 +182,11 @@ final class SereinDeviceCrypto {
         JSONArray outerFields=messageAad("serein-message-layer2-v2",conversationId,messageId,senderUserId,senderDeviceId,recipientUserId,recipientDeviceId);
         byte[] outer=decrypt(layer2Key,Base64.decode(ivBase64,Base64.DEFAULT),Base64.decode(ciphertextBase64,Base64.DEFAULT),outerFields.toString().getBytes(StandardCharsets.UTF_8));
         try {
-            JSONObject inner=new JSONObject(new String(outer,StandardCharsets.UTF_8));
+            JSONObject inner=new JSONObject(decodeUtf8Strict(outer));
             if(inner.optInt("version")!=1||!"AES-256-GCM".equals(inner.optString("algorithm")))throw new IllegalArgumentException("Malformed inner message envelope.");
             JSONArray innerFields=messageAad("serein-message-layer1-v2",conversationId,messageId,senderUserId,senderDeviceId,recipientUserId,recipientDeviceId);
             byte[] clear=decrypt(layer1Key,Base64.decode(inner.getString("iv"),Base64.DEFAULT),Base64.decode(inner.getString("ciphertext"),Base64.DEFAULT),innerFields.toString().getBytes(StandardCharsets.UTF_8));
-            try{return new JSONObject(new String(clear,StandardCharsets.UTF_8));}finally{Arrays.fill(clear,(byte)0);}
+            try{return new JSONObject(decodeUtf8Strict(clear));}finally{Arrays.fill(clear,(byte)0);}
         } finally { Arrays.fill(outer,(byte)0); }
     }
     private static JSONArray messageAad(String label,String conversationId,String messageId,String senderUserId,String senderDeviceId,String recipientUserId,String recipientDeviceId){
@@ -185,8 +206,22 @@ final class SereinDeviceCrypto {
                                       String recipientUserId, String recipientDeviceId) throws Exception {
         JSONArray fields = new JSONArray().put("serein-transfer-manifest-v1").put(transferId).put(senderUserId).put(senderDeviceId).put(recipientUserId).put(recipientDeviceId);
         byte[] clear = decrypt(conversationKey, Base64.decode(ivBase64, Base64.DEFAULT), Base64.decode(ciphertextBase64, Base64.DEFAULT), fields.toString().getBytes(StandardCharsets.UTF_8));
-        try { return new JSONObject(new String(clear, StandardCharsets.UTF_8)); }
+        try { return new JSONObject(decodeUtf8Strict(clear)); }
         finally { Arrays.fill(clear, (byte) 0); }
+    }
+    static JSONObject encryptManifestLayer2(byte[] layer2Key,JSONObject innerEnvelope,String transferId,String senderUserId,String senderDeviceId,String recipientUserId,String recipientDeviceId) throws Exception {
+        JSONObject normalized=new JSONObject().put("version",1).put("algorithm","AES-256-GCM").put("iv",innerEnvelope.getString("iv")).put("ciphertext",innerEnvelope.getString("ciphertext"));
+        byte[] clear=normalized.toString().getBytes(StandardCharsets.UTF_8);if(clear.length>12_000)throw new IllegalArgumentException("Nested transfer manifest exceeds its size limit.");
+        JSONArray fields=new JSONArray().put("serein-transfer-manifest-layer2-v1").put(transferId).put(senderUserId).put(senderDeviceId).put(recipientUserId).put(recipientDeviceId);byte[] iv=randomBytes(12),ciphertext=encrypt(layer2Key,clear,fields.toString().getBytes(StandardCharsets.UTF_8),iv);
+        try{return new JSONObject().put("version",2).put("algorithm","AES-256-GCM-LAYER2").put("iv",Base64.encodeToString(iv,Base64.NO_WRAP)).put("ciphertext",Base64.encodeToString(ciphertext,Base64.NO_WRAP));}
+        finally{Arrays.fill(clear,(byte)0);Arrays.fill(iv,(byte)0);Arrays.fill(ciphertext,(byte)0);}
+    }
+    static JSONObject decryptManifestLayer2(byte[] layer2Key,String ivBase64,String ciphertextBase64,String transferId,String senderUserId,String senderDeviceId,String recipientUserId,String recipientDeviceId) throws Exception {
+        if(ivBase64.length()>24||ciphertextBase64.length()>16_024)throw new IllegalArgumentException("Layer 2 transfer manifest exceeds its safety limit.");
+        JSONArray fields=new JSONArray().put("serein-transfer-manifest-layer2-v1").put(transferId).put(senderUserId).put(senderDeviceId).put(recipientUserId).put(recipientDeviceId);
+        byte[] clear=decrypt(layer2Key,Base64.decode(ivBase64,Base64.DEFAULT),Base64.decode(ciphertextBase64,Base64.DEFAULT),fields.toString().getBytes(StandardCharsets.UTF_8));
+        try{JSONObject inner=new JSONObject(decodeUtf8Strict(clear));if(inner.optInt("version")!=1||!"AES-256-GCM".equals(inner.optString("algorithm")))throw new IllegalArgumentException("Malformed inner transfer manifest envelope.");return inner;}
+        finally{Arrays.fill(clear,(byte)0);}
     }
 
     static byte[] encryptChunk(byte[] fileKey, byte[] noncePrefix, int index, byte[] plaintext,
@@ -197,6 +232,23 @@ final class SereinDeviceCrypto {
     static byte[] decryptChunk(byte[] fileKey, byte[] noncePrefix, int index, byte[] ciphertext,
                                String transferId, String senderUserId, String senderDeviceId, String recipientUserId, int count) throws Exception {
         return decrypt(fileKey, chunkIv(noncePrefix, index), ciphertext, chunkAad(transferId, senderUserId, senderDeviceId, recipientUserId, index, count));
+    }
+    static byte[] encryptChunkLayer2(byte[] layer1Key,byte[] layer2Key,byte[] layer1Prefix,byte[] layer2Prefix,int index,byte[] plaintext,
+                                     String transferId,String senderUserId,String senderDeviceId,String recipientUserId,int count) throws Exception {
+        byte[] inner=encrypt(layer1Key,plaintext,chunkLayerAad("layer1",transferId,senderUserId,senderDeviceId,recipientUserId,index,count),chunkIv(layer1Prefix,index));
+        try{return encrypt(layer2Key,inner,chunkLayerAad("layer2",transferId,senderUserId,senderDeviceId,recipientUserId,index,count),chunkIv(layer2Prefix,index));}
+        finally{Arrays.fill(inner,(byte)0);}
+    }
+    static byte[] decryptChunkLayer2(byte[] layer1Key,byte[] layer2Key,byte[] layer1Prefix,byte[] layer2Prefix,int index,byte[] ciphertext,
+                                     String transferId,String senderUserId,String senderDeviceId,String recipientUserId,int count) throws Exception {
+        byte[] inner=decrypt(layer2Key,chunkIv(layer2Prefix,index),ciphertext,chunkLayerAad("layer2",transferId,senderUserId,senderDeviceId,recipientUserId,index,count));
+        try{return decrypt(layer1Key,chunkIv(layer1Prefix,index),inner,chunkLayerAad("layer1",transferId,senderUserId,senderDeviceId,recipientUserId,index,count));}
+        finally{Arrays.fill(inner,(byte)0);}
+    }
+    private static byte[] chunkLayerAad(String layer,String transferId,String senderUserId,String senderDeviceId,String recipientUserId,int index,int count){
+        if(!"layer1".equals(layer)&&!"layer2".equals(layer))throw new IllegalArgumentException("Invalid transfer chunk layer.");
+        if(index<0||count<1||index>=count)throw new IllegalArgumentException("Invalid transfer chunk position.");
+        return new JSONArray().put("serein-transfer-chunk-"+layer+"-v2").put(transferId).put(senderUserId).put(senderDeviceId).put(recipientUserId).put(index).put(count).toString().getBytes(StandardCharsets.UTF_8);
     }
 
     static byte[] chunkIv(byte[] prefix, int index) {
@@ -209,6 +261,14 @@ final class SereinDeviceCrypto {
     static String sha256Hex(byte[] value) throws Exception { return hex(MessageDigest.getInstance("SHA-256").digest(value)); }
     static byte[] randomBytes(int length) { byte[] value = new byte[length]; RANDOM.nextBytes(value); return value; }
     static String hex(byte[] bytes) { StringBuilder out = new StringBuilder(bytes.length * 2); for (byte b : bytes) out.append(String.format(java.util.Locale.ROOT, "%02x", b & 0xff)); return out.toString(); }
+
+    static String decodeUtf8Strict(byte[] value) throws CharacterCodingException {
+        return StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(value))
+                .toString();
+    }
 
     private static byte[] fixed32(BigInteger value) {
         byte[] source = value.toByteArray(), result = new byte[32];
