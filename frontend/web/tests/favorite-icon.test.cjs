@@ -12,6 +12,8 @@ test('chat favorite action is an accessible star toggle, not a more-options elli
   assert.match(app, /button\.textContent=favorite\?'★':'☆'/);
   assert.match(app, /button\.setAttribute\('aria-pressed',String\(favorite\)\)/);
   assert.match(app, /button\.title=favorite\?'Remove from favorites':'Add to favorites'/);
-  assert.match(app, /state\.selected\.favorite=!state\.selected\.favorite;syncFavoriteButton\(\);saveContacts\(\)/);
+  assert.match(app, /contact\.favorite=!contact\.favorite;syncFavoriteButton\(\);saveContacts\(\)/);
+  assert.match(app, /\$\('profileFavorite'\)\.textContent=contact\.favorite\?/);
+  assert.match(app, /\$\('profileFavorite'\)\.addEventListener\('click',toggleSelectedFavorite\)/);
   assert.match(app, /disabled=!contact\|\|!!contact\.deleted\|\|!!contact\.historyOnly/);
 });

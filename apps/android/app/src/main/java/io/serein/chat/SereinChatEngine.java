@@ -20,6 +20,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -50,6 +52,8 @@ final class SereinChatEngine {
     private volatile boolean notificationsArmed;
     private volatile String cursorTime, cursorId;
     private volatile boolean busy;
+    private final Set<String> readMarkedIds=new HashSet<>();
+    private volatile long lastReceiptRefresh;
     private static final long MAX_CLEAR_BYTES=64L*1024L*1024L;
 
     SereinChatEngine(Context context,SereinApi api,JSONObject account,JSONObject contact,Listener listener){
@@ -158,7 +162,7 @@ final class SereinChatEngine {
     private CompletableFuture<Void> deliver(JSONObject message){
         JSONArray envelopes=message.optJSONArray("envelopes");CompletableFuture<Void> chain=CompletableFuture.completedFuture(null);
         for(int i=0;envelopes!=null&&i<envelopes.length();i++){JSONObject e=envelopes.optJSONObject(i);if(e==null)continue;String id=message.optString("id");chain=chain.thenCompose(ignored->api.sendEnvelopeFuture(id,e.optString("to"),e.optString("iv"),e.optString("ciphertext"),e.optInt("crypto_version",1)).thenApply(value->null));}
-        return chain.thenRunAsync(()->{try{message.put("status","accepted");message.remove("envelopes");local.saveMessage(message);status="Encrypted message accepted by all recipient devices.";notifyUi();}catch(Exception error){throw new java.util.concurrent.CompletionException(error);}});
+        return chain.thenRunAsync(()->{try{message.put("status","accepted");message.remove("envelopes");local.saveMessage(message);status="Encrypted message sent · accepted by all recipient devices.";notifyUi();}catch(Exception error){throw new java.util.concurrent.CompletionException(error);}});
     }
     private void retryPending(){
         try{JSONArray all=local.messages(contactId);for(int i=0;i<all.length();i++){JSONObject row=all.optJSONObject(i);if(row!=null&&row.optBoolean("mine")&&"pending".equals(row.optString("status"))&&row.optJSONArray("envelopes")!=null)deliver(row).exceptionally(error->{status="Pending encrypted message will retry when the connection is available.";notifyUi();return null;});}}
@@ -167,7 +171,20 @@ final class SereinChatEngine {
 
     CompletableFuture<Void> poll(){
         if(!ready||busy)return CompletableFuture.completedFuture(null);busy=true;
-        return pollPage(40).whenCompleteAsync((ignored,error)->{busy=false;if(error!=null){status="Secure message sync paused; retrying.";notifyUi();}});
+        return pollPage(40).thenRunAsync(()->{try{markVisibleMessagesRead();long now=System.currentTimeMillis();if(now-lastReceiptRefresh>=12000){refreshOutgoingReceipts();lastReceiptRefresh=now;}}catch(Exception error){status="Read and delivery status will retry when connected.";notifyUi();}}).whenCompleteAsync((ignored,error)->{busy=false;if(error!=null){status="Secure message sync paused; retrying.";notifyUi();}});
+    }
+    private void markVisibleMessagesRead() throws Exception {
+        JSONArray rows=local.messages(contactId),ids=new JSONArray();List<String> newlyMarked=new ArrayList<>();
+        for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row==null||row.optBoolean("mine"))continue;String id=row.optString("id","");if(!id.isEmpty()&&!readMarkedIds.contains(id)){ids.put(id);newlyMarked.add(id);if(ids.length()>=200)break;}}
+        if(ids.length()>0){api.markMessagesReadFuture(ids).get(20,TimeUnit.SECONDS);readMarkedIds.addAll(newlyMarked);}
+    }
+    private void refreshOutgoingReceipts() throws Exception {
+        JSONArray rows=local.messages(contactId),ids=new JSONArray();Map<String,JSONObject> outgoing=new HashMap<>();
+        for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);String state=row==null?"":row.optString("status");if(row!=null&&row.optBoolean("mine")&&("accepted".equals(state)||"delivered".equals(state)||"read".equals(state))&&ids.length()<200){String id=row.optString("id","");if(!id.isEmpty()){ids.put(id);outgoing.put(id,row);}}}
+        if(ids.length()==0)return;
+        JSONObject payload=(JSONObject)api.messageReceiptsFuture(ids).get(20,TimeUnit.SECONDS);JSONArray receipts=payload.optJSONArray("items");if(receipts==null)return;
+        for(int i=0;i<receipts.length();i++){JSONObject receipt=receipts.optJSONObject(i);if(receipt==null)continue;JSONObject row=outgoing.get(receipt.optString("id"));if(row==null)continue;int recipients=receipt.optInt("recipient_count"),delivered=receipt.optInt("delivered_count"),read=receipt.optInt("read_count");String state=read>0?"read":delivered>0?"delivered":"accepted";if(!state.equals(row.optString("status"))||row.optInt("delivered_count",-1)!=delivered||row.optInt("read_count",-1)!=read){row.put("status",state).put("recipient_count",recipients).put("delivered_count",delivered).put("read_count",read);local.saveMessage(row);}}
+        notifyUi();
     }
     private CompletableFuture<Void> pollPage(int remainingPages){
         if(remainingPages<=0)return CompletableFuture.completedFuture(null);

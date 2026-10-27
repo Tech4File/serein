@@ -8,7 +8,7 @@ const app = fs.readFileSync(path.join(webRoot, 'app.js'), 'utf8');
 const html = fs.readFileSync(path.join(webRoot, 'index.html'), 'utf8');
 
 test('the history retry helper loads before the chat client', () => {
-  assert.match(html, /message-limits\.js"><\/script><script src="history-sync\.js"><\/script><script src="session-restore\.js"><\/script><script src="app\.js">/);
+  assert.match(html, /message-limits\.js"><\/script><script src="history-sync\.js"><\/script><script src="session-restore\.js"><\/script>(?:<script src="gif-picker\.js"><\/script>)?<script src="app\.js">/);
 });
 
 test('incoming delivery ACK waits for the authenticated server ACK endpoint', () => {

@@ -41,6 +41,9 @@ struct SereinChatMessage: Identifiable {
     let mine: Bool
     let sender: String
     let status: String
+    let recipientCount: Int
+    let deliveredCount: Int
+    let readCount: Int
     let attachment: SereinEncryptedAttachment?
 }
 
@@ -79,6 +82,8 @@ final class SereinChatEngine: ObservableObject {
     private var ownFingerprint = ""
     private var cursorTime: String?
     private var cursorID: String?
+    private var readMarkedIDs = Set<String>()
+    private var lastReceiptRefresh = Date.distantPast
     private var pollRunning = false
     private var notificationsArmed = false
     private let chunkCipherBytes = 256 * 1024
@@ -263,7 +268,7 @@ final class SereinChatEngine: ObservableObject {
             try await api.sendEncryptedEnvelope(id: messageID, to: envelope["to"] ?? "", iv: envelope["iv"] ?? "", ciphertext: envelope["ciphertext"] ?? "", cryptoVersion: Int(envelope["crypto_version"] ?? "1") ?? 1)
         }
         row["status"] = "accepted"; row.removeValue(forKey: "envelopes"); try local.save(row); loadMessages()
-        status = "Encrypted message accepted by all recipient devices."
+        status = "Encrypted message sent · accepted by all recipient devices."
     }
 
     private func trustedTargets() throws -> [SereinPeerKey] {
@@ -331,7 +336,7 @@ final class SereinChatEngine: ObservableObject {
         }
     }
 
-    func poll() async {
+    func poll(markAsRead: Bool = true) async {
         guard ready, !archived, !pollRunning, let user = api.user, let device = api.currentDevice, let crypto, let local else { return }
         pollRunning = true; defer { pollRunning = false }
         do {
@@ -359,7 +364,39 @@ final class SereinChatEngine: ObservableObject {
                 loadMessages()
                 if stopped || page["has_more"] as? Bool != true { break }
             }
+            if markAsRead {
+                let ids=local.messages(for:contact.user_id).compactMap { row -> String? in
+                    guard row["mine"] as? Bool != true, let id=row["id"] as? String, !readMarkedIDs.contains(id) else { return nil }
+                    return id
+                }.prefix(200)
+                if !ids.isEmpty { try await api.markMessagesRead(Array(ids)); readMarkedIDs.formUnion(ids) }
+            }
+            if Date().timeIntervalSince(lastReceiptRefresh)>=12 { await refreshOutgoingReceipts(); lastReceiptRefresh=Date() }
         } catch { status = "Secure message sync paused; it will retry." }
+    }
+
+    private func refreshOutgoingReceipts() async {
+        guard let local else { return }
+        let outgoing=messages.filter { $0.mine && ["accepted","delivered","read"].contains($0.status) }.suffix(200)
+        let ids=outgoing.map(\.id);guard !ids.isEmpty else { return }
+        do {
+            let data=try await api.messageReceipts(ids:ids)
+            guard let payload=try JSONSerialization.jsonObject(with:data) as? [String:Any],let receipts=payload["items"] as? [[String:Any]] else { return }
+            let lookup=Dictionary(uniqueKeysWithValues:receipts.compactMap { row -> (String,[String:Any])? in guard let id=row["id"] as? String else { return nil };return(id,row) })
+            var changed=false
+            for var row in local.messages(for:contact.user_id) where row["mine"] as? Bool == true {
+                guard let id=row["id"] as? String,let receipt=lookup[id] else { continue }
+                let recipients=(receipt["recipient_count"] as? NSNumber)?.intValue ?? 0
+                let delivered=(receipt["delivered_count"] as? NSNumber)?.intValue ?? 0
+                let read=(receipt["read_count"] as? NSNumber)?.intValue ?? 0
+                let status=read>0 ? "read" : (delivered>0 ? "delivered" : "accepted")
+                if (row["status"] as? String) != status || (row["delivered_count"] as? Int ?? -1) != delivered || (row["read_count"] as? Int ?? -1) != read {
+                    row["status"]=status;row["recipient_count"]=recipients;row["delivered_count"]=delivered;row["read_count"]=read
+                    try local.save(row);changed=true
+                }
+            }
+            if changed { loadMessages() }
+        } catch { /* Receipt polling is best-effort; the durable message remains unchanged. */ }
     }
 
     func sendFile(url: URL, filename: String, contentType: String) async {
@@ -523,7 +560,8 @@ final class SereinChatEngine: ObservableObject {
             let attachment = (row["attachment"] as? [String: Any]).flatMap(SereinEncryptedAttachment.init(json:))
             return SereinChatMessage(id: id, conversationID: conversation, createdAt: created, text: text,
                 mine: row["mine"] as? Bool ?? false, sender: row["sender"] as? String ?? contact.display_name,
-                status: row["status"] as? String ?? "received", attachment: attachment)
+                status: row["status"] as? String ?? "received", recipientCount: row["recipient_count"] as? Int ?? 0,
+                deliveredCount: row["delivered_count"] as? Int ?? 0, readCount: row["read_count"] as? Int ?? 0, attachment: attachment)
         }.sorted { $0.createdAt < $1.createdAt }
     }
 

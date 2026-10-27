@@ -85,6 +85,7 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
     @Published var reduceMotion = false
     @Published var notifications = false
     @Published var busy = false
+    @Published var startupReady = false
     @Published var errorMessage: String?
     @Published var statusMessage: String?
     @Published var connectionStatus = "Not checked"
@@ -247,6 +248,7 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         }
     }
     func restoreSession() async {
+        defer { startupReady = true }
         do {
             let data = try await request("/api/v1/me")
             let reply = try JSONDecoder().decode(SereinAccountReply.self, from: data)
@@ -338,6 +340,9 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         return try await request(components.string ?? "/api/v1/messages?limit=100")
     }
     func acknowledgeMessage(_ id: String) async throws { _ = try await request("/api/v1/messages/\(id)/ack", method: "POST", values: [:]) }
+    func markMessageRead(_ id: String) async throws { _ = try await request("/api/v1/messages/\(id)/read", method: "POST", values: [:]) }
+    func markMessagesRead(_ ids: [String]) async throws { guard !ids.isEmpty else { return }; _ = try await request("/api/v1/messages/read", method: "POST", values: ["ids": ids]) }
+    func messageReceipts(ids: [String]) async throws -> Data { try await request("/api/v1/messages/receipts", method: "POST", values: ["ids": ids]) }
     func sendEncryptedEnvelope(id: String, to deviceID: String, iv: String, ciphertext: String, cryptoVersion: Int) async throws {
         _ = try await request("/api/v1/messages", method: "POST", values: ["id": id, "to": deviceID, "crypto_version": cryptoVersion, "iv": iv, "ciphertext": ciphertext])
     }

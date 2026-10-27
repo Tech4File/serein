@@ -63,6 +63,7 @@ type PeerMap = DashMap<Uuid, Peer>;
 #[derive(Serialize)] struct DeviceSessionReply { id: Uuid, name: String, created_at: String, last_seen_at: String, current: bool, online: bool }
 #[derive(Deserialize)] #[serde(tag = "type", rename_all = "snake_case")] enum ClientFrame { Message { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }, Ack { id: Uuid }, Heartbeat }
 #[derive(Deserialize)] struct HistoryQuery { after_created_at: Option<String>, after_id: Option<Uuid>, limit: Option<i64> }
+#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct MessageReceiptsQuery { ids: Vec<Uuid> }
 #[derive(Deserialize)] struct SendEnvelopeInput { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }
 #[derive(Deserialize)] struct CreateTransferInput { id: Uuid, recipient_user_id: Uuid, chunk_count: i32, total_ciphertext_bytes: i64, #[serde(default = "legacy_transfer_crypto_version")] chunk_crypto_version: u8, device_envelopes: Vec<TransferDeviceEnvelope> }
 #[derive(Deserialize)] struct TransferDeviceEnvelope { device_id: Uuid, #[serde(default = "legacy_transfer_crypto_version")] crypto_version: u8, iv: String, ciphertext: String }
@@ -116,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/healthz", get(healthz)).route("/api/v1/security/capabilities", get(security_capabilities)).route("/status", get(|| async { axum::response::Html(include_str!("../../frontend/web/status.html")) }))
         .route("/api/v1/auth/register", post(register)).route("/api/v1/auth/verify-email", post(verify_email)).route("/api/v1/auth/resend-verification", post(resend_verification)).route("/api/v1/auth/login", post(login)).route("/api/v1/auth/verify-login", post(verify_login)).route("/api/v1/auth/logout", post(logout))
-        .route("/api/v1/me", get(me).delete(delete_account)).route("/api/v1/backups/key-envelope", post(get_backup_key_envelope)).route("/api/v1/device-key", put(register_device_public_key)).route("/api/v1/contacts/:contact_id/device-keys", get(list_contact_device_public_keys)).route("/api/v1/messages", get(list_messages).post(send_message_api)).route("/api/v1/messages/:id/ack", post(ack_message_api)).route("/api/v1/settings", get(get_settings).put(put_settings)).route("/api/v1/contacts", get(list_contacts).post(create_contact_request))
+        .route("/api/v1/me", get(me).delete(delete_account)).route("/api/v1/backups/key-envelope", post(get_backup_key_envelope)).route("/api/v1/device-key", put(register_device_public_key)).route("/api/v1/contacts/:contact_id/device-keys", get(list_contact_device_public_keys)).route("/api/v1/messages", get(list_messages).post(send_message_api)).route("/api/v1/messages/receipts", post(list_message_receipts)).route("/api/v1/messages/read", post(mark_messages_read_api)).route("/api/v1/messages/:id/ack", post(ack_message_api)).route("/api/v1/messages/:id/read", post(mark_message_read_api)).route("/api/v1/settings", get(get_settings).put(put_settings)).route("/api/v1/contacts", get(list_contacts).post(create_contact_request))
         .route("/api/v1/contact-requests", get(list_contact_requests).post(create_contact_request)).route("/api/v1/contact-requests/:request_id/accept", post(accept_contact_request)).route("/api/v1/contact-requests/:request_id", delete(delete_contact_request))
         .route("/api/v1/blocks", get(list_blocks)).route("/api/v1/blocks/:user_id", put(block_user).delete(unblock_user))
         .route("/api/v1/contacts/:contact_id", delete(remove_contact)).route("/api/v1/devices", get(list_devices))
@@ -229,6 +230,10 @@ async fn initialize_schema(db: &PgPool) -> Result<(), sqlx::Error> {
         "CREATE INDEX IF NOT EXISTS queued_ciphertexts_delivery ON queued_ciphertexts(recipient_device_id, delivered_at, created_at, id)",
         "CREATE INDEX IF NOT EXISTS queued_ciphertexts_created_at ON queued_ciphertexts(created_at)",
         "CREATE INDEX IF NOT EXISTS queued_ciphertexts_delivered_cleanup ON queued_ciphertexts(delivered_at,recipient_device_id,id) WHERE delivered_at IS NOT NULL",
+        "CREATE TABLE IF NOT EXISTS message_receipts (message_id UUID NOT NULL, sender_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, sender_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, recipient_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, recipient_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(), delivered_at TIMESTAMPTZ NULL, read_at TIMESTAMPTZ NULL, PRIMARY KEY(message_id,recipient_device_id), CHECK(read_at IS NULL OR delivered_at IS NOT NULL))",
+        "CREATE INDEX IF NOT EXISTS message_receipts_sender_message ON message_receipts(sender_user_id,message_id)",
+        "CREATE INDEX IF NOT EXISTS message_receipts_recipient_message ON message_receipts(recipient_user_id,message_id)",
+        "INSERT INTO message_receipts(message_id,sender_user_id,sender_device_id,recipient_user_id,recipient_device_id,accepted_at,delivered_at) SELECT q.id,sd.user_id,q.sender_device_id,rd.user_id,q.recipient_device_id,q.created_at,q.delivered_at FROM queued_ciphertexts q JOIN devices sd ON sd.id=q.sender_device_id JOIN devices rd ON rd.id=q.recipient_device_id ON CONFLICT(message_id,recipient_device_id) DO NOTHING",
         "CREATE TABLE IF NOT EXISTS encrypted_transfers (id UUID PRIMARY KEY, sender_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, sender_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, recipient_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, chunk_count INTEGER NOT NULL CHECK(chunk_count BETWEEN 1 AND 512), chunk_crypto_version SMALLINT NOT NULL DEFAULT 1 CHECK(chunk_crypto_version IN (1,2)), total_ciphertext_bytes BIGINT NOT NULL CHECK(total_ciphertext_bytes BETWEEN 1 AND 67108864), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, ready_at TIMESTAMPTZ NULL)",
         "ALTER TABLE encrypted_transfers ADD COLUMN IF NOT EXISTS chunk_crypto_version SMALLINT NOT NULL DEFAULT 1",
         "ALTER TABLE encrypted_transfers DROP CONSTRAINT IF EXISTS encrypted_transfers_chunk_crypto_version_check",
@@ -278,7 +283,7 @@ async fn security_headers(State(state):State<AppState>,request:Request,next:Next
     }
     let mut response=next.run(request).await;
     let headers=response.headers_mut();
-    headers.insert("content-security-policy",HeaderValue::from_static("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https: wss:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"));
+    headers.insert("content-security-policy",HeaderValue::from_static("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://nekos.best; font-src 'self' data:; connect-src 'self' https: wss:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"));
     headers.insert("x-content-type-options",HeaderValue::from_static("nosniff"));
     headers.insert("x-frame-options",HeaderValue::from_static("DENY"));
     headers.insert("referrer-policy",HeaderValue::from_static("no-referrer"));
@@ -731,11 +736,35 @@ async fn list_messages(State(state):State<AppState>,headers:HeaderMap,Query(quer
 }
 async fn ack_message_api(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<Uuid>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
-    // Idempotent ACK: after the client has durably committed the authenticated
-    // message locally, delete only this device's queued ciphertext copy.
+    // Persist device delivery status before deleting this device's queued ciphertext copy.
+    if sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()) WHERE message_id=$1 AND recipient_user_id=$2 AND recipient_device_id=$3").bind(id).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"message delivery receipt unavailable");}
     match sqlx::query("DELETE FROM queued_ciphertexts WHERE recipient_device_id=$1 AND id=$2").bind(ctx.device_id).bind(id).execute(&state.db).await{
         Ok(_)=>Json(serde_json::json!({"ok":true})).into_response(),
         Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"message acknowledgement unavailable")
+    }
+}
+async fn list_message_receipts(State(state):State<AppState>,headers:HeaderMap,Json(query):Json<MessageReceiptsQuery>)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    if query.ids.len()>200{return api_error(StatusCode::BAD_REQUEST,"at most 200 message IDs may be queried at once");}
+    let mut ids=query.ids;ids.sort_unstable();ids.dedup();if ids.is_empty(){return Json(serde_json::json!({"items":[]})).into_response();}
+    let rows=match sqlx::query_as::<_,(Uuid,i64,i64,i64)>("SELECT message_id,COUNT(*)::bigint,COUNT(delivered_at)::bigint,COUNT(read_at)::bigint FROM message_receipts WHERE sender_user_id=$1 AND message_id=ANY($2) GROUP BY message_id").bind(ctx.user_id).bind(ids).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message receipt status unavailable")};
+    let items=rows.into_iter().map(|(id,recipients,delivered,read)|serde_json::json!({"id":id,"recipient_count":recipients,"delivered_count":delivered,"read_count":read})).collect::<Vec<_>>();
+    Json(serde_json::json!({"items":items})).into_response()
+}
+async fn mark_messages_read_api(State(state):State<AppState>,headers:HeaderMap,Json(query):Json<MessageReceiptsQuery>)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    if query.ids.len()>200{return api_error(StatusCode::BAD_REQUEST,"at most 200 message IDs may be marked read at once");}
+    let mut ids=query.ids;ids.sort_unstable();ids.dedup();if ids.is_empty(){return Json(serde_json::json!({"ok":true,"updated":0})).into_response();}
+    match sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()),read_at=COALESCE(read_at,now()) WHERE message_id=ANY($1) AND recipient_user_id=$2 AND recipient_device_id=$3").bind(ids).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await{
+        Ok(result)=>Json(serde_json::json!({"ok":true,"updated":result.rows_affected()})).into_response(),
+        Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"read receipts could not be saved")
+    }
+}
+async fn mark_message_read_api(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<Uuid>)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    match sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()),read_at=COALESCE(read_at,now()) WHERE message_id=$1 AND recipient_user_id=$2 AND recipient_device_id=$3").bind(id).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await{
+        Ok(_)=>Json(serde_json::json!({"ok":true})).into_response(),
+        Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"read receipt could not be saved")
     }
 }
 async fn send_message_api(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<SendEnvelopeInput>)->Response{
@@ -757,6 +786,8 @@ async fn send_message_api(State(state):State<AppState>,headers:HeaderMap,Json(in
     if queued>=MAX_QUEUED_PER_DEVICE{let _=tx.rollback().await;return api_error(StatusCode::TOO_MANY_REQUESTS,"recipient offline queue is full");}
     let inserted=match sqlx::query("INSERT INTO queued_ciphertexts(id,sender_device_id,recipient_device_id,payload) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING").bind(input.id).bind(ctx.device_id).bind(input.to).bind(&payload).execute(&mut *tx).await{Ok(v)=>v.rows_affected()>0,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"message could not be durably stored");}};
     if !inserted{let existing=match sqlx::query_as::<_,(Uuid,Value)>("SELECT sender_device_id,payload FROM queued_ciphertexts WHERE recipient_device_id=$1 AND id=$2").bind(input.to).bind(input.id).fetch_optional(&mut *tx).await{Ok(v)=>v,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"message retry could not be checked");}};if !matches!(existing,Some((sender,stored)) if sender==ctx.device_id && stored==payload){let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"message ID was already used with different content");}}
+    let receipt=sqlx::query("INSERT INTO message_receipts(message_id,sender_user_id,sender_device_id,recipient_user_id,recipient_device_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT(message_id,recipient_device_id) DO UPDATE SET accepted_at=message_receipts.accepted_at WHERE message_receipts.sender_user_id=EXCLUDED.sender_user_id AND message_receipts.sender_device_id=EXCLUDED.sender_device_id AND message_receipts.recipient_user_id=EXCLUDED.recipient_user_id").bind(input.id).bind(ctx.user_id).bind(ctx.device_id).bind(target_user).bind(input.to).execute(&mut *tx).await;
+    if !matches!(receipt,Ok(ref result) if result.rows_affected()==1){let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"message ID conflicts with an existing delivery record");}
     if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"message commit failed");}
     if inserted{let peer_tx=state.peers.get(&input.to).map(|peer|peer.tx.clone());if let Some(tx)=peer_tx{let live_payload=payload.to_string();tokio::spawn(async move{let _=tx.send(live_payload).await;});}}
     let _=sqlx::query("UPDATE devices SET last_seen_at=now() WHERE id=$1 AND user_id=$2").bind(ctx.device_id).bind(ctx.user_id).execute(&state.db).await;
@@ -1077,9 +1108,11 @@ async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
                 if queued>=MAX_QUEUED_PER_DEVICE{let _=tx.rollback().await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"recipient offline queue is full"}).to_string().into())).await;continue;}
                 let inserted=match sqlx::query("INSERT INTO queued_ciphertexts(id,sender_device_id,recipient_device_id,payload) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING").bind(id).bind(ctx.device_id).bind(to).bind(&payload).execute(&mut *tx).await{Ok(r)=>r.rows_affected()>0,Err(_)=>{warn!("ciphertext insert failed");let _=tx.rollback().await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"message could not be durably stored"}).to_string().into())).await;continue;}};
                 if !inserted{let existing=sqlx::query_as::<_,(Uuid,Value)>("SELECT sender_device_id,payload FROM queued_ciphertexts WHERE recipient_device_id=$1 AND id=$2").bind(to).bind(id).fetch_optional(&mut *tx).await.ok().flatten();if !matches!(existing,Some((sender,stored)) if sender==ctx.device_id && stored==payload){let _=tx.rollback().await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"message ID was already used with different content"}).to_string().into())).await;continue;}}
+                let receipt=sqlx::query("INSERT INTO message_receipts(message_id,sender_user_id,sender_device_id,recipient_user_id,recipient_device_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT(message_id,recipient_device_id) DO UPDATE SET accepted_at=message_receipts.accepted_at WHERE message_receipts.sender_user_id=EXCLUDED.sender_user_id AND message_receipts.sender_device_id=EXCLUDED.sender_device_id AND message_receipts.recipient_user_id=EXCLUDED.recipient_user_id").bind(id).bind(ctx.user_id).bind(ctx.device_id).bind(target_user).bind(to).execute(&mut *tx).await;
+                if !matches!(receipt,Ok(ref result) if result.rows_affected()==1){let _=tx.rollback().await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"message ID conflicts with an existing delivery record"}).to_string().into())).await;continue;}
                 if tx.commit().await.is_err(){let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"message commit failed"}).to_string().into())).await;continue;}
                 if inserted{let peer_tx=state.peers.get(&to).map(|peer|peer.tx.clone());if let Some(tx)=peer_tx{let live_payload=payload.to_string();tokio::spawn(async move{let _=tx.send(live_payload).await;});}}let _=sqlx::query("UPDATE devices SET last_seen_at=now() WHERE id=$1").bind(ctx.device_id).execute(&state.db).await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"accepted","id":id,"to":to}).to_string().into())).await;
-            },ClientFrame::Ack{id}=>{let _=sqlx::query("UPDATE queued_ciphertexts SET delivered_at=COALESCE(delivered_at,now()) WHERE recipient_device_id=$1 AND id=$2").bind(ctx.device_id).bind(id).execute(&state.db).await;},ClientFrame::Heartbeat=>{let _=sqlx::query("UPDATE devices SET last_seen_at=now() WHERE id=$1 AND revoked_at IS NULL").bind(ctx.device_id).execute(&state.db).await;}}
+            },ClientFrame::Ack{id}=>{let _=sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()) WHERE message_id=$1 AND recipient_user_id=$2 AND recipient_device_id=$3").bind(id).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await;let _=sqlx::query("UPDATE queued_ciphertexts SET delivered_at=COALESCE(delivered_at,now()) WHERE recipient_device_id=$1 AND id=$2").bind(ctx.device_id).bind(id).execute(&state.db).await;},ClientFrame::Heartbeat=>{let _=sqlx::query("UPDATE devices SET last_seen_at=now() WHERE id=$1 AND revoked_at IS NULL").bind(ctx.device_id).execute(&state.db).await;}}
         },Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}}
     }}if state.peers.get(&ctx.device_id).is_some_and(|p|p.connection_id==connection_id){state.peers.remove(&ctx.device_id);}
 }

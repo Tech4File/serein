@@ -123,6 +123,9 @@ final class SereinApi {
         return future("POST", "/api/v1/messages", body);
     }
     CompletableFuture<Object> acknowledgeFuture(String id) { return future("POST", "/api/v1/messages/" + id + "/ack", new JSONObject()); }
+    CompletableFuture<Object> markMessageReadFuture(String id) { return future("POST", "/api/v1/messages/" + id + "/read", new JSONObject()); }
+    CompletableFuture<Object> markMessagesReadFuture(JSONArray ids) { try { return future("POST", "/api/v1/messages/read", new JSONObject().put("ids", ids)); } catch (Exception error) { CompletableFuture<Object> result=new CompletableFuture<>(); result.completeExceptionally(error); return result; } }
+    CompletableFuture<Object> messageReceiptsFuture(JSONArray ids) { try { return future("POST", "/api/v1/messages/receipts", new JSONObject().put("ids", ids)); } catch (Exception error) { CompletableFuture<Object> result=new CompletableFuture<>(); result.completeExceptionally(error); return result; } }
     CompletableFuture<JSONObject> backupKeyEnvelope(JSONObject clientPublicKey) throws org.json.JSONException {
         JSONObject body=new JSONObject().put("client_public_key",clientPublicKey);
         return future("POST","/api/v1/backups/key-envelope",body).thenApply(value -> (JSONObject)value);

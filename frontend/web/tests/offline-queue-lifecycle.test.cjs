@@ -51,5 +51,5 @@ test('web stores an incoming message locally before awaiting ACK', () => {
   const end = web.indexOf('\n  async function handlePacket', start);
   const body = web.slice(start, end);
   assert.ok(body.indexOf('await storeLocalMessage(') < body.lastIndexOf('await acknowledgeMessage(packet.id)'));
-  assert.match(body, /if\(state\.seenIds\.has\(packet\.id\)\)\{await acknowledgeMessage\(packet\.id\);return true;\}/);
+  assert.match(body, /if\(state\.seenIds\.has\(packet\.id\)\)\{const knownConversation=.*?await acknowledgeMessage\(packet\.id\);.*?return true;\}/);
 });

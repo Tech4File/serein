@@ -2,6 +2,8 @@ import SwiftUI
 import UIKit
 import UserNotifications
 import UniformTypeIdentifiers
+import AVKit
+import QuickLook
 
 private struct SereinBackupDocument: FileDocument {
     static var readableContentTypes: [UTType] { [.data] }
@@ -35,10 +37,16 @@ struct SereinProductRootView: View {
         return systemDynamicTypeSize < minimum ? minimum : systemDynamicTypeSize
     }
     var body: some View {
-        Group {
-            if api.signedIn { SereinProductTabs(api: api) }
-            else { SereinNativeAuthView(api: api) }
+        ZStack {
+            Group {
+                if api.signedIn { SereinProductTabs(api: api) }
+                else { SereinNativeAuthView(api: api) }
+            }
+            if !api.startupReady {
+                SereinStartupCurtain().transition(.opacity.combined(with: .move(edge: .top))).zIndex(100)
+            }
         }
+        .animation(api.reduceMotion || systemReduceMotion ? nil : .easeInOut(duration: 0.55), value: api.startupReady)
         .tint(SereinPalette.green)
         .environment(\.dynamicTypeSize, effectiveDynamicTypeSize)
         .transaction { transaction in
@@ -52,8 +60,9 @@ struct SereinProductRootView: View {
         .alert("Serein", isPresented: $showingError) {
             Button("OK", role: .cancel) { api.errorMessage = nil }
         } message: { Text(api.errorMessage ?? "") }
-        .onAppear { if lastWhatsNewVersion != displayedAppVersion { showingWhatsNew = true } else { scheduleRestorePrompt() } }
-        .onChange(of: api.user?.id) { userID in if userID != nil { scheduleRestorePrompt() } }
+        .onAppear { if api.startupReady { if lastWhatsNewVersion != displayedAppVersion { showingWhatsNew = true } else { scheduleRestorePrompt() } } }
+        .onChange(of: api.startupReady) { ready in if ready { if lastWhatsNewVersion != displayedAppVersion { showingWhatsNew = true } else { scheduleRestorePrompt() } } }
+        .onChange(of: api.user?.id) { userID in if userID != nil && api.startupReady { scheduleRestorePrompt() } }
         .sheet(isPresented: $showingWhatsNew) { SereinWhatsNewView(version: displayedAppVersion, isFirstInstall: lastWhatsNewVersion.isEmpty) { lastWhatsNewVersion = displayedAppVersion; showingWhatsNew = false; scheduleRestorePrompt() } }
         .sheet(isPresented: $showingRestoreOnboarding) { SereinBackupRestoreOnboarding(api: api) { restorePromptDone = true; showingRestoreOnboarding = false } }
     }
@@ -63,6 +72,37 @@ struct SereinProductRootView: View {
             if showingWhatsNew { scheduleRestorePrompt(); return }
             if api.signedIn && !restorePromptDone { showingRestoreOnboarding = true }
         }
+    }
+}
+
+private struct SereinStartupCurtain: View {
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color(red: 0.035, green: 0.08, blue: 0.10)
+                HStack(spacing: 2) {
+                    curtainPanel
+                    curtainPanel
+                }
+                .overlay(alignment: .center) {
+                    VStack(spacing: 12) {
+                        Image(systemName: "lock.fill").font(.system(size: 28, weight: .medium)).foregroundStyle(.white)
+                        Text("SEREIN").font(.system(size: 19, weight: .bold, design: .rounded)).tracking(3).foregroundStyle(.white)
+                        ProgressView().tint(.white).padding(.top, 2)
+                        Text("Restoring your secure session…").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.white.opacity(0.78))
+                    }.padding(22).background(.black.opacity(0.17), in: RoundedRectangle(cornerRadius: 18))
+                }
+                .frame(width: geometry.size.width, height: geometry.size.height)
+            }
+            .ignoresSafeArea()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Serein is restoring your secure session")
+    }
+    private var curtainPanel: some View {
+        Rectangle().fill(LinearGradient(colors: [Color(red: 0.34, green: 0.08, blue: 0.13), Color(red: 0.52, green: 0.12, blue: 0.18), Color(red: 0.34, green: 0.08, blue: 0.13)], startPoint: .leading, endPoint: .trailing))
+            .overlay(alignment: .leading) { Rectangle().fill(Color.white.opacity(0.035)).frame(width: 2) }
+            .overlay(alignment: .trailing) { Rectangle().fill(Color.black.opacity(0.12)).frame(width: 2) }
     }
 }
 
@@ -262,6 +302,320 @@ private struct SereinConversationSystemEvent: View {
     }
 }
 
+private final class SereinGIFNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+}
+
+private struct SereinNativeGIFResult: Identifiable, Hashable {
+    let url: URL
+    let title: String
+    var id: String { url.absoluteString }
+}
+
+private struct SereinNativeGIFPicker: View {
+    let onSelect: (URL) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var categories: [String] = []
+    @State private var category = "hug"
+    @State private var query = ""
+    @State private var results: [SereinNativeGIFResult] = []
+    @State private var seen = Set<String>()
+    @State private var loading = false
+    @State private var exhausted = false
+    @State private var repeatedBatches = 0
+    @State private var generation = 0
+    @State private var status = "Loading GIF categories…"
+    @State private var errorMessage: String?
+    private let preferred = ["hug", "pat", "wave", "laugh", "dance", "smile"]
+    private static let session = URLSession(configuration: .ephemeral, delegate: SereinGIFNoRedirectDelegate(), delegateQueue: nil)
+    private let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    TextField("Search GIFs", text: $query).textFieldStyle(.roundedBorder).submitLabel(.search).onSubmit { Task { await search() } }
+                    Button("Search") { Task { await search() } }.disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 7) {
+                        ForEach(categories, id: \.self) { item in
+                            Button(item.capitalized) { query="";category=item;resetAndLoad() }
+                                .font(.system(size: 11, weight: .semibold, relativeTo: .body))
+                                .padding(.horizontal, 12).padding(.vertical, 7)
+                                .background(query.isEmpty && category == item ? SereinPalette.paleMint : Color.secondary.opacity(0.1), in: Capsule())
+                        }
+                    }
+                }.frame(height: 36)
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 9) {
+                        ForEach(results) { result in
+                            Button { Task { await download(result) } } label: {
+                                VStack(spacing: 4) {
+                                    AsyncImage(url: result.url) { phase in
+                                        if let image=phase.image { image.resizable().scaledToFill() }
+                                        else { ZStack { Color.secondary.opacity(0.12); if phase.error == nil { ProgressView() } else { Image(systemName: "photo") } } }
+                                    }.frame(height: 116).frame(maxWidth: .infinity).clipped().clipShape(RoundedRectangle(cornerRadius: 10))
+                                    Text(result.title.isEmpty ? "GIF" : result.title).font(.system(size: 10, relativeTo: .body)).lineLimit(1).foregroundStyle(.primary)
+                                }
+                            }.buttonStyle(.plain).onAppear { if result.id == results.last?.id { Task { await loadBatch() } } }
+                        }
+                    }
+                    if loading { ProgressView().padding(12) }
+                    if let errorMessage { Text(errorMessage).font(.system(size: 11, relativeTo: .body)).foregroundStyle(.red).padding(10) }
+                    Text(status+" Search terms and request metadata are sent to nekos.best.").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(10)
+                    if !exhausted && !results.isEmpty { Button("Load more") { Task { await loadBatch() } }.font(.system(size: 12, weight: .semibold, relativeTo: .body)).padding(.bottom, 12) }
+                }
+            }.padding(12).navigationTitle("GIFs").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+                .task { await loadCategories() }
+        }
+    }
+
+    private func loadCategories() async {
+        guard categories.isEmpty else { await loadBatch(); return }
+        do {
+            let (data,response)=try await Self.session.data(from:URL(string:"https://nekos.best/api/v2/endpoints")!)
+            guard (response as? HTTPURLResponse)?.statusCode == 200, let payload=try JSONSerialization.jsonObject(with:data) as? [String:Any] else { throw URLError(.badServerResponse) }
+            let available=Set(payload.compactMap { pair -> String? in ((pair.value as? [String:Any])?["format"] as? String)=="gif" ? pair.key : nil })
+            categories=preferred.filter { available.contains($0) }
+            if categories.isEmpty { categories=Array(available.sorted().prefix(6)) }
+            guard !categories.isEmpty else { throw URLError(.cannotParseResponse) }
+            if !categories.contains(category) { category=categories[0] }
+            await loadBatch()
+        } catch { errorMessage="GIF categories could not load. Try again or attach a local file.";status="GIF service unavailable." }
+    }
+    private func resetAndLoad() { generation += 1;loading=false;results=[];seen=[];exhausted=false;repeatedBatches=0;errorMessage=nil;Task { await loadBatch() } }
+    private func search() async {
+        let value=query.trimmingCharacters(in:.whitespacesAndNewlines).split(whereSeparator: \.isWhitespace).joined(separator:" ")
+        guard !value.isEmpty else { return }
+        generation += 1;loading=false;query=String(value.prefix(80));results=[];seen=[];exhausted=false;repeatedBatches=0;errorMessage=nil;await loadBatch()
+    }
+    private func loadBatch() async {
+        guard !loading && !exhausted else { return };loading=true;let requestGeneration=generation;errorMessage=nil
+        var parts=URLComponents(string:"https://nekos.best/api/v2/"+(query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty ? category : "search"))!
+        var items=[URLQueryItem(name:"type",value:"2"),URLQueryItem(name:"amount",value:"15")]
+        if !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { items.append(URLQueryItem(name:"query",value:query)) }
+        parts.queryItems=items
+        do {
+            let (data,response)=try await Self.session.data(from:parts.url!)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,let payload=try JSONSerialization.jsonObject(with:data) as? [String:Any] else { throw URLError(.badServerResponse) }
+            guard requestGeneration == generation else { return }
+            let raw=payload["results"] as? [[String:Any]] ?? []
+            var added=0
+            for row in raw {
+                guard let string=row["url"] as? String,let url=URL(string:string),url.scheme=="https",url.host=="nekos.best",url.path.hasPrefix("/api/v2/") else { continue }
+                if seen.insert(url.absoluteString).inserted { results.append(SereinNativeGIFResult(url:url,title:String((row["anime_name"] as? String ?? "GIF").prefix(80))));added += 1 }
+            }
+            repeatedBatches=added==0 ? repeatedBatches+1 : 0
+            if raw.count<15 || repeatedBatches>=3 || results.count>=120 { exhausted=true }
+            loading=false
+            status=query.isEmpty ? "\(results.count) GIFs loaded." : "\(results.count) GIFs for ‘\(query)’ ."
+        } catch { guard requestGeneration == generation else { return };loading=false;errorMessage="Could not load GIFs: \(error.localizedDescription)" }
+    }
+    private func download(_ item: SereinNativeGIFResult) async {
+        loading=true;defer { loading=false }
+        do {
+            let (temporary,response)=try await Self.session.download(from:item.url)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,(response as? HTTPURLResponse)?.mimeType?.lowercased().hasPrefix("image/")==true else { throw URLError(.cannotDecodeContentData) }
+            let values=try temporary.resourceValues(forKeys:[.fileSizeKey]);guard let size=values.fileSize,size>0,size<=64*1024*1024 else { throw URLError(.dataLengthExceedsMaximum) }
+            let destination=FileManager.default.temporaryDirectory.appendingPathComponent("serein-nekos-\(UUID().uuidString).gif")
+            try FileManager.default.moveItem(at:temporary,to:destination);onSelect(destination);dismiss()
+        } catch { errorMessage="GIF download failed: \(error.localizedDescription)" }
+    }
+}
+
+private struct SereinMediaViewerItem: Identifiable {
+    let attachment: SereinEncryptedAttachment
+    let url: URL
+    var id: String { attachment.transferID }
+}
+
+private struct SereinContactProfile: View {
+    @ObservedObject var api: SereinAPI
+    @ObservedObject var engine: SereinChatEngine
+    let contact: SereinContact
+    let messages: [SereinChatMessage]
+    @Environment(\.dismiss) private var dismiss
+    @State private var favorite = false
+    @State private var showMediaLibrary = false
+    @State private var selectedMedia: SereinMediaViewerItem?
+    @State private var openingTransferID: String?
+    private var allAttachments: [SereinChatMessage] { messages.filter { $0.attachment != nil }.sorted { $0.createdAt > $1.createdAt } }
+    private var latestFour: [SereinChatMessage] { Array(allAttachments.prefix(4)) }
+    private var favoriteKey: String { "serein.favorite.\(api.user?.id ?? "local").\(contact.user_id)" }
+    var body: some View {
+        NavigationView {
+            List {
+                Section {
+                    VStack(spacing: 8) {
+                        SereinAvatar(name: contact.display_name, size: 82)
+                        Text(contact.display_name).font(.system(size: 22, weight: .bold, relativeTo: .body))
+                        Text("@\(contact.username)").font(.system(size: 13, relativeTo: .body)).foregroundStyle(.secondary)
+                        Label(contact.email_verified ? "Email verified" : "Email not verified", systemImage: contact.email_verified ? "checkmark.seal.fill" : "exclamationmark.circle")
+                            .font(.system(size: 11, relativeTo: .body)).foregroundStyle(contact.email_verified ? SereinPalette.green : .secondary)
+                        Text("Private account email is not shared.").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.tertiary)
+                    }.frame(maxWidth: .infinity).padding(.vertical, 10)
+                }
+                Section("About") {
+                    profileLine("Username", "@\(contact.username)")
+                    profileLine("Active devices", "\(contact.devices.count)")
+                    if let connected=contact.connected_at { profileLine("Friends since", profileDate(connected)) }
+                }
+                Section {
+                    HStack { Text("Shared media").font(.system(size: 14, weight: .semibold, relativeTo: .body)); Spacer(); Button("View all") { showMediaLibrary=true }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
+                    Text("\(allAttachments.count) file\(allAttachments.count == 1 ? "" : "s") · latest four").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                    if latestFour.isEmpty { Text("Shared photos, GIFs, videos, audio and documents will appear here.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary).padding(.vertical, 8) }
+                    else {
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 7), GridItem(.flexible(), spacing: 7)], spacing: 7) {
+                            ForEach(latestFour) { message in
+                                if let attachment=message.attachment {
+                                    SereinCompactMediaTile(attachment: attachment, localURL: engine.localFile(for: attachment), isLoading: openingTransferID == attachment.transferID) {
+                                        openMedia(attachment)
+                                    }
+                                }
+                            }
+                        }.padding(.vertical, 3)
+                    }
+                }
+                Section {
+                    Toggle(isOn: $favorite) { Label("Favorite", systemImage: favorite ? "star.fill" : "star") }
+                        .onChange(of: favorite) { value in UserDefaults.standard.set(value, forKey: favoriteKey) }
+                    Button(role: .destructive) { Task { await api.block(contact); dismiss() } } label: { Label("Block contact", systemImage: "hand.raised.fill") }
+                        .disabled(contact.isDeleted)
+                }
+            }.listStyle(.insetGrouped).navigationTitle("Contact profile").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                .onAppear { favorite=UserDefaults.standard.bool(forKey:favoriteKey) }
+        }
+        .fullScreenCover(isPresented: $showMediaLibrary) {
+            SereinMediaLibrary(engine: engine, messages: allAttachments, onClose: { showMediaLibrary=false })
+        }
+        .fullScreenCover(item: $selectedMedia) { item in SereinDirectMediaViewer(item: item) }
+    }
+    private func openMedia(_ attachment: SereinEncryptedAttachment) {
+        guard openingTransferID == nil else { return }
+        openingTransferID=attachment.transferID
+        Task {
+            var url=engine.localFile(for:attachment)
+            if url == nil { url=await engine.download(attachment) }
+            openingTransferID=nil
+            if let url { selectedMedia=SereinMediaViewerItem(attachment:attachment,url:url) }
+        }
+    }
+    @ViewBuilder private func profileLine(_ title: String, _ value: String) -> some View { HStack { Text(title).foregroundStyle(.secondary); Spacer(); Text(value).multilineTextAlignment(.trailing) }.font(.system(size: 12, relativeTo: .body)) }
+    private func profileDate(_ value: String) -> String { guard let date=ISO8601DateFormatter().date(from:value) else { return value };let f=DateFormatter();f.dateStyle = .medium;return f.string(from:date) }
+}
+
+private struct SereinCompactMediaTile: View {
+    let attachment: SereinEncryptedAttachment
+    let localURL: URL?
+    let isLoading: Bool
+    let action: () -> Void
+    private var kind: String { SereinMediaLibrary.kind(for: attachment) }
+    var body: some View {
+        Button(action:action) {
+            VStack(alignment:.leading,spacing:5) {
+                ZStack {
+                    RoundedRectangle(cornerRadius:9).fill(Color.secondary.opacity(0.10))
+                    if (kind == "photo" || kind == "gif"),let localURL,let image=UIImage(contentsOfFile:localURL.path) { Image(uiImage:image).resizable().scaledToFill().frame(maxWidth:.infinity).frame(height:78).clipped().clipShape(RoundedRectangle(cornerRadius:9)) }
+                    else { Image(systemName:kind == "video" ? "play.rectangle.fill" : kind == "audio" ? "waveform" : kind == "gif" ? "sparkles" : kind == "photo" ? "photo" : "doc.fill").font(.system(size:22,weight:.medium)).foregroundStyle(SereinPalette.green) }
+                    if isLoading { ProgressView().padding(5).background(.thinMaterial,in:Circle()) }
+                }.frame(height:78).frame(maxWidth:.infinity).clipped()
+                Text(attachment.filename).font(.system(size:10,weight:.medium,relativeTo:.body)).lineLimit(1).frame(maxWidth:.infinity,alignment:.leading)
+                Text("\(kind.capitalized) · \(SereinMediaLibrary.bytes(attachment.size))").font(.system(size:9,relativeTo:.body)).foregroundStyle(.secondary).lineLimit(1)
+            }.padding(6).background(Color.secondary.opacity(0.07),in:RoundedRectangle(cornerRadius:11))
+        }.buttonStyle(.plain).disabled(isLoading)
+    }
+}
+
+private struct SereinMediaLibrary: View {
+    @ObservedObject var engine:SereinChatEngine
+    let messages: [SereinChatMessage]
+    let onClose: () -> Void
+    @State private var selectedTab="media"
+    @State private var mediaFilter="all"
+    @State private var selectedMedia:SereinMediaViewerItem?
+    @State private var openingTransferID:String?
+    private let columns=[GridItem(.flexible(),spacing:9),GridItem(.flexible(),spacing:9)]
+    private var attachments:[SereinEncryptedAttachment]{messages.filter{$0.attachment != nil}.sorted{$0.createdAt>$1.createdAt}.compactMap(\.attachment)}
+    private var displayed:[SereinEncryptedAttachment]{attachments.filter{attachment in let kind=Self.kind(for:attachment);if selectedTab=="documents"{return kind=="document"};return kind != "document" && (mediaFilter=="all" || kind==mediaFilter)}}
+    var body: some View {
+        NavigationView {
+            VStack(spacing:8) {
+                HStack(spacing:5) {
+                    tabButton("Media",value:"media");tabButton("Documents",value:"documents")
+                }.padding(4).background(Color.secondary.opacity(0.10),in:RoundedRectangle(cornerRadius:12))
+                if selectedTab=="media" { ScrollView(.horizontal,showsIndicators:false) { HStack(spacing:7) { for (label,value) in [("All","all"),("Photos","photo"),("GIFs","gif"),("Videos","video"),("Audio","audio")] { Button(label){mediaFilter=value}.font(.system(size:11,weight:.semibold,relativeTo:.body)).padding(.horizontal,12).padding(.vertical,7).background(mediaFilter==value ? SereinPalette.paleMint : Color.secondary.opacity(0.09),in:Capsule()) } } }.frame(height:34) }
+                Text("\(displayed.count) \(selectedTab == "documents" ? "documents" : "media files") · newest first").font(.system(size:10,relativeTo:.body)).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading)
+                if displayed.isEmpty { Spacer();VStack(spacing:10){Image(systemName:selectedTab=="documents" ? "doc" : "photo.on.rectangle.angled").font(.system(size:32)).foregroundStyle(.secondary);Text(selectedTab=="documents" ? "No documents yet" : "No media yet").font(.system(size:16,weight:.semibold));Text("Files shared in this conversation will appear here.").font(.system(size:11)).foregroundStyle(.secondary).multilineTextAlignment(.center)}.padding(24);Spacer() }
+                else { ScrollView { LazyVGrid(columns:columns,spacing:9) { ForEach(displayed,id:\.transferID) { attachment in SereinCompactMediaTile(attachment:attachment,localURL:engine.localFile(for:attachment),isLoading:openingTransferID==attachment.transferID){openMedia(attachment)} } }.padding(.vertical,7) } }
+            }.padding(12).navigationTitle("Shared files").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement:.cancellationAction) { Button("Close",action:onClose) } }
+        }
+        .fullScreenCover(item:$selectedMedia){item in SereinDirectMediaViewer(item:item)}
+    }
+    private func openMedia(_ attachment:SereinEncryptedAttachment){guard openingTransferID==nil else{return};openingTransferID=attachment.transferID;Task{var url=engine.localFile(for:attachment);if url==nil{url=await engine.download(attachment)};openingTransferID=nil;if let url{selectedMedia=SereinMediaViewerItem(attachment:attachment,url:url)}}}
+    private func tabButton(_ title:String,value:String)->some View { Button { selectedTab=value } label:{ Text(title).font(.system(size:13,weight:.semibold,relativeTo:.body)).frame(maxWidth:.infinity).padding(.vertical,9).background(selectedTab==value ? Color(uiColor:.systemBackground) : .clear,in:RoundedRectangle(cornerRadius:9)) }.buttonStyle(.plain) }
+    static func kind(for attachment:SereinEncryptedAttachment)->String { let type=attachment.contentType.lowercased(),name=attachment.filename.lowercased();if type=="image/gif" || name.hasSuffix(".gif"){return "gif"};if type.hasPrefix("image/"){return "photo"};if type.hasPrefix("video/"){return "video"};if type.hasPrefix("audio/"){return "audio"};return "document" }
+    static func bytes(_ size:Int64)->String { if size<1024{return "\(size) B"};if size<1_048_576{return String(format:"%.1f KB",Double(size)/1024)};return String(format:"%.1f MB",Double(size)/1_048_576) }
+}
+
+private struct SereinDirectMediaViewer: View {
+    let item:SereinMediaViewerItem
+    @Environment(\.dismiss) private var dismiss
+    @State private var player:AVPlayer?
+    private var kind:String { SereinMediaLibrary.kind(for:item.attachment) }
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing:12) {
+                HStack { VStack(alignment:.leading,spacing:2){Text(item.attachment.filename).font(.system(size:14,weight:.semibold)).lineLimit(1);Text("\(item.attachment.contentType) · \(SereinMediaLibrary.bytes(item.attachment.size))").font(.system(size:10)).foregroundStyle(.white.opacity(0.7))};Spacer();Button("Done"){player?.pause();dismiss()}.font(.system(size:12,weight:.semibold)).padding(.horizontal,12).padding(.vertical,8).background(.white.opacity(0.13),in:Capsule()) }.foregroundStyle(.white).padding(.horizontal,14).padding(.top,8)
+                Spacer(minLength:8)
+                if kind=="photo" || kind=="gif" {
+                    if let image=UIImage(contentsOfFile:item.url.path){Image(uiImage:image).resizable().scaledToFit().frame(maxWidth:.infinity,maxHeight:.infinity)}else{VStack(spacing:8){Image(systemName:"photo").font(.system(size:38));Text("Preview unavailable").font(.system(size:13))}.foregroundStyle(.white.opacity(0.8))}
+                } else if kind=="video" { if let player { VideoPlayer(player:player).frame(maxWidth:.infinity,maxHeight:.infinity).onAppear{player.play()} } else { ProgressView().tint(.white) } }
+                else if kind=="audio" { VStack(spacing:12){Image(systemName:"waveform").font(.system(size:64)).foregroundStyle(.white);if let player { VideoPlayer(player:player).frame(height:90) } else { ProgressView().tint(.white) }} }
+                else { SereinQuickLookDocument(url:item.url).frame(maxWidth:.infinity,maxHeight:.infinity) }
+                Spacer(minLength:8)
+                HStack { Text("Saved in Serein’s on-device Downloads folder.").font(.system(size:10)).foregroundStyle(.white.opacity(0.68));Spacer();Button("Open in…"){if let view=UIApplication.shared.connectedScenes.compactMap({$0 as? UIWindowScene}).flatMap(\.windows).first(where:{$0.isKeyWindow})?.rootViewController{try? SereinAttachmentStore.shared.open(item.url,from:view)}}.font(.system(size:11,weight:.semibold)) }.foregroundStyle(.white).padding(.horizontal,14).padding(.bottom,12)
+            }
+        }.onAppear{if kind=="video" || kind=="audio"{player=AVPlayer(url:item.url)}}.onDisappear{player?.pause()}
+    }
+}
+
+private struct SereinQuickLookDocument: UIViewControllerRepresentable {
+    let url:URL
+    func makeCoordinator()->Coordinator{Coordinator(url:url)}
+    func makeUIViewController(context:Context)->QLPreviewController{let controller=QLPreviewController();controller.dataSource=context.coordinator;return controller}
+    func updateUIViewController(_ controller:QLPreviewController,context:Context){}
+    final class Coordinator:NSObject,QLPreviewControllerDataSource {
+        let url:URL
+        init(url:URL){self.url=url}
+        func numberOfPreviewItems(in controller:QLPreviewController)->Int{1}
+        func previewController(_ controller:QLPreviewController,previewItemAt index:Int)->QLPreviewItem{url as NSURL}
+    }
+}
+
+private struct SereinConversationTimelineItem: Identifiable {
+    let id: String
+    let createdAt: String
+    let message: SereinChatMessage?
+    let eventText: String?
+    var startsNewDay = false
+}
+
+private struct SereinConversationDaySeparator: View {
+    let timestamp: String
+    private var title: String {
+        guard let date=ISO8601DateFormatter().date(from:timestamp) else { return timestamp }
+        if Calendar.current.isDateInToday(date) { return "Today" }
+        if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
+        let formatter=DateFormatter();formatter.dateFormat=Calendar.current.component(.year, from: date)==Calendar.current.component(.year, from: Date()) ? "EEEE, MMM d" : "EEEE, MMM d, yyyy";return formatter.string(from:date)
+    }
+    var body: some View { Text(title.uppercased()).font(.system(size: 10, weight: .semibold, relativeTo: .body)).tracking(0.5).foregroundStyle(.secondary).padding(.horizontal,12).padding(.vertical,6).background(Color.secondary.opacity(0.09),in:Capsule()).frame(maxWidth:.infinity).padding(.vertical,4) }
+}
+
 private struct SereinConversationWallpaper: View {
     @Environment(\.colorScheme) private var colorScheme
     var body: some View {
@@ -296,7 +650,10 @@ private struct SereinConversationWallpaper: View {
 
 private struct SereinNativeConversation: View {
     let contact: SereinContact
+    @ObservedObject private var api: SereinAPI
     @StateObject private var engine: SereinChatEngine
+    @State private var showProfile = false
+    @State private var showGIFPicker = false
     @State private var draft = ""
     @State private var showKeys = false
     @State private var showFilePicker = false
@@ -320,6 +677,7 @@ private struct SereinNativeConversation: View {
 
     init(api: SereinAPI, contact: SereinContact) {
         self.contact = contact
+        _api = ObservedObject(wrappedValue: api)
         _engine = StateObject(wrappedValue: SereinChatEngine(api: api, contact: contact))
     }
 
@@ -333,8 +691,10 @@ private struct SereinNativeConversation: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        if let connected = contact.connected_at { SereinConversationSystemEvent(text: "You and \(engine.peerDisplayName.replacingOccurrences(of: " (Deleted User)", with: "")) are now friends.", timestamp: connected) }
-                        ForEach(engine.messages) { message in
+                        ForEach(timeline) { item in
+                            if item.startsNewDay { SereinConversationDaySeparator(timestamp: item.createdAt) }
+                            if let event=item.eventText { SereinConversationSystemEvent(text:event,timestamp:item.createdAt) }
+                            if let message=item.message {
                             HStack(alignment: .bottom, spacing: 7) {
                                 if message.mine { Spacer(minLength: 34) }
                                 VStack(alignment: .leading, spacing: 5) {
@@ -353,31 +713,19 @@ private struct SereinNativeConversation: View {
                                             }.buttonStyle(.bordered).font(.system(size: 10, weight: .semibold, relativeTo: .body))
                                         }.padding(9).background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.035), in: RoundedRectangle(cornerRadius: 10))
                                     }
-                                    Text("\(message.mine ? "You" : message.sender) · \(message.status)").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                                    Text(message.mine ? deliverySummary(message) : "\(message.sender) · \(formatMessageTime(message.createdAt))").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
                                         .frame(maxWidth: .infinity, alignment: .trailing)
                                 }
                                 .padding(.horizontal, 12).padding(.vertical, 9)
                                 .frame(maxWidth: UIScreen.main.bounds.width * 0.82, alignment: .leading)
                                 .background(message.mine ? outgoingBubble : incomingBubble, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                                 if !message.mine { Spacer(minLength: 34) }
-                            }.id(message.id)
+                            }.id(item.id)
+                            }
                         }
-                        if (contact.isDeleted || engine.archived), let deleted = engine.deletedAt ?? contact.deleted_at { SereinConversationSystemEvent(text: "\(engine.peerDisplayName.replacingOccurrences(of: " (Deleted User)", with: "")) deleted his account. No new messages are allowed.", timestamp: deleted) }
                     }.padding(.vertical, 8)
                 }.onChange(of: engine.messages.count) { _ in if let last = engine.messages.last { proxy.scrollTo(last.id, anchor: .bottom) } }
             }.background(SereinConversationWallpaper())
-            if showEmojiPicker {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack { Text("Emojis").font(.system(size: 12, weight: .semibold, relativeTo: .body)); Spacer(); Button("Choose GIF or image") { showFilePicker = true }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 8), spacing: 5) {
-                        ForEach(Self.commonEmojis, id: \.self) { emoji in
-                            Button { insertEmoji(emoji) } label: { Text(emoji).font(.system(size: 23)).frame(maxWidth: .infinity).frame(height: 34).contentShape(Rectangle()) }
-                                .buttonStyle(.plain).accessibilityLabel("Insert \(emoji)")
-                        }
-                    }.frame(maxHeight: 128).clipped()
-                    Text("Keyboard emojis stay in the message. Pasted GIFs and images use encrypted attachments.").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
-                }.padding(9).background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
-            }
             HStack(alignment: .bottom, spacing: 6) {
                 Button { showEmojiPicker.toggle() } label: { Image(systemName: "face.smiling").font(.system(size: 19, relativeTo: .body)).frame(width: 36, height: 40) }
                     .buttonStyle(.bordered).accessibilityLabel("Choose an emoji").accessibilityHint("Insert an emoji or choose a GIF file").disabled(!engine.ready || contact.isDeleted || engine.archived)
@@ -390,8 +738,30 @@ private struct SereinNativeConversation: View {
             }
         }
         .padding()
+        .overlay(alignment: .bottom) {
+            if showEmojiPicker {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack { Text("Emojis").font(.system(size: 12, weight: .semibold, relativeTo: .body)); Spacer(); Button("Browse GIFs") { showGIFPicker = true }.font(.system(size: 11, weight: .semibold, relativeTo: .body)); Button("Attach file") { showFilePicker = true }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 8), spacing: 5) {
+                        ForEach(Self.commonEmojis, id: \.self) { emoji in
+                            Button { insertEmoji(emoji) } label: { Text(emoji).font(.system(size: 23)).frame(maxWidth: .infinity).frame(height: 34).contentShape(Rectangle()) }
+                                .buttonStyle(.plain).accessibilityLabel("Insert \(emoji)")
+                        }
+                    }.frame(maxHeight: 128).clipped()
+                    Text("GIFs and images use the encrypted attachment path.").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                }.padding(9).frame(maxWidth: .infinity).background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12)).shadow(color: .black.opacity(0.18), radius: 12, y: 4).padding(.horizontal, 10).padding(.bottom, 54).transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: showEmojiPicker)
         .navigationTitle(engine.peerDisplayName).navigationBarTitleDisplayMode(.inline)
-        .toolbar { if !contact.isDeleted && !engine.archived { ToolbarItem(placement: .navigationBarTrailing) { Button { Task { do { try await engine.refreshPeerKeys() } catch { } } } label: { Image(systemName: "arrow.clockwise") } } } }
+        .toolbar {
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Button { showProfile = true } label: { Image(systemName: "info.circle") }.accessibilityLabel("Contact profile and shared media")
+                if !contact.isDeleted && !engine.archived { Button { Task { do { try await engine.refreshPeerKeys() } catch { } } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Refresh security details") }
+            }
+        }
+        .sheet(isPresented: $showProfile) { SereinContactProfile(api: api, engine: engine, contact: contact, messages: engine.messages) }
+        .sheet(isPresented: $showGIFPicker) { SereinNativeGIFPicker { url in Task { defer { try? FileManager.default.removeItem(at: url) }; await engine.sendFile(url: url, filename: url.lastPathComponent, contentType: "image/gif") } } }
         .task {
             if !engine.ready { await engine.initialize() }
             guard !contact.isDeleted && !engine.archived else { return }
@@ -449,6 +819,24 @@ private struct SereinNativeConversation: View {
         Task { defer { try? FileManager.default.removeItem(at: url) }; await engine.sendFile(url: url, filename: filename, contentType: mime) }
     }
 
+    private var timeline: [SereinConversationTimelineItem] {
+        var items=engine.messages.map { SereinConversationTimelineItem(id:$0.id,createdAt:$0.createdAt,message:$0,eventText:nil) }
+        let name=engine.peerDisplayName.replacingOccurrences(of:" (Deleted User)",with:"")
+        if let connected=contact.connected_at { items.append(SereinConversationTimelineItem(id:"connection-event",createdAt:connected,message:nil,eventText:"You and \(name) are now friends.")) }
+        if (contact.isDeleted || engine.archived),let deleted=engine.deletedAt ?? contact.deleted_at { items.append(SereinConversationTimelineItem(id:"deleted-event",createdAt:deleted,message:nil,eventText:"\(name) deleted his account. No new messages are allowed.")) }
+        var previousDay=""
+        return items.sorted { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt }.map { value in
+            var row=value;let key=conversationDay(row.createdAt);row.startsNewDay=previousDay != key;previousDay=key;return row
+        }
+    }
+    private func deliverySummary(_ message: SereinChatMessage) -> String {
+        let label = message.readCount > 0 ? "Read" : (message.deliveredCount > 0 ? "Delivered" : (message.status == "pending" ? "Queued" : "Sent"))
+        let counted = message.readCount > 0 ? message.readCount : message.deliveredCount
+        let devices = message.recipientCount > 0 ? " · \(counted)/\(message.recipientCount) devices" : ""
+        return "\(label)\(devices) · \(formatMessageTime(message.createdAt))"
+    }
+    private func conversationDay(_ timestamp: String) -> String { ISO8601DateFormatter().date(from: timestamp).map { Calendar.current.startOfDay(for: $0).formatted(.iso8601.year().month().day()) } ?? timestamp }
+    private func formatMessageTime(_ timestamp: String) -> String { guard let date=ISO8601DateFormatter().date(from:timestamp) else { return timestamp };let f=DateFormatter();f.timeStyle = .short;return f.string(from:date) }
     private func formatBytes(_ size: Int64) -> String {
         if size < 1024 { return "\(size) B" }
         if size < 1024 * 1024 { return String(format: "%.1f KB", Double(size) / 1024) }
