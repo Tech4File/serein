@@ -30,7 +30,7 @@ struct SereinBackupRestoreOnboarding: View {
                     Button("Skip restore") { confirmSkip = true }.buttonStyle(.bordered).disabled(busy)
                 } else if phase == "password" {
                     Text("Legacy backup password").font(.system(size: 22, weight: .bold, relativeTo: .body))
-                    Text("This v1 file requires its original backup password. New v2 backups use the stable account identity and never use the account password.").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary)
+                    Text("This v1 file requires its original password. New v3 backups use a random server-held backup-only key requested through a one-use encrypted exchange; the service can access that key. Older v2 files remain restorable.").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary)
                     SecureField("Original backup password", text: $legacyPassword).textContentType(.password).textInputAutocapitalization(.never).autocorrectionDisabled()
                     Button(busy ? "Opening…" : "Open legacy backup") { openSelectedBackup(password: legacyPassword) }.buttonStyle(.borderedProminent).disabled(busy || legacyPassword.isEmpty)
                     Button("Choose a different file") { showPicker = true }.disabled(busy)
@@ -57,7 +57,7 @@ struct SereinBackupRestoreOnboarding: View {
             .toolbar { if phase == "intro" { ToolbarItem(placement: .cancellationAction) { Button("Not now") { confirmSkip = true } } } }
         }
         .interactiveDismissDisabled()
-        .fileImporter(isPresented: $showPicker, allowedContentTypes: [.data], allowsMultipleSelection: false) { result in
+        .fileImporter(isPresented: $showPicker, allowedContentTypes: [UTType(filenameExtension: "srbk", conformingTo: .data) ?? .data], allowsMultipleSelection: false) { result in
             switch result {
             case .failure: status = "File selection was cancelled. You can choose a backup or make the one-time skip decision."
             case .success(let urls): guard let url = urls.first else { status = "No backup file was selected."; return }; readSelectedBackup(url)
@@ -70,6 +70,7 @@ struct SereinBackupRestoreOnboarding: View {
     }
 
     @MainActor private func readSelectedBackup(_ url: URL) {
+        guard url.pathExtension.lowercased() == "srbk" else { status = "Only .srbk Serein backup files can be restored."; phase = "intro"; return }
         guard currentUser != nil else { status = "Sign in again before restoring a backup."; return }
         let hasScope = url.startAccessingSecurityScopedResource()
         defer { if hasScope { url.stopAccessingSecurityScopedResource() } }
@@ -86,19 +87,24 @@ struct SereinBackupRestoreOnboarding: View {
 
     @MainActor private func openSelectedBackup(password: String) {
         guard let user = currentUser, let bytes = fileBytes else { status = "Choose a backup file first."; return }
-        busy = true; status = "Authenticating and checking the encrypted snapshot…"
-        DispatchQueue.global(qos: .userInitiated).async {
+        busy = true; status = backupInfo?.version == 3 ? "Requesting the account backup key through a one-use encrypted exchange…" : "Authenticating and checking the encrypted snapshot…"
+        Task {
+            var keyBytes = Data()
+            defer { if !keyBytes.isEmpty { keyBytes.resetBytes(in: 0..<keyBytes.count) } }
             do {
-                let opened = try SereinBackupStore.open(accountID: user.id, username: user.username, legacyPassword: password, file: bytes)
+                if backupInfo?.version == 3 { keyBytes = try await api.requestBackupKey(accountID: user.id) }
+                let keyForCodec = keyBytes
+                let opened = try await Task.detached(priority: .userInitiated) {
+                    try SereinBackupStore.open(accountID: user.id, username: user.username, legacyPassword: password, backupKey: keyForCodec, file: bytes)
+                }.value
                 guard let rows = opened.data["messages"] as? [[String: Any]], rows.count <= SereinBackupStore.maximumMessages,
                       (opened.data["snapshot_version"] as? Int) == 1 else { throw SereinBackupStore.BackupError.accountOrContentsInvalid }
                 let includesMedia = ((opened.data["media"] as? [String: Any])?["included"] as? Bool) ?? false
-                DispatchQueue.main.async {
-                    snapshot = opened.data; backupInfo = opened.info; mediaIncluded = includesMedia
-                    legacyPassword = ""; status = ""; phase = "confirm"; busy = false
-                }
+                snapshot = opened.data; backupInfo = opened.info; mediaIncluded = includesMedia
+                legacyPassword = ""; status = ""; phase = "confirm"; busy = false
             } catch {
-                DispatchQueue.main.async { legacyPassword = ""; status = error.localizedDescription; busy = false; if backupInfo?.version == 1 { phase = "password" } else { phase = "intro" } }
+                legacyPassword = ""; status = error.localizedDescription; busy = false
+                if backupInfo?.version == 1 { phase = "password" } else { phase = "intro" }
             }
         }
     }

@@ -123,6 +123,10 @@ final class SereinApi {
         return future("POST", "/api/v1/messages", body);
     }
     CompletableFuture<Object> acknowledgeFuture(String id) { return future("POST", "/api/v1/messages/" + id + "/ack", new JSONObject()); }
+    CompletableFuture<JSONObject> backupKeyEnvelope(JSONObject clientPublicKey) throws org.json.JSONException {
+        JSONObject body=new JSONObject().put("client_public_key",clientPublicKey);
+        return future("POST","/api/v1/backups/key-envelope",body).thenApply(value -> (JSONObject)value);
+    }
     CompletableFuture<Object> transfers() { return future("GET", "/api/v1/transfers", null); }
     CompletableFuture<Object> createTransfer(JSONObject body) { return future("POST", "/api/v1/transfers", body); }
     CompletableFuture<Object> acknowledgeTransfer(String id) { return future("POST", "/api/v1/transfers/" + id + "/ack", new JSONObject()); }

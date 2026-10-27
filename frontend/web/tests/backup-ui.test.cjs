@@ -14,12 +14,16 @@ test('web settings expose manual encrypted backup and restore controls with corr
   assert.ok(backupScript >= 0 && appScript > backupScript, 'backup crypto adapter must load before the application');
   assert.match(html, /\.srbk/);
   assert.match(html, /Automatic scheduling[\s\S]*?not wired yet/);
-  assert.match(html, /stable, account-specific key derived locally from the authenticated account ID/);
+  assert.match(html, /random, stable backup-only key[\s\S]*service stores that key encrypted at rest/);
   assert.match(html, /Legacy version 1 files still require the password/);
   const app = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
   assert.match(app, /SereinBackupCrypto\.legacyVersion/);
-  assert.match(app, /SereinBackupCrypto\.encrypt\(identity,snapshot\)/);
-  assert.match(app, /SereinBackupCrypto\.decrypt\(identity,fileBytes,legacyPassword\)/);
+  assert.match(app, /SereinBackupCrypto\.encrypt\(identity,snapshot,backupKey\)/);
+  assert.match(app, /SereinBackupCrypto\.decrypt\(identity,fileBytes,legacyPassword,backupKey\)/);
+  assert.match(app, /api\('\/api\/v1\/backups\/key-envelope'/);
+  assert.match(app, /serein-backup-key-envelope-kdf-v1/);
+  assert.match(app, /generateKey\(\{name:'ECDH',namedCurve:'P-256'\},false,\['deriveBits'\]\)/);
+  assert.match(app, /backupKey\?\.fill\(0\)/);
 });
 
 test('verified sign-in requires OTP before returning the account UUID to the client', () => {

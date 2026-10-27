@@ -10,7 +10,10 @@ const onboarding = fs.readFileSync(path.join(root, 'SereinBackupRestoreOnboardin
 const view = fs.readFileSync(path.join(root, 'SereinProductView.swift'), 'utf8');
 const project = fs.readFileSync(path.join(root, '../SereinChat.xcodeproj/project.pbxproj'), 'utf8');
 
-test('iOS portable codec uses stable account-ID v2 HKDF and restore-only legacy v1 PBKDF2', () => {
+test('iOS portable codec uses server-held v3 keys and preserves v1/v2 restore compatibility', () => {
+  assert.match(codec, /HKDF-SHA256-SERVER-BACKUP-KEY/);
+  assert.match(codec, /Serein backup payload v3/);
+  assert.match(codec, /serein-backup-payload-v3/);
   assert.match(codec, /HKDF-SHA256-ACCOUNT-UUID/);
   assert.match(codec, /Serein backup account key v2/);
   assert.match(codec, /Serein backup stable key v1/);

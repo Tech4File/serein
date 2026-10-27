@@ -2,7 +2,7 @@ import Compression
 import CryptoKit
 import Foundation
 
-/// Portable, bounded `.srbk` container compatible with the web/Android v2 format.
+/// Portable, bounded `.srbk` v3 container; v1 password and v2 account-ID files remain readable.
 enum SereinBackupStore {
     static let mimeType = "application/vnd.serein.backup"
     static let format = "SEREIN-BACKUP"
@@ -11,6 +11,7 @@ enum SereinBackupStore {
     private static let magic = Data("SEREINBK".utf8)
     private static let maximumHeaderBytes = 16 * 1024
     private static let legacyIterations = 600_000
+    private static let v3KDF = "HKDF-SHA256-SERVER-BACKUP-KEY"
     private static let v2KDF = "HKDF-SHA256-ACCOUNT-UUID"
     private static let v1KDF = "PBKDF2-HMAC-SHA256"
 
@@ -26,12 +27,13 @@ enum SereinBackupStore {
         let info: Info
     }
 
-    static func create(accountID: String, username: String, snapshot: [String: Any]) throws -> (bytes: Data, filename: String) {
+    static func create(accountID: String, username: String, backupKey: Data, snapshot: [String: Any]) throws -> (bytes: Data, filename: String) {
         let id = try canonicalAccountID(accountID)
+        guard backupKey.count == 32 else { throw BackupError.keyUnavailable }
         let createdAt = ISO8601DateFormatter().string(from: Date())
         let snapshotID = UUID().uuidString.lowercased()
         let payload: [String: Any] = [
-            "format": format, "version": 2,
+            "format": format, "version": 3,
             "owner": ["accountId": id, "username": username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()],
             "created_at": createdAt, "snapshot_id": snapshotID, "data": snapshot,
         ]
@@ -40,15 +42,16 @@ enum SereinBackupStore {
         guard clear.count <= maximumBytes else { throw BackupError.tooLarge }
         var compressed = try compress(clear)
         defer { compressed.resetBytes(in: 0..<compressed.count) }
+        let salt = try SereinDeviceCrypto.randomData(count: 16)
         let nonceData = try SereinDeviceCrypto.randomData(count: 12)
         let nonce = try AES.GCM.Nonce(data: nonceData)
         let nonceText = base64URL(nonceData)
         let header: [String: Any] = [
-            "format": format, "version": 2, "kdf": v2KDF, "key_derivation_version": 1,
+            "format": format, "version": 3, "kdf": v3KDF, "key_derivation_version": 1, "salt": base64URL(salt),
             "snapshot_id": snapshotID, "created_at": createdAt, "compression": "deflate", "payload_iv": nonceText,
         ]
-        let aad = try v2AAD(accountID: id, header: header)
-        let key = accountKey(id)
+        let aad = try v3AAD(accountID: id, header: header)
+        let key = SymmetricKey(data: backupKey).hkdfDerivedKey(using: SHA256.self, salt: salt, sharedInfo: Data("Serein backup payload v3|\(id)".utf8), outputByteCount: 32)
         let sealed = try AES.GCM.seal(compressed, using: key, nonce: nonce, authenticating: aad)
         var ciphertext = sealed.ciphertext
         ciphertext.append(sealed.tag)
@@ -59,13 +62,33 @@ enum SereinBackupStore {
 
     static func inspect(_ file: Data) throws -> Info { try unpack(file).info }
 
-    static func open(accountID: String, username: String, legacyPassword: String = "", file: Data) throws -> (data: [String: Any], info: Info) {
+    static func open(accountID: String, username: String, legacyPassword: String = "", backupKey: Data? = nil, file: Data) throws -> (data: [String: Any], info: Info) {
         let id = try canonicalAccountID(accountID)
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let parsed = try unpack(file)
+        if parsed.info.version == 3 { return (try openV3(id: id, backupKey: backupKey, parsed: parsed), parsed.info) }
         if parsed.info.version == 2 { return (try openV2(id: id, parsed: parsed), parsed.info) }
         if parsed.info.version == 1 { return (try openV1(id: id, username: user, password: legacyPassword, parsed: parsed), parsed.info) }
         throw BackupError.unsupportedVersion
+    }
+
+    private static func openV3(id: String, backupKey: Data?, parsed: Parsed) throws -> [String: Any] {
+        guard let backupKey, backupKey.count == 32,
+              parsed.header["kdf"] as? String == v3KDF,
+              parsed.header["key_derivation_version"] as? Int == 1,
+              let saltText = parsed.header["salt"] as? String, let salt = decodeBase64URL(saltText), salt.count == 16,
+              let nonceText = parsed.header["payload_iv"] as? String, let nonceData = decodeBase64URL(nonceText), nonceData.count == 12,
+              let compression = parsed.header["compression"] as? String else { throw BackupError.keyUnavailable }
+        let aad = try v3AAD(accountID: id, header: parsed.header)
+        let (encrypted, tag) = try splitCiphertext(parsed.ciphertext)
+        let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: nonceData), ciphertext: encrypted, tag: tag)
+        let key = SymmetricKey(data: backupKey).hkdfDerivedKey(using: SHA256.self, salt: salt, sharedInfo: Data("Serein backup payload v3|\(id)".utf8), outputByteCount: 32)
+        var clear = try AES.GCM.open(box, using: key, authenticating: aad)
+        defer { if !clear.isEmpty { clear.resetBytes(in: 0..<clear.count) } }
+        if clear.count > maximumBytes { throw BackupError.tooLarge }
+        if compression == "deflate" { let decompressed = try decompress(clear); if !clear.isEmpty { clear.resetBytes(in: 0..<clear.count) }; clear = decompressed }
+        else if compression != "none" { throw BackupError.malformed }
+        return try validatePayload(clear, accountID: id, header: parsed.header)
     }
 
     private static func openV2(id: String, parsed: Parsed) throws -> [String: Any] {
@@ -143,6 +166,14 @@ enum SereinBackupStore {
         )
     }
 
+    private static func v3AAD(accountID: String, header: [String: Any]) throws -> Data {
+        guard let snapshot = header["snapshot_id"] as? String, let created = header["created_at"] as? String,
+              let compression = header["compression"] as? String, let kdf = header["kdf"] as? String,
+              let derivation = header["key_derivation_version"] as? Int, let salt = header["salt"] as? String,
+              let iv = header["payload_iv"] as? String else { throw BackupError.malformed }
+        return try JSONSerialization.data(withJSONObject: ["serein-backup-payload-v3", format, 3, accountID, snapshot, created, compression, kdf, derivation, salt, iv], options: [.fragmentsAllowed])
+    }
+
     private static func v2AAD(accountID: String, header: [String: Any]) throws -> Data {
         guard let snapshot = header["snapshot_id"] as? String, let created = header["created_at"] as? String,
               let compression = header["compression"] as? String, let kdf = header["kdf"] as? String,
@@ -203,12 +234,16 @@ enum SereinBackupStore {
               let snapshot = header["snapshot_id"] as? String, UUID(uuidString: snapshot) != nil,
               let created = header["created_at"] as? String, isValidTimestamp(created),
               ["none", "deflate"].contains(header["compression"] as? String ?? "") else { throw BackupError.malformed }
+        let expectedV3: Set<String> = ["format", "version", "kdf", "key_derivation_version", "salt", "snapshot_id", "created_at", "compression", "payload_iv"]
         let expectedV2: Set<String> = ["format", "version", "kdf", "key_derivation_version", "snapshot_id", "created_at", "compression", "payload_iv"]
         let expectedV1: Set<String> = ["format", "version", "kdf", "iterations", "salt", "snapshot_id", "created_at", "compression", "key_wrap_iv", "wrapped_key", "payload_iv"]
-        let expected = version == 2 ? expectedV2 : expectedV1
-        guard (version == 1 || version == 2), Set(header.keys) == expected,
+        let expected = version == 3 ? expectedV3 : (version == 2 ? expectedV2 : expectedV1)
+        guard (version == 1 || version == 2 || version == 3), Set(header.keys) == expected,
               let ivText = header["payload_iv"] as? String, let iv = decodeBase64URL(ivText), iv.count == 12 else { throw BackupError.malformed }
-        if version == 2 {
+        if version == 3 {
+            guard header["kdf"] as? String == v3KDF, header["key_derivation_version"] as? Int == 1,
+                  let salt = decodeBase64URL(header["salt"] as? String ?? ""), salt.count == 16 else { throw BackupError.unsupportedKDF }
+        } else if version == 2 {
             guard header["kdf"] as? String == v2KDF, header["key_derivation_version"] as? Int == 1 else { throw BackupError.unsupportedKDF }
         } else {
             guard header["kdf"] as? String == v1KDF, header["iterations"] as? Int == legacyIterations,
@@ -278,7 +313,7 @@ enum SereinBackupStore {
     }
 
     enum BackupError: LocalizedError {
-        case identityUnavailable, malformed, unsupportedVersion, unsupportedKDF, legacyPasswordRequired, accountOrContentsInvalid, tooLarge
+        case identityUnavailable, malformed, unsupportedVersion, unsupportedKDF, legacyPasswordRequired, accountOrContentsInvalid, tooLarge, keyUnavailable
         var errorDescription: String? {
             switch self {
             case .identityUnavailable: return "Backup account identity is unavailable."
@@ -288,6 +323,7 @@ enum SereinBackupStore {
             case .legacyPasswordRequired: return "Enter the original password for this legacy backup."
             case .accountOrContentsInvalid: return "Backup could not be opened for this account or its contents are damaged."
             case .tooLarge: return "This backup exceeds the 64 MiB iOS safety limit."
+            case .keyUnavailable: return "The account backup key is unavailable. Check the secure connection and try again."
             }
         }
     }

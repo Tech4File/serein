@@ -1,7 +1,7 @@
-/* Serein portable encrypted-backup container v2.
- * New files derive a stable per-account key from the authenticated, random UUIDv4.
- * The UUID is never written in the cleartext container. v1 password files remain
- * readable for compatibility; new exports never ask for or use an account password.
+/* Serein portable encrypted-backup container v3.
+ * New exports use a random, stable backup-only key delivered as an app-layer-wrapped
+ * envelope by the authenticated service. The key exists only in memory during the
+ * backup operation. v1 password and v2 account-ID-derived files remain restorable.
  */
 (() => {
   'use strict';
@@ -9,9 +9,10 @@
   const decoder = new TextDecoder('utf-8', { fatal: true });
   const MAGIC = encoder.encode('SEREINBK');
   const FORMAT = 'SEREIN-BACKUP';
-  const VERSION = 2;
+  const VERSION = 3;
+  const PREVIOUS_VERSION = 2;
   const LEGACY_VERSION = 1;
-  const KDF = 'HKDF-SHA256-ACCOUNT-UUID';
+  const KDF = 'HKDF-SHA256-SERVER-BACKUP-KEY';
   const LEGACY_KDF = 'PBKDF2-HMAC-SHA256';
   const LEGACY_ITERATIONS = 600_000;
   const KEY_DERIVATION_VERSION = 1;
@@ -123,8 +124,9 @@
     try { header = JSON.parse(decoder.decode(bytes.subarray(start, end))); }
     catch { throw new Error('Backup header is malformed.'); }
     const legacyFields = ['format','version','kdf','iterations','salt','snapshot_id','created_at','compression','key_wrap_iv','wrapped_key','payload_iv'];
-    const currentFields = ['format','version','kdf','key_derivation_version','snapshot_id','created_at','compression','payload_iv'];
-    const fields = header?.version === LEGACY_VERSION ? legacyFields : currentFields;
+    const v2Fields = ['format','version','kdf','key_derivation_version','snapshot_id','created_at','compression','payload_iv'];
+    const currentFields = ['format','version','kdf','key_derivation_version','snapshot_id','created_at','compression','salt','payload_iv'];
+    const fields = header?.version === LEGACY_VERSION ? legacyFields : header?.version === PREVIOUS_VERSION ? v2Fields : currentFields;
     if (!header || typeof header !== 'object' || Array.isArray(header) || Object.keys(header).some(key => !fields.includes(key)) || fields.some(key => !Object.hasOwn(header, key))) throw new Error('Backup header fields are unsupported.');
     if (header.format !== FORMAT || !['deflate','none'].includes(header.compression)) throw new Error('Unsupported or unsafe backup format parameters.');
     if (header.version === LEGACY_VERSION) {
@@ -132,7 +134,12 @@
       unb64url(header.salt, 16, 'salt');
       unb64url(header.key_wrap_iv, 12, 'key wrapper nonce');
       unb64url(header.wrapped_key, 48, 'wrapped data key');
-    } else if (header.version !== VERSION || header.kdf !== KDF || header.key_derivation_version !== KEY_DERIVATION_VERSION) throw new Error('Unsupported or unsafe backup format parameters.');
+    } else if (header.version === PREVIOUS_VERSION) {
+      if (header.kdf !== 'HKDF-SHA256-ACCOUNT-UUID' || header.key_derivation_version !== KEY_DERIVATION_VERSION) throw new Error('Unsupported or unsafe backup format parameters.');
+    } else if (header.version === VERSION) {
+      if (header.kdf !== KDF || header.key_derivation_version !== KEY_DERIVATION_VERSION) throw new Error('Unsupported or unsafe backup format parameters.');
+      unb64url(header.salt, 16, 'salt');
+    } else throw new Error('Unsupported or unsafe backup format parameters.');
     if (typeof header.snapshot_id !== 'string' || !/^[0-9a-f-]{36}$/i.test(header.snapshot_id) || typeof header.created_at !== 'string' || !Number.isFinite(Date.parse(header.created_at))) throw new Error('Backup metadata is malformed.');
     unb64url(header.payload_iv, 12, 'payload nonce');
     return { header, ciphertext: bytes.slice(end) };
@@ -190,15 +197,34 @@
       ['encrypt', 'decrypt'],
     );
   }
+  async function deriveServerBackupKey(backupKeyBytes, accountId, salt) {
+    if (!(backupKeyBytes instanceof Uint8Array) || backupKeyBytes.byteLength !== 32) throw new Error('The server backup key is unavailable or malformed.');
+    const material = await crypto.subtle.importKey('raw', backupKeyBytes, 'HKDF', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      { name: 'HKDF', hash: 'SHA-256', salt, info: text(`Serein backup payload v3|${accountId}`) },
+      material,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt'],
+    );
+  }
+  function canonicalPayloadAadV3(identity, header) {
+    return text(JSON.stringify([
+      'serein-backup-payload-v3', FORMAT, VERSION, identity.accountId,
+      header.snapshot_id, header.created_at, header.compression, header.kdf,
+      header.key_derivation_version, header.salt, header.payload_iv,
+    ]));
+  }
   function canonicalPayloadAadV2(identity, header) {
     return text(JSON.stringify([
-      'serein-backup-payload-v2', FORMAT, VERSION, identity.accountId,
+      'serein-backup-payload-v2', FORMAT, PREVIOUS_VERSION, identity.accountId,
       header.snapshot_id, header.created_at, header.compression,
       header.kdf, header.key_derivation_version, header.payload_iv,
     ]));
   }
-  async function encrypt(identityInput, snapshot, options = {}) {
+  async function encrypt(identityInput, snapshot, backupKeyBytes, options = {}) {
     const identity = identityContext(identityInput);
+    if (!(backupKeyBytes instanceof Uint8Array) || backupKeyBytes.byteLength !== 32) throw new Error('The server backup key is unavailable or malformed.');
     if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('Backup snapshot must be an object.');
     const snapshotId = options.snapshotId || crypto.randomUUID();
     if (!/^[0-9a-f-]{36}$/i.test(snapshotId)) throw new Error('Backup snapshot ID is malformed.');
@@ -225,14 +251,15 @@
         version: VERSION,
         kdf: KDF,
         key_derivation_version: KEY_DERIVATION_VERSION,
+        salt: b64url(crypto.getRandomValues(new Uint8Array(16))),
         snapshot_id: snapshotId,
         created_at: createdAt,
         compression: compressed.compression,
         payload_iv: b64url(payloadIv),
       };
-      const key = await deriveAccountKey(identity.accountId);
+      const key = await deriveServerBackupKey(backupKeyBytes, identity.accountId, unb64url(header.salt, 16, 'salt'));
       const ciphertext = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv: payloadIv, additionalData: canonicalPayloadAadV2(identity, header), tagLength: 128 },
+        { name: 'AES-GCM', iv: payloadIv, additionalData: canonicalPayloadAadV3(identity, header), tagLength: 128 },
         key,
         compressedBytes,
       );
@@ -243,16 +270,23 @@
       compressedBytes?.fill(0);
     }
   }
-  async function decrypt(identityInput, fileBytes, legacyPassword = '') {
+  async function decrypt(identityInput, fileBytes, legacyPassword = '', backupKeyBytes = null) {
     const identity = identityContext(identityInput);
     const { header, ciphertext } = unpack(fileBytes);
     if (header.version === LEGACY_VERSION) return decryptLegacyV1(legacyPassword, identity, fileBytes);
     const iv = unb64url(header.payload_iv, 12, 'payload nonce');
     let clear;
     try {
-      const key = await deriveAccountKey(identity.accountId);
+      let key, aad;
+      if (header.version === PREVIOUS_VERSION) {
+        key = await deriveAccountKey(identity.accountId);
+        aad = canonicalPayloadAadV2(identity, header);
+      } else {
+        key = await deriveServerBackupKey(backupKeyBytes, identity.accountId, unb64url(header.salt, 16, 'salt'));
+        aad = canonicalPayloadAadV3(identity, header);
+      }
       clear = new Uint8Array(await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv, additionalData: canonicalPayloadAadV2(identity, header), tagLength: 128 },
+        { name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 },
         key,
         ciphertext,
       ));
@@ -264,7 +298,7 @@
       }
       if (clear.length > MAX_CLEAR_BYTES) throw new Error('Decompressed backup exceeds its safe size limit.');
       const payload = JSON.parse(decoder.decode(clear));
-      if (payload?.format !== FORMAT || payload.version !== VERSION || payload.snapshot_id !== header.snapshot_id || payload.created_at !== header.created_at || payload.owner?.accountId !== identity.accountId || !payload.data || typeof payload.data !== 'object' || Array.isArray(payload.data)) throw new Error('Backup account binding or contents are invalid.');
+      if (payload?.format !== FORMAT || payload.version !== header.version || payload.snapshot_id !== header.snapshot_id || payload.created_at !== header.created_at || payload.owner?.accountId !== identity.accountId || !payload.data || typeof payload.data !== 'object' || Array.isArray(payload.data)) throw new Error('Backup account binding or contents are invalid.');
       return { snapshotId: header.snapshot_id, createdAt: header.created_at, data: payload.data };
     } catch {
       throw new Error('Backup could not be opened for this signed-in account, or the file is damaged.');

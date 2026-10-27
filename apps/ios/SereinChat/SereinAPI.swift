@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Combine
 import UserNotifications
 
@@ -222,6 +223,7 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         }
     }
     private var deviceID: String { defaults.string(forKey: "serein.device-id") ?? UUID().uuidString.lowercased() }
+    var backupDeviceID: String { deviceID }
 
     private func authenticate(path: String, values: [String: Any]) async {
         busy = true; errorMessage = nil; statusMessage = nil
@@ -279,6 +281,46 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         } catch { errorMessage = error.localizedDescription }
     }
     func contactsData() async throws -> Data { try await request("/api/v1/contacts") }
+    func requestBackupKey(accountID: String) async throws -> Data {
+        guard let accountUUID = UUID(uuidString: accountID), let deviceUUID = UUID(uuidString: deviceID) else {
+            throw NSError(domain: "SereinBackupKey", code: 1, userInfo: [NSLocalizedDescriptionKey: "Signed-in account or device identity is unavailable."])
+        }
+        let account = accountUUID.uuidString.lowercased(), device = deviceUUID.uuidString.lowercased()
+        let ephemeral = P256.KeyAgreement.PrivateKey()
+        let point = ephemeral.publicKey.x963Representation
+        guard point.count == 65, point.first == 4 else { throw NSError(domain: "SereinBackupKey", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not prepare a one-use backup key request."]) }
+        let clientX = base64URL(Data(point[1..<33])), clientY = base64URL(Data(point[33..<65]))
+        let clientJWK: [String: String] = ["kty": "EC", "crv": "P-256", "x": clientX, "y": clientY]
+        let response = try await request("/api/v1/backups/key-envelope", method: "POST", values: ["client_public_key": clientJWK])
+        guard let envelope = try JSONSerialization.jsonObject(with: response) as? [String: Any],
+              envelope["key_version"] as? Int == 1,
+              let server = envelope["server_public_key"] as? [String: String],
+              server["kty"] == "EC", server["crv"] == "P-256",
+              let sxText = server["x"], let syText = server["y"],
+              let sx = decodeBackupBase64URL(sxText), sx.count == 32,
+              let sy = decodeBackupBase64URL(syText), sy.count == 32,
+              let saltText = envelope["salt"] as? String, let salt = decodeBackupBase64URL(saltText), salt.count == 32,
+              let nonceText = envelope["nonce"] as? String, let nonce = decodeBackupBase64URL(nonceText), nonce.count == 12,
+              let ciphertextText = envelope["ciphertext"] as? String, let ciphertext = decodeBackupBase64URL(ciphertextText), ciphertext.count == 48 else {
+            throw NSError(domain: "SereinBackupKey", code: 3, userInfo: [NSLocalizedDescriptionKey: "The server backup key envelope is malformed."])
+        }
+        var serverPoint = Data([4]); serverPoint.append(sx); serverPoint.append(sy)
+        let serverPublic = try P256.KeyAgreement.PublicKey(x963Representation: serverPoint)
+        let shared = try ephemeral.sharedSecretFromKeyAgreement(with: serverPublic)
+        let info = try JSONSerialization.data(withJSONObject: ["serein-backup-key-envelope-kdf-v1", account, device, 1, clientX, clientY, sxText, syText] as [Any], options: [.fragmentsAllowed])
+        let aad = try JSONSerialization.data(withJSONObject: ["serein-backup-key-envelope-aad-v1", account, device, 1, clientX, clientY, sxText, syText, saltText, nonceText] as [Any], options: [.fragmentsAllowed])
+        let wrappingKey = shared.hkdfDerivedSymmetricKey(using: SHA256.self, salt: salt, sharedInfo: info, outputByteCount: 32)
+        let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: nonce), ciphertext: Data(ciphertext.prefix(32)), tag: Data(ciphertext.suffix(16)))
+        let clear = try AES.GCM.open(box, using: wrappingKey, authenticating: aad)
+        guard clear.count == 32 else { throw NSError(domain: "SereinBackupKey", code: 4, userInfo: [NSLocalizedDescriptionKey: "The server backup key envelope contained an invalid key."]) }
+        return clear
+    }
+    private func base64URL(_ data: Data) -> String { data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "") }
+    private func decodeBackupBase64URL(_ value: String) -> Data? {
+        guard !value.isEmpty, value.range(of: #"^[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil else { return nil }
+        let standard = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        return Data(base64Encoded: standard + String(repeating: "=", count: (4 - standard.count % 4) % 4))
+    }
     func registerDeviceKey(_ publicJWK: [String: String], layer2PublicJWK: [String: String], ratchetVersion: Int) async throws -> [String: Any] {
         guard ratchetVersion == 2 || ratchetVersion == 3 else { throw APIError.invalidResponse }
         let data = try await request("/api/v1/device-key", method: "PUT", values: ["algorithm": "ECDH-P256", "public_key": publicJWK, "layer2_public_key": layer2PublicJWK, "ratchet_version": ratchetVersion])

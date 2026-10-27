@@ -11,7 +11,8 @@ test('CI invokes repository shell scripts through bash regardless of executable-
   assert.match(ci, /ANDROID_NDK_HOME=.*bash scripts\/build_native_core\.sh android/);
   assert.match(ci, /run: bash scripts\/build_native_core\.sh ios/);
   assert.doesNotMatch(ci, /run: scripts\/(?:test_core_ffi|build_native_core)\.sh/);
-  assert.match(ci, /set -o pipefail[\s\S]*?connectedDebugAndroidTest[\s\S]*?android-instrumented-\$\{API_LEVEL\}\.log/);
+  assert.match(ci, /bash -euo pipefail -c '[\s\S]*?connectedDebugAndroidTest[\s\S]*?android-instrumented-\$\{API_LEVEL\}\.log/);
+  assert.doesNotMatch(ci, /^\s+set -o pipefail$/m);
   assert.match(ci, /android-instrumented-\*\.log/);
 });
 

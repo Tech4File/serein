@@ -8,13 +8,14 @@ const codec = fs.readFileSync(path.join(root, 'SereinBackupStore.java'), 'utf8')
 const local = fs.readFileSync(path.join(root, 'SereinLocalStore.java'), 'utf8');
 const activity = fs.readFileSync(path.join(root, 'MainActivity.java'), 'utf8');
 
-test('Android backup source uses stable account-ID v2 keying and retains v1 restore compatibility', () => {
-  assert.match(codec, /HKDF-SHA256-ACCOUNT-UUID/);
-  assert.match(codec, /Serein backup account key v2/);
-  assert.match(codec, /Serein backup stable key v/);
+test('Android creates v3 backups from the server key and keeps v1/v2 restore compatibility', () => {
+  assert.match(codec, /HKDF-SHA256-SERVER-BACKUP-KEY/);
+  assert.match(codec, /HKDF-SHA256-ACCOUNT-UUID/, 'account-ID keying is restore-only v2 compatibility');
+  assert.match(codec, /private static JSONObject openV2/);
+  assert.match(codec, /private static JSONObject openV1/);
   assert.match(codec, /PBKDF2WithHmacSHA256/);
   assert.match(codec, /V1_ITERATIONS\s*=\s*600_000/);
-  assert.match(codec, /static byte\[\] create\(String accountId/);
+  assert.match(codec, /static byte\[\] create\(String accountId,String username,byte\[\] backupKey/);
   assert.match(codec, /static JSONObject open\(String accountId/);
   assert.match(codec, /String compression="deflate"/);
   assert.match(codec, /DeflaterOutputStream/);

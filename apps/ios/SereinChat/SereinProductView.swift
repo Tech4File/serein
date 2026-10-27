@@ -307,6 +307,16 @@ private struct SereinNativeConversation: View {
 
     private var outgoingBubble: Color { colorScheme == .dark ? Color(red: 0.02, green: 0.36, blue: 0.32) : Color(red: 0.84, green: 0.96, blue: 0.87) }
     private var incomingBubble: Color { colorScheme == .dark ? Color(uiColor: .secondarySystemBackground) : Color.white }
+    private var securitySummary: String {
+        if contact.isDeleted || engine.archived { return "Archived · read only" }
+        guard engine.ready else { return "Preparing secure messaging…" }
+        let detail = engine.status
+        if detail.hasPrefix("All ") && detail.localizedCaseInsensitiveContains("verified") { return "Encryption ready · verified devices" }
+        if detail.hasPrefix("Verify ") { return "Security setup required" }
+        if detail.localizedCaseInsensitiveContains("not published") { return "Recipient keys unavailable" }
+        if detail.hasPrefix("No active") { return "No active recipient devices" }
+        return "Review security details"
+    }
 
     init(api: SereinAPI, contact: SereinContact) {
         self.contact = contact
@@ -316,15 +326,10 @@ private struct SereinNativeConversation: View {
     var body: some View {
         VStack(spacing: 10) {
             HStack {
-                SereinStatusPill(title: (contact.isDeleted || engine.archived) ? "Archived · read only" : "\(engine.activeDevices.count) active device(s) · \(contact.online ? "online" : "offline")")
+                SereinStatusPill(title: securitySummary)
                 Spacer()
-                if !contact.isDeleted && !engine.archived { Button { showKeys = true } label: { Label("Keys", systemImage: "key.horizontal").font(.system(size: 11, weight: .semibold, relativeTo: .body)) } }
+                if !contact.isDeleted && !engine.archived { Button { showKeys = true } label: { Label("Security", systemImage: "lock.shield").font(.system(size: 12, weight: .semibold, relativeTo: .body)) } }
             }
-            Text(engine.status).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-            Label("Messages are encrypted for verified devices", systemImage: "lock.fill")
-                .font(.system(size: 10, weight: .medium, relativeTo: .body)).foregroundStyle(colorScheme == .dark ? Color.yellow.opacity(0.9) : Color(red: 0.42, green: 0.34, blue: 0.16))
-                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 11).padding(.vertical, 8)
-                .background(colorScheme == .dark ? Color(red: 0.22, green: 0.20, blue: 0.14) : Color(red: 1.0, green: 0.97, blue: 0.89), in: RoundedRectangle(cornerRadius: 11))
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
@@ -620,14 +625,22 @@ private struct SereinNativeSettings: View {
     @State private var backupFilename = "serein-backup.srbk"
     @State private var backupStatus = ""
     @AppStorage("serein.notifications.sound") private var notificationSound = true
+    private var displayedAppVersion: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        return (info["SereinVersion"] as? String) ?? (info["CFBundleShortVersionString"] as? String) ?? "unknown"
+    }
     var body: some View {
         NavigationView {
             List {
+                Section("About") {
+                    SereinDetailRow(title: "Version", value: displayedAppVersion)
+                    Text("Current message encryption uses classical P-256 and AES-GCM; it is not post-quantum cryptography.").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary)
+                }
                 Section("Account") { if let user = api.user { SereinDetailRow(title: "Name", value: user.display_name); SereinDetailRow(title: "Username", value: "@\(user.username)"); SereinDetailRow(title: "Email", value: user.email); SereinDetailRow(title: "Verification", value: user.email_verified ? "Verified" : "Not verified") } }
                 Section("Connection") { SereinDetailRow(title: "Server origin", value: api.apiBase); SereinDetailRow(title: "Last checked", value: api.connectionTestedOrigin.isEmpty ? "Not checked" : api.connectionTestedOrigin); SereinDetailRow(title: "Status", value: api.connectionStatus); if !api.connectionDetails.isEmpty { Text(api.connectionDetails).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Button("Manage connection") { showConnectionSettings = true } }
                 Section("Appearance") { Picker("Theme", selection: $api.theme) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }; Picker("Text size", selection: $api.fontScale) { Text("System default").tag("system"); Text("Large").tag("large"); Text("Extra large").tag("extra_large") }; Toggle("Reduce motion", isOn: $api.reduceMotion); Button("Save preferences") { Task { await api.savePreferences() } } }
                 Section("Encrypted backups") {
-                    Text("Export a timestamped encrypted .srbk snapshot to a location you choose in Files. The stable account-identity key is used locally; the account password is not used. Messages and attachment references are included, but media bytes are not. Restore is only offered during initial authenticated setup; confirmed skip is final and no later Settings restore is available.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary)
+                    Text("Export a timestamped encrypted .srbk snapshot to a location you choose in Files. New backups use a random backup-only key stored encrypted by the service and requested only during an authenticated operation, wrapped to a one-use device key. The service can access the key; it is not saved on this device. Messages and attachment references are included, but media bytes are not. Restore is only offered during initial authenticated setup; confirmed skip is final and no later Settings restore is available.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary)
                     Button(creatingBackup ? "Preparing encrypted backup…" : "Create encrypted backup") { createEncryptedBackup() }.disabled(creatingBackup || api.user == nil)
                     if !backupStatus.isEmpty { Text(backupStatus).font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
                 }
@@ -676,17 +689,21 @@ private struct SereinNativeSettings: View {
             let contactRows: [[String: Any]] = api.contacts.filter { !$0.isDeleted }.map { ["user_id": $0.user_id, "username": $0.username, "display_name": $0.display_name] }
             let snapshot: [String: Any] = ["snapshot_version": 1, "created_at": ISO8601DateFormatter().string(from: Date()), "messages": messages, "contacts": contactRows, "media": ["included": false, "policy": "references-only"]]
             creatingBackup = true; backupStatus = "Preparing encrypted snapshot…"
-            DispatchQueue.global(qos: .userInitiated).async {
+            Task {
+                var keyBytes = Data()
+                defer { if !keyBytes.isEmpty { keyBytes.resetBytes(in: 0..<keyBytes.count) } }
                 do {
-                    let result = try SereinBackupStore.create(accountID: user.id, username: user.username, snapshot: snapshot)
-                    DispatchQueue.main.async {
-                        guard api.user?.id == user.id else { creatingBackup = false; backupStatus = "Account changed before export completed. Try again while signed in."; return }
-                        backupDocument = SereinBackupDocument(bytes: result.bytes)
-                        backupFilename = result.filename
-                        backupStatus = "Choose a durable location in Files. The app will not overwrite an earlier snapshot."
-                        showingBackupExporter = true
-                    }
-                } catch { DispatchQueue.main.async { creatingBackup = false; backupStatus = error.localizedDescription } }
+                    keyBytes = try await api.requestBackupKey(accountID: user.id)
+                    let keyForCodec = keyBytes
+                    let result = try await Task.detached(priority: .userInitiated) {
+                        try SereinBackupStore.create(accountID: user.id, username: user.username, backupKey: keyForCodec, snapshot: snapshot)
+                    }.value
+                    guard api.user?.id == user.id else { creatingBackup = false; backupStatus = "Account changed before export completed. Try again while signed in."; return }
+                    backupDocument = SereinBackupDocument(bytes: result.bytes)
+                    backupFilename = result.filename
+                    backupStatus = "Choose a durable location in Files. The app will not overwrite an earlier snapshot."
+                    showingBackupExporter = true
+                } catch { creatingBackup = false; backupStatus = error.localizedDescription }
             }
         } catch { backupStatus = error.localizedDescription }
     }

@@ -166,9 +166,7 @@ jobs:
           target: default
           disable-animations: true
           script: |
-            set -o pipefail
-            cd apps/android
-            gradle --no-daemon :app:connectedDebugAndroidTest --console=plain --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/android-instrumented-${API_LEVEL}.log"
+            bash -euo pipefail -c 'cd apps/android && gradle --no-daemon :app:connectedDebugAndroidTest --console=plain --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/android-instrumented-${API_LEVEL}.log"'
         env:
           API_LEVEL: ${{ matrix.api-level }}
       - name: Upload Android instrumentation results
