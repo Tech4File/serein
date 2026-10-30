@@ -30,7 +30,7 @@ struct SereinBackupRestoreOnboarding: View {
                     Button("Skip restore") { confirmSkip = true }.buttonStyle(.bordered).disabled(busy)
                 } else if phase == "password" {
                     Text("Legacy backup password").font(.system(size: 22, weight: .bold, relativeTo: .body))
-                    Text("This v1 file requires its original password. New v3 backups use a random server-held backup-only key requested through a one-use encrypted exchange; the service can access that key. Older v2 files remain restorable.").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary)
+                    Text("This v1 file requires its original password. New v3 backups use a random per-account key requested through a one-use encrypted exchange; it is bound to the account ID and username, and the service can access it. Older v2 files remain restorable.").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary)
                     SecureField("Original backup password", text: $legacyPassword).textContentType(.password).textInputAutocapitalization(.never).autocorrectionDisabled()
                     Button(busy ? "Opening…" : "Open legacy backup") { openSelectedBackup(password: legacyPassword) }.buttonStyle(.borderedProminent).disabled(busy || legacyPassword.isEmpty)
                     Button("Choose a different file") { showPicker = true }.disabled(busy)
@@ -92,7 +92,7 @@ struct SereinBackupRestoreOnboarding: View {
             var keyBytes = Data()
             defer { if !keyBytes.isEmpty { keyBytes.resetBytes(in: 0..<keyBytes.count) } }
             do {
-                if backupInfo?.version == 3 { keyBytes = try await api.requestBackupKey(accountID: user.id) }
+                if backupInfo?.version == 3 { keyBytes = try await api.requestBackupKey(accountID: user.id, username: user.username) }
                 let keyForCodec = keyBytes
                 let opened = try await Task.detached(priority: .userInitiated) {
                     try SereinBackupStore.open(accountID: user.id, username: user.username, legacyPassword: password, backupKey: keyForCodec, file: bytes)

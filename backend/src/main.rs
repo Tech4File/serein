@@ -39,11 +39,11 @@ const TRANSFER_TTL_DAYS: i64 = 7;
 const MESSAGING_ENABLED: bool = true;
 
 type PeerMap = DashMap<Uuid, Peer>;
-#[derive(Clone)] struct AppState { peers: Arc<PeerMap>, db: PgPool, mailer: Arc<mail::Mailer>, cookie_secure: bool, allowed_origins: Arc<Vec<String>>, backup_key_kek: Option<[u8;32]> }
+#[derive(Clone)] struct AppState { peers: Arc<PeerMap>, db: PgPool, mailer: Arc<mail::Mailer>, cookie_secure: bool, allowed_origins: Arc<Vec<String>> }
 #[derive(Clone)] struct Peer { connection_id: Uuid, tx: mpsc::Sender<String> }
 #[derive(Clone)] struct AuthContext { user_id: Uuid, username: String, email: String, display_name: String, email_verified: bool, device_id: Uuid, device_name: String, session_hash: Vec<u8> }
 #[derive(Deserialize)] struct RegisterInput { username: String, email: String, display_name: String, password: String }
-#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct BackupKeyEnvelopeRequest { client_public_key: P256PublicJwk }
+#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct BackupKeyEnvelopeRequest { client_public_key: P256PublicJwk, #[serde(default)] envelope_version: Option<u8> }
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct DeleteAccountInput { password: String }
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct LoginInput { identity: String, password: String }
 #[derive(Deserialize)] struct VerifyEmailInput { email: String, code: String, device_name: Option<String>, device_id: Option<Uuid> }
@@ -84,8 +84,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cors = CorsLayer::new().allow_origin(AllowOrigin::list(cors_origins)).allow_methods([Method::GET,Method::POST,Method::PUT,Method::DELETE,Method::OPTIONS]).allow_headers([header::CONTENT_TYPE,HeaderName::from_static("x-chunk-sha256")]).expose_headers([header::RETRY_AFTER,HeaderName::from_static("x-chunk-sha256")]).allow_credentials(true);
     let mailer = Arc::new(mail::Mailer::from_env().map_err(std::io::Error::other)?);
     info!(provider=mailer.provider_name(),"email delivery configuration loaded");
-    let backup_key_kek = parse_backup_key_encryption_key().map_err(std::io::Error::other)?;
-    if backup_key_kek.is_none() { warn!("SEREIN_BACKUP_KEY_ENCRYPTION_KEY is not configured; portable backup key access is disabled"); }
     let cleanup_db=db.clone();
     tokio::spawn(async move {
         let mut interval=tokio::time::interval(Duration::from_secs(60));
@@ -113,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-    let state = AppState { peers: Arc::new(PeerMap::new()), db, mailer, cookie_secure, allowed_origins: Arc::new(allowed_origins), backup_key_kek };
+    let state = AppState { peers: Arc::new(PeerMap::new()), db, mailer, cookie_secure, allowed_origins: Arc::new(allowed_origins) };
     let app = Router::new()
         .route("/healthz", get(healthz)).route("/api/v1/security/capabilities", get(security_capabilities)).route("/status", get(|| async { axum::response::Html(include_str!("../../frontend/web/status.html")) }))
         .route("/api/v1/auth/register", post(register)).route("/api/v1/auth/verify-email", post(verify_email)).route("/api/v1/auth/resend-verification", post(resend_verification)).route("/api/v1/auth/login", post(login)).route("/api/v1/auth/verify-login", post(verify_login)).route("/api/v1/auth/logout", post(logout))
@@ -206,7 +204,16 @@ async fn initialize_schema(db: &PgPool) -> Result<(), sqlx::Error> {
         "ALTER TABLE device_public_keys ADD CONSTRAINT device_public_keys_key_version_check CHECK(key_version IN (1,2))",
         "CREATE INDEX IF NOT EXISTS device_public_keys_by_user ON device_public_keys(user_id,registered_at)",
         "CREATE TABLE IF NOT EXISTS auth_sessions (token_hash BYTEA PRIMARY KEY, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS account_backup_keys (user_id UUID PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, key_version SMALLINT NOT NULL DEFAULT 1 CHECK(key_version=1), at_rest_version SMALLINT NOT NULL DEFAULT 1 CHECK(at_rest_version=1), nonce BYTEA NOT NULL CHECK(octet_length(nonce)=12), ciphertext BYTEA NOT NULL CHECK(octet_length(ciphertext)=48), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        "CREATE TABLE IF NOT EXISTS account_backup_keys (user_id UUID PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, key_version SMALLINT NOT NULL DEFAULT 1 CHECK(key_version=1), at_rest_version SMALLINT NOT NULL DEFAULT 2 CHECK(at_rest_version IN (1,2)), key_material BYTEA NULL CHECK(key_material IS NULL OR octet_length(key_material)=32), nonce BYTEA NULL CHECK(nonce IS NULL OR octet_length(nonce)=12), ciphertext BYTEA NULL CHECK(ciphertext IS NULL OR octet_length(ciphertext)=48), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        "ALTER TABLE account_backup_keys ADD COLUMN IF NOT EXISTS key_material BYTEA NULL",
+        "ALTER TABLE account_backup_keys ALTER COLUMN nonce DROP NOT NULL",
+        "ALTER TABLE account_backup_keys ALTER COLUMN ciphertext DROP NOT NULL",
+        "ALTER TABLE account_backup_keys DROP CONSTRAINT IF EXISTS account_backup_keys_at_rest_version_check",
+        "ALTER TABLE account_backup_keys ADD CONSTRAINT account_backup_keys_at_rest_version_check CHECK(at_rest_version IN (1,2))",
+        "ALTER TABLE account_backup_keys DROP CONSTRAINT IF EXISTS account_backup_keys_key_material_check",
+        "ALTER TABLE account_backup_keys ADD CONSTRAINT account_backup_keys_key_material_check CHECK(key_material IS NULL OR octet_length(key_material)=32)",
+        "ALTER TABLE account_backup_keys DROP CONSTRAINT IF EXISTS account_backup_keys_storage_shape_check",
+        "ALTER TABLE account_backup_keys ADD CONSTRAINT account_backup_keys_storage_shape_check CHECK((at_rest_version=1 AND key_material IS NULL AND nonce IS NOT NULL AND ciphertext IS NOT NULL) OR (at_rest_version=2 AND key_material IS NOT NULL AND nonce IS NULL AND ciphertext IS NULL))",
         "DELETE FROM auth_sessions s USING accounts a WHERE s.user_id=a.id AND a.email_verified=FALSE",
         "CREATE TABLE IF NOT EXISTS email_verification_challenges (user_id UUID PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, code_hash TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, resend_after TIMESTAMPTZ NOT NULL, attempt_count SMALLINT NOT NULL DEFAULT 0, send_count SMALLINT NOT NULL DEFAULT 1, window_started_at TIMESTAMPTZ NOT NULL DEFAULT now())",
         "CREATE INDEX IF NOT EXISTS auth_sessions_by_user ON auth_sessions(user_id, expires_at)",
@@ -328,13 +335,6 @@ fn registration_password_requirements(password:&str)->[bool;5]{serein_core::regi
 fn cookie_value(headers:&HeaderMap)->Option<String>{let raw=headers.get(header::COOKIE)?.to_str().ok()?;raw.split(';').filter_map(|p|p.trim().split_once('=')).find_map(|(k,v)|(k==COOKIE_NAME&&!v.is_empty()).then(||v.to_string()))}
 fn token_hash(token:&str)->Vec<u8>{Sha256::digest(token.as_bytes()).to_vec()}
 fn new_token()->String{let mut bytes=[0u8;32];OsRng.fill_bytes(&mut bytes);URL_SAFE_NO_PAD.encode(bytes)}
-fn parse_backup_key_encryption_key()->Result<Option<[u8;32]>,String>{
-    let Ok(value)=env::var("SEREIN_BACKUP_KEY_ENCRYPTION_KEY")else{return Ok(None)};
-    if value.trim().is_empty(){return Ok(None)};
-    let decoded=URL_SAFE_NO_PAD.decode(value.trim()).map_err(|_|"SEREIN_BACKUP_KEY_ENCRYPTION_KEY must be a 32-byte base64url value".to_owned())?;
-    if decoded.len()!=32{return Err("SEREIN_BACKUP_KEY_ENCRYPTION_KEY must decode to exactly 32 bytes".into());}
-    let mut key=[0u8;32];key.copy_from_slice(&decoded);Ok(Some(key))
-}
 fn append_cookie(response:&mut Response,cookie:String){if let Ok(value)=HeaderValue::from_bytes(cookie.as_bytes()){response.headers_mut().append(header::SET_COOKIE,value);}}
 fn attach_session_cookie(response:&mut Response,token:&str,secure:bool){let s=if secure{"; Secure"}else{""};append_cookie(response,format!("{COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}{s}",SESSION_SECONDS));}
 fn clear_session_cookie(response:&mut Response,secure:bool){let s=if secure{"; Secure"}else{""};append_cookie(response,format!("{COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{s}"));}
@@ -411,9 +411,7 @@ async fn register(State(state):State<AppState>,Json(input):Json<RegisterInput>)-
         warn!("account registration insert failed");
         return api_error(StatusCode::SERVICE_UNAVAILABLE,"account registration is temporarily unavailable");
     }
-    if let Some(kek)=state.backup_key_kek.as_ref(){
-        match ensure_account_backup_key(&state.db,user_id,kek).await{Ok(mut key)=>key.zeroize(),Err(_)=>warn!("backup key will be provisioned lazily after account registration")}
-    }
+    match ensure_account_backup_key(&state.db,user_id).await{Ok(mut key)=>key.zeroize(),Err(_)=>warn!("per-account backup key will be provisioned on first authorized backup operation")}
     if let Err(error)=issue_verification_code(&state.db,&state.mailer,user_id,&email,false).await{
         warn!(provider=state.mailer.provider_name(),failure=otp_failure_kind(&error),provider_status=otp_provider_status(&error),"verification email delivery failed after account creation");
         return verification_response(StatusCode::SERVICE_UNAVAILABLE,&email,"Your account is saved but the verification code could not be sent. Try resending shortly.","unavailable");
@@ -601,43 +599,27 @@ fn p256_key_bundle_fingerprint(layer1:&P256PublicJwk,layer2:&P256PublicJwk)->Opt
     let mut material=Vec::with_capacity(64+128);material.extend_from_slice(b"Serein ECDH P-256 device key bundle v2\0");material.extend_from_slice(&first);material.extend_from_slice(&second);Some(hex_lower(&Sha256::digest(material)))
 }
 
-fn backup_key_at_rest_aad(user_id:Uuid)->Result<Vec<u8>,String>{
-    serde_json::to_vec(&serde_json::json!(["serein-account-backup-key-at-rest-v1",user_id.to_string(),1]))
-        .map_err(|_|"backup key metadata could not be encoded".into())
-}
-fn seal_account_backup_key(user_id:Uuid,key:&[u8;32],kek:&[u8;32])->Result<([u8;12],Vec<u8>),String>{
-    let cipher=Aes256Gcm::new_from_slice(kek).map_err(|_|"backup key encryption is unavailable".to_owned())?;
-    let mut nonce=[0u8;12];OsRng.fill_bytes(&mut nonce);
-    let aad=backup_key_at_rest_aad(user_id)?;
-    let encrypted=cipher.encrypt(Nonce::from_slice(&nonce),Payload{msg:key,aad:&aad})
-        .map_err(|_|"backup key encryption is unavailable".to_owned())?;
-    Ok((nonce,encrypted))
-}
-fn open_account_backup_key(user_id:Uuid,nonce:&[u8],ciphertext:&[u8],kek:&[u8;32])->Result<[u8;32],String>{
-    if nonce.len()!=12||ciphertext.len()!=48{return Err("stored backup key has an invalid format".into());}
-    let cipher=Aes256Gcm::new_from_slice(kek).map_err(|_|"backup key encryption is unavailable".to_owned())?;
-    let aad=backup_key_at_rest_aad(user_id)?;
-    let mut clear=cipher.decrypt(Nonce::from_slice(nonce),Payload{msg:ciphertext,aad:&aad})
-        .map_err(|_|"stored backup key could not be opened".to_owned())?;
-    if clear.len()!=32{clear.zeroize();return Err("stored backup key has an invalid length".into());}
-    let mut key=[0u8;32];key.copy_from_slice(&clear);clear.zeroize();Ok(key)
-}
-async fn ensure_account_backup_key(db:&PgPool,user_id:Uuid,kek:&[u8;32])->Result<[u8;32],String>{
-    let query="SELECT key_version,at_rest_version,nonce,ciphertext FROM account_backup_keys WHERE user_id=$1";
-    if let Some(row)=sqlx::query_as::<_,(i16,i16,Vec<u8>,Vec<u8>)>(query).bind(user_id).fetch_optional(db).await.map_err(|_|"backup key storage is unavailable".to_owned())?{
-        if row.0!=1||row.1!=1{return Err("stored backup key version is unsupported".into());}
-        return open_account_backup_key(user_id,&row.2,&row.3,kek);
+async fn ensure_account_backup_key(db:&PgPool,user_id:Uuid)->Result<[u8;32],String>{
+    let query="SELECT key_version,at_rest_version,key_material FROM account_backup_keys WHERE user_id=$1";
+    if let Some((key_version,at_rest_version,key_material))=sqlx::query_as::<_,(i16,i16,Option<Vec<u8>>)>(query).bind(user_id).fetch_optional(db).await.map_err(|_|"backup key storage is unavailable".to_owned())?{
+        if key_version!=1{return Err("stored backup key version is unsupported".into());}
+        if at_rest_version==2 {
+            let mut bytes=key_material.ok_or_else(||"stored per-account backup key is missing".to_owned())?;
+            if bytes.len()!=32{bytes.zeroize();return Err("stored per-account backup key has an invalid length".into());}
+            let mut key=[0u8;32];key.copy_from_slice(&bytes);bytes.zeroize();return Ok(key);
+        }
+        return Err("this account has a legacy encrypted backup key; it must be safely migrated before use".into());
     }
-    let mut candidate=[0u8;32];OsRng.fill_bytes(&mut candidate);
-    let sealed=seal_account_backup_key(user_id,&candidate,kek);candidate.zeroize();
-    let (nonce,ciphertext)=sealed?;
-    sqlx::query("INSERT INTO account_backup_keys(user_id,key_version,at_rest_version,nonce,ciphertext) VALUES($1,1,1,$2,$3) ON CONFLICT(user_id) DO NOTHING")
-        .bind(user_id).bind(nonce.as_slice()).bind(&ciphertext).execute(db).await.map_err(|_|"backup key storage is unavailable".to_owned())?;
-    let row=sqlx::query_as::<_,(i16,i16,Vec<u8>,Vec<u8>)>(query)
-        .bind(user_id).fetch_optional(db).await.map_err(|_|"backup key storage is unavailable".to_owned())?
-        .ok_or_else(||"backup key storage is unavailable".to_owned())?;
-    if row.0!=1||row.1!=1{return Err("stored backup key version is unsupported".into());}
-    open_account_backup_key(user_id,&row.2,&row.3,kek)
+    let mut candidate=Zeroizing::new([0u8;32]);OsRng.fill_bytes(&mut *candidate);
+    sqlx::query("INSERT INTO account_backup_keys(user_id,key_version,at_rest_version,key_material,nonce,ciphertext) VALUES($1,1,2,$2,NULL,NULL) ON CONFLICT(user_id) DO NOTHING")
+        .bind(user_id).bind(candidate.as_slice()).execute(db).await.map_err(|_|"backup key storage is unavailable".to_owned())?;
+    let stored=sqlx::query_as::<_,(i16,i16,Option<Vec<u8>>)>(query).bind(user_id).fetch_optional(db).await
+        .map_err(|_|"backup key storage is unavailable".to_owned())?;
+    let (key_version,at_rest_version,mut bytes)=stored.ok_or_else(||"backup key storage is unavailable".to_owned())?;
+    if key_version!=1||at_rest_version!=2{return Err("stored backup key version is unsupported or requires migration".into());}
+    let mut bytes=bytes.take().ok_or_else(||"stored per-account backup key is missing".to_owned())?;
+    if bytes.len()!=32{bytes.zeroize();return Err("stored per-account backup key has an invalid length".into());}
+    let mut key=[0u8;32];key.copy_from_slice(&bytes);bytes.zeroize();Ok(key)
 }
 fn parse_p256_public_jwk(jwk:&P256PublicJwk)->Option<PublicKey>{
     let coords=p256_public_key_fingerprint(jwk)?;
@@ -646,24 +628,26 @@ fn parse_p256_public_jwk(jwk:&P256PublicJwk)->Option<PublicKey>{
 }
 async fn get_backup_key_envelope(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<BackupKeyEnvelopeRequest>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(value)=>value,Err(response)=>return response};
-    let Some(kek)=state.backup_key_kek else{return api_error(StatusCode::SERVICE_UNAVAILABLE,"portable backup keys are not configured on this server")};
     match enforce_action_limit(&state.db,ctx.user_id,"backup-key-envelope",10).await{
         Ok(true)=>{},Ok(false)=>return api_error(StatusCode::TOO_MANY_REQUESTS,"backup-key access limit reached; try later"),
         Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"backup key access is temporarily unavailable"),
     }
     let Some(client_public)=parse_p256_public_jwk(&input.client_public_key)else{return api_error(StatusCode::BAD_REQUEST,"invalid ephemeral P-256 public key")};
-    let backup_key=match ensure_account_backup_key(&state.db,ctx.user_id,&kek).await{Ok(value)=>Zeroizing::new(value),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"backup key is temporarily unavailable")};
+    let backup_key=match ensure_account_backup_key(&state.db,ctx.user_id).await{Ok(value)=>Zeroizing::new(value),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"backup key is temporarily unavailable")};
     let server_secret=SecretKey::random(&mut OsRng);let server_public=server_secret.public_key();let shared=diffie_hellman(server_secret.to_nonzero_scalar(),client_public.as_affine());
     let point=server_public.to_encoded_point(false);let Some(server_x)=point.x()else{return api_error(StatusCode::INTERNAL_SERVER_ERROR,"backup key wrapping failed")};let Some(server_y)=point.y()else{return api_error(StatusCode::INTERNAL_SERVER_ERROR,"backup key wrapping failed")};
     let server_public_jwk=P256PublicJwk{kty:"EC".into(),crv:"P-256".into(),x:URL_SAFE_NO_PAD.encode(server_x),y:URL_SAFE_NO_PAD.encode(server_y)};
     let mut salt=[0u8;32];OsRng.fill_bytes(&mut salt);let mut nonce=[0u8;12];OsRng.fill_bytes(&mut nonce);
-    let user=ctx.user_id.to_string();let device=ctx.device_id.to_string();let client_x=input.client_public_key.x.clone();let client_y=input.client_public_key.y.clone();let server_x_text=server_public_jwk.x.clone();let server_y_text=server_public_jwk.y.clone();let salt_text=URL_SAFE_NO_PAD.encode(salt);let nonce_text=URL_SAFE_NO_PAD.encode(nonce);
-    let info=serde_json::to_vec(&serde_json::json!(["serein-backup-key-envelope-kdf-v1",user,device,1,client_x,client_y,server_x_text,server_y_text])).expect("backup envelope metadata is JSON-serializable");
-    let aad=serde_json::to_vec(&serde_json::json!(["serein-backup-key-envelope-aad-v1",user,device,1,client_x,client_y,server_x_text,server_y_text,salt_text,nonce_text])).expect("backup envelope metadata is JSON-serializable");
+    let envelope_version=input.envelope_version.unwrap_or(1);if !matches!(envelope_version,1|2){return api_error(StatusCode::BAD_REQUEST,"unsupported backup key envelope version");}
+    let user=ctx.user_id.to_string();let username=normalise_username(&ctx.username);let device=ctx.device_id.to_string();let client_x=input.client_public_key.x.clone();let client_y=input.client_public_key.y.clone();let server_x_text=server_public_jwk.x.clone();let server_y_text=server_public_jwk.y.clone();let salt_text=URL_SAFE_NO_PAD.encode(salt);let nonce_text=URL_SAFE_NO_PAD.encode(nonce);
+    let info_value=if envelope_version==2{serde_json::json!(["serein-backup-key-envelope-kdf-v2",user,username,device,2,client_x,client_y,server_x_text,server_y_text])}else{serde_json::json!(["serein-backup-key-envelope-kdf-v1",user,device,1,client_x,client_y,server_x_text,server_y_text])};
+    let aad_value=if envelope_version==2{serde_json::json!(["serein-backup-key-envelope-aad-v2",user,username,device,2,client_x,client_y,server_x_text,server_y_text,salt_text,nonce_text])}else{serde_json::json!(["serein-backup-key-envelope-aad-v1",user,device,1,client_x,client_y,server_x_text,server_y_text,salt_text,nonce_text])};
+    let info=serde_json::to_vec(&info_value).expect("backup envelope metadata is JSON-serializable");
+    let aad=serde_json::to_vec(&aad_value).expect("backup envelope metadata is JSON-serializable");
     let mut wrap_key=Zeroizing::new([0u8;32]);if Hkdf::<HkdfSha256>::new(Some(&salt),shared.raw_secret_bytes().as_slice()).expand(&info,&mut *wrap_key).is_err(){return api_error(StatusCode::INTERNAL_SERVER_ERROR,"backup key wrapping failed");}
     let cipher=match Aes256Gcm::new_from_slice(&*wrap_key){Ok(value)=>value,Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"backup key wrapping failed")};
     let ciphertext=match cipher.encrypt(Nonce::from_slice(&nonce),Payload{msg:&backup_key[..],aad:&aad}){Ok(value)=>value,Err(_)=>return api_error(StatusCode::INTERNAL_SERVER_ERROR,"backup key wrapping failed")};
-    Json(serde_json::json!({"key_version":1,"server_public_key":server_public_jwk,"salt":salt_text,"nonce":nonce_text,"ciphertext":URL_SAFE_NO_PAD.encode(ciphertext)})).into_response()
+    Json(serde_json::json!({"key_version":envelope_version,"server_public_key":server_public_jwk,"salt":salt_text,"nonce":nonce_text,"ciphertext":URL_SAFE_NO_PAD.encode(ciphertext)})).into_response()
 }
 
 async fn register_device_public_key(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<DevicePublicKeyInput>)->Response{
@@ -1119,18 +1103,16 @@ async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
 
 #[cfg(test)]
 mod tests {
-    use super::{account_unique_conflict, cooldown_seconds, history_page_limit, normalise_username, normalize_web_origin, parse_web_origins, p256_key_bundle_fingerprint, registration_password_requirements, token_hash, valid_ciphertext_parts, valid_email, valid_font_scale, valid_theme, valid_username, LoginInput, VerifyLoginInput, P256PublicJwk, TransferDeviceEnvelope, DevicePublicKeyInput, CreateTransferInput, seal_account_backup_key, open_account_backup_key, backup_key_at_rest_aad};
+    use super::{account_unique_conflict, cooldown_seconds, history_page_limit, normalise_username, normalize_web_origin, parse_web_origins, p256_key_bundle_fingerprint, registration_password_requirements, token_hash, valid_ciphertext_parts, valid_email, valid_font_scale, valid_theme, valid_username, LoginInput, VerifyLoginInput, P256PublicJwk, TransferDeviceEnvelope, DevicePublicKeyInput, CreateTransferInput};
     use uuid::Uuid;
-    use zeroize::Zeroize;
     use aes_gcm::{aead::{Aead, KeyInit, Payload}, Aes256Gcm, Nonce};
+    use zeroize::Zeroize;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use hkdf::Hkdf;
     use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, SecretKey};
     use rand_core::OsRng;
     use sha2_11::Sha256 as HkdfSha256;
-    #[test] fn backup_master_key_is_aead_protected_at_rest_and_bound_to_account(){let account=Uuid::new_v4();let other=Uuid::new_v4();let mut backup=[7u8;32];let kek=[9u8;32];let(nonce,ciphertext)=seal_account_backup_key(account,&backup,&kek).unwrap();assert_eq!(ciphertext.len(),48);assert_eq!(open_account_backup_key(account,&nonce,&ciphertext,&kek).unwrap(),backup);assert!(open_account_backup_key(other,&nonce,&ciphertext,&kek).is_err());backup.zeroize();}
-    #[test] fn ephemeral_p256_backup_key_envelope_round_trips_with_client_exchange(){let server_secret=SecretKey::random(&mut OsRng);let client_secret=SecretKey::random(&mut OsRng);let server_public=server_secret.public_key();let client_public=client_secret.public_key();let server_shared=diffie_hellman(server_secret.to_nonzero_scalar(),client_public.as_affine());let client_shared=diffie_hellman(client_secret.to_nonzero_scalar(),server_public.as_affine());assert_eq!(server_shared.raw_secret_bytes(),client_shared.raw_secret_bytes());let client_point=client_public.to_encoded_point(false);let server_point=server_public.to_encoded_point(false);let cx=URL_SAFE_NO_PAD.encode(client_point.x().unwrap());let cy=URL_SAFE_NO_PAD.encode(client_point.y().unwrap());let sx=URL_SAFE_NO_PAD.encode(server_point.x().unwrap());let sy=URL_SAFE_NO_PAD.encode(server_point.y().unwrap());let user=Uuid::new_v4().to_string();let device=Uuid::new_v4().to_string();let salt=[4u8;32];let nonce=[6u8;12];let salt_text=URL_SAFE_NO_PAD.encode(salt);let nonce_text=URL_SAFE_NO_PAD.encode(nonce);let info=serde_json::to_vec(&serde_json::json!(["serein-backup-key-envelope-kdf-v1",user,device,1,cx,cy,sx,sy])).unwrap();let aad=serde_json::to_vec(&serde_json::json!(["serein-backup-key-envelope-aad-v1",user,device,1,cx,cy,sx,sy,salt_text,nonce_text])).unwrap();let mut key=[0u8;32];Hkdf::<HkdfSha256>::new(Some(&salt),server_shared.raw_secret_bytes().as_slice()).expand(&info,&mut key).unwrap();let backup=[11u8;32];let cipher=Aes256Gcm::new_from_slice(&key).unwrap();let ciphertext=cipher.encrypt(Nonce::from_slice(&nonce),Payload{msg:&backup,aad:&aad}).unwrap();let mut client_key=[0u8;32];Hkdf::<HkdfSha256>::new(Some(&salt),client_shared.raw_secret_bytes().as_slice()).expand(&info,&mut client_key).unwrap();let client_cipher=Aes256Gcm::new_from_slice(&client_key).unwrap();let opened=client_cipher.decrypt(Nonce::from_slice(&nonce),Payload{msg:&ciphertext,aad:&aad}).unwrap();assert_eq!(opened,backup);key.zeroize();client_key.zeroize();}
-    #[test] fn backup_at_rest_aad_is_compact_json_with_stable_binding_fields(){let aad=backup_key_at_rest_aad(Uuid::parse_str("8ac15a50-267e-4d62-8e16-b0854d1c722d").unwrap()).unwrap();assert_eq!(String::from_utf8(aad).unwrap(),r#"["serein-account-backup-key-at-rest-v1","8ac15a50-267e-4d62-8e16-b0854d1c722d",1]"#);}
+    #[test] fn ephemeral_p256_backup_key_envelope_round_trips_with_client_exchange(){let server_secret=SecretKey::random(&mut OsRng);let client_secret=SecretKey::random(&mut OsRng);let server_public=server_secret.public_key();let client_public=client_secret.public_key();let server_shared=diffie_hellman(server_secret.to_nonzero_scalar(),client_public.as_affine());let client_shared=diffie_hellman(client_secret.to_nonzero_scalar(),server_public.as_affine());assert_eq!(server_shared.raw_secret_bytes(),client_shared.raw_secret_bytes());let client_point=client_public.to_encoded_point(false);let server_point=server_public.to_encoded_point(false);let cx=URL_SAFE_NO_PAD.encode(client_point.x().unwrap());let cy=URL_SAFE_NO_PAD.encode(client_point.y().unwrap());let sx=URL_SAFE_NO_PAD.encode(server_point.x().unwrap());let sy=URL_SAFE_NO_PAD.encode(server_point.y().unwrap());let user=Uuid::new_v4().to_string();let username="serein_test_user".to_string();let device=Uuid::new_v4().to_string();let salt=[4u8;32];let nonce=[6u8;12];let salt_text=URL_SAFE_NO_PAD.encode(salt);let nonce_text=URL_SAFE_NO_PAD.encode(nonce);let info=serde_json::to_vec(&serde_json::json!(["serein-backup-key-envelope-kdf-v2",user,username,device,2,cx,cy,sx,sy])).unwrap();let aad=serde_json::to_vec(&serde_json::json!(["serein-backup-key-envelope-aad-v2",user,username,device,2,cx,cy,sx,sy,salt_text,nonce_text])).unwrap();let mut key=[0u8;32];Hkdf::<HkdfSha256>::new(Some(&salt),server_shared.raw_secret_bytes().as_slice()).expand(&info,&mut key).unwrap();let backup=[11u8;32];let cipher=Aes256Gcm::new_from_slice(&key).unwrap();let ciphertext=cipher.encrypt(Nonce::from_slice(&nonce),Payload{msg:&backup,aad:&aad}).unwrap();let mut client_key=[0u8;32];Hkdf::<HkdfSha256>::new(Some(&salt),client_shared.raw_secret_bytes().as_slice()).expand(&info,&mut client_key).unwrap();let client_cipher=Aes256Gcm::new_from_slice(&client_key).unwrap();let opened=client_cipher.decrypt(Nonce::from_slice(&nonce),Payload{msg:&ciphertext,aad:&aad}).unwrap();assert_eq!(opened,backup);key.zeroize();client_key.zeroize();}
     #[test] fn duplicate_username_and_email_return_distinct_safe_messages(){assert!(account_unique_conflict(Some("accounts_username_key")).unwrap().contains("username"));assert!(account_unique_conflict(Some("accounts_email_key")).unwrap().contains("email"));assert!(account_unique_conflict(Some("unrelated_constraint")).is_none());}
     #[test] fn username_normalisation_is_ascii_lowercase(){assert_eq!(normalise_username("  Alice_7 "),"alice_7");}
     #[test] fn username_validation_rejects_short_and_unsafe_values(){assert!(valid_username("alice.7"));assert!(!valid_username("ab"));assert!(!valid_username("bad name"));assert!(!valid_username("Upper"));}

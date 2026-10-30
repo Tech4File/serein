@@ -1028,7 +1028,7 @@ private struct SereinNativeSettings: View {
                 Section("Connection") { SereinDetailRow(title: "Server origin", value: api.apiBase); SereinDetailRow(title: "Last checked", value: api.connectionTestedOrigin.isEmpty ? "Not checked" : api.connectionTestedOrigin); SereinDetailRow(title: "Status", value: api.connectionStatus); if !api.connectionDetails.isEmpty { Text(api.connectionDetails).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Button("Manage connection") { showConnectionSettings = true } }
                 Section("Appearance") { Picker("Theme", selection: $api.theme) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }; Picker("Text size", selection: $api.fontScale) { Text("System default").tag("system"); Text("Large").tag("large"); Text("Extra large").tag("extra_large") }; Toggle("Reduce motion", isOn: $api.reduceMotion); Button("Save preferences") { Task { await api.savePreferences() } } }
                 Section("Encrypted backups") {
-                    Text("Export a timestamped encrypted .srbk snapshot to a location you choose in Files. New backups use a random backup-only key stored encrypted by the service and requested only during an authenticated operation, wrapped to a one-use device key. The service can access the key; it is not saved on this device. Messages and attachment references are included, but media bytes are not. Restore is only offered during initial authenticated setup; confirmed skip is final and no later Settings restore is available.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary)
+                    Text("Export a timestamped encrypted .srbk snapshot to a location you choose in Files. New backups use an automatically generated random per-account key stored in the database, bound to the account ID and username, then wrapped to a one-use device key. The service can access it; no separate Replit secret is required. Messages and attachment references are included, but media bytes are not. Restore is only offered during initial authenticated setup; confirmed skip is final and no later Settings restore is available.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary)
                     Button(creatingBackup ? "Preparing encrypted backup…" : "Create encrypted backup") { createEncryptedBackup() }.disabled(creatingBackup || api.user == nil)
                     if !backupStatus.isEmpty { Text(backupStatus).font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
                 }
@@ -1056,8 +1056,8 @@ private struct SereinNativeSettings: View {
                     creatingBackup = false
                     backupDocument = SereinBackupDocument(bytes: Data())
                     switch result {
-                    case .success: backupStatus = "Encrypted snapshot saved. Keep the file somewhere safe; media files were not packaged."
-                    case .failure(let error): backupStatus = "Backup export did not complete: \\(error.localizedDescription)"
+                    case .success: backupStatus = "Encrypted snapshot saved. Keep the file somewhere safe; media files were not packaged."; if scenePhase != .active { Task { await postBackupNotification("Encrypted backup saved", "The encrypted Serein backup was saved to Files.") } }
+                    case .failure(let error): backupStatus = "Backup export did not complete: \\(error.localizedDescription)"; if scenePhase != .active { Task { await postBackupNotification("Backup export did not complete", "Return to Serein for details and try saving again.") } }
                     }
                 }
         }
@@ -1076,26 +1076,37 @@ private struct SereinNativeSettings: View {
             guard messages.count <= SereinBackupStore.maximumMessages else { throw SereinBackupStore.BackupError.tooLarge }
             let contactRows: [[String: Any]] = api.contacts.filter { !$0.isDeleted }.map { ["user_id": $0.user_id, "username": $0.username, "display_name": $0.display_name] }
             let snapshot: [String: Any] = ["snapshot_version": 1, "created_at": ISO8601DateFormatter().string(from: Date()), "messages": messages, "contacts": contactRows, "media": ["included": false, "policy": "references-only"]]
-            creatingBackup = true; backupStatus = "Preparing encrypted snapshot…"
+            creatingBackup = true; backupStatus = "Step 1 of 3 · Requesting the account-bound backup key… Keep Serein open until encryption starts."
+            let backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "SereinEncryptedBackup") { DispatchQueue.main.async { self.backupStatus = "Backup is still being prepared; return to Serein to continue." } }
             Task {
                 var keyBytes = Data()
-                defer { if !keyBytes.isEmpty { keyBytes.resetBytes(in: 0..<keyBytes.count) } }
+                defer { if !keyBytes.isEmpty { keyBytes.resetBytes(in: 0..<keyBytes.count) }; if backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(backgroundTask) } }
                 do {
-                    keyBytes = try await api.requestBackupKey(accountID: user.id)
+                    keyBytes = try await api.requestBackupKey(accountID: user.id, username: user.username)
+                    backupStatus = "Step 2 of 3 · Compressing and encrypting locally…"
                     let keyForCodec = keyBytes
                     let result = try await Task.detached(priority: .userInitiated) {
                         try SereinBackupStore.create(accountID: user.id, username: user.username, backupKey: keyForCodec, snapshot: snapshot)
                     }.value
-                    guard api.user?.id == user.id else { creatingBackup = false; backupStatus = "Account changed before export completed. Try again while signed in."; return }
+                    guard api.user?.id == user.id else { creatingBackup = false; backupStatus = "Account changed before export completed. Try again while signed in."; await postBackupNotification("Backup not completed", "The signed-in account changed before export completed."); return }
                     backupDocument = SereinBackupDocument(bytes: result.bytes)
                     backupFilename = result.filename
-                    backupStatus = "Choose a durable location in Files. The app will not overwrite an earlier snapshot."
+                    backupStatus = "Step 3 of 3 · Encrypted file ready. Choose a durable location in Files."
                     showingBackupExporter = true
-                } catch { creatingBackup = false; backupStatus = error.localizedDescription }
+                    if scenePhase != .active { await postBackupNotification("Encrypted backup ready", "Return to Serein and choose where to save the encrypted file.") }
+                } catch { creatingBackup = false; backupStatus = error.localizedDescription; await postBackupNotification("Backup could not be completed", "Serein could not prepare the encrypted backup. Return to the app for details.") }
             }
         } catch { backupStatus = error.localizedDescription }
     }
 
+    @MainActor private func postBackupNotification(_ title:String,_ body:String) async {
+        guard api.notifications else { return }
+        let center=UNUserNotificationCenter.current(),settings=await center.notificationSettings()
+        guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional || settings.authorizationStatus == .ephemeral else { return }
+        let content=UNMutableNotificationContent();content.title=title;content.body=body;content.sound=nil
+        let request=UNNotificationRequest(identifier:"serein-backup-\(UUID().uuidString)",content:content,trigger:nil)
+        try? await center.add(request)
+    }
     private func refreshNotificationStatus() async {
         let status = await api.notificationAuthorizationStatus()
         switch status {

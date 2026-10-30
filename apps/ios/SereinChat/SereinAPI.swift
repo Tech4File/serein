@@ -283,17 +283,18 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         } catch { errorMessage = error.localizedDescription }
     }
     func contactsData() async throws -> Data { try await request("/api/v1/contacts") }
-    func requestBackupKey(accountID: String) async throws -> Data {
+    func requestBackupKey(accountID: String, username: String) async throws -> Data {
         guard let accountUUID = UUID(uuidString: accountID), let deviceUUID = UUID(uuidString: deviceID) else {
             throw NSError(domain: "SereinBackupKey", code: 1, userInfo: [NSLocalizedDescriptionKey: "Signed-in account or device identity is unavailable."])
         }
-        let account = accountUUID.uuidString.lowercased(), device = deviceUUID.uuidString.lowercased()
+        let account = accountUUID.uuidString.lowercased(), device = deviceUUID.uuidString.lowercased(), boundUsername = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard boundUsername.range(of: #"^[a-z0-9_.-]{3,32}$"#, options: .regularExpression) != nil else { throw NSError(domain: "SereinBackupKey", code: 5, userInfo: [NSLocalizedDescriptionKey: "Signed-in username is invalid."]) }
         let ephemeral = P256.KeyAgreement.PrivateKey()
         let point = ephemeral.publicKey.x963Representation
         guard point.count == 65, point.first == 4 else { throw NSError(domain: "SereinBackupKey", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not prepare a one-use backup key request."]) }
         let clientX = base64URL(Data(point[1..<33])), clientY = base64URL(Data(point[33..<65]))
         let clientJWK: [String: String] = ["kty": "EC", "crv": "P-256", "x": clientX, "y": clientY]
-        let response = try await request("/api/v1/backups/key-envelope", method: "POST", values: ["client_public_key": clientJWK])
+        let response = try await request("/api/v1/backups/key-envelope", method: "POST", values: ["client_public_key": clientJWK, "envelope_version": 2])
         guard let envelope = try JSONSerialization.jsonObject(with: response) as? [String: Any],
               envelope["key_version"] as? Int == 1,
               let server = envelope["server_public_key"] as? [String: String],
@@ -309,8 +310,8 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         var serverPoint = Data([4]); serverPoint.append(sx); serverPoint.append(sy)
         let serverPublic = try P256.KeyAgreement.PublicKey(x963Representation: serverPoint)
         let shared = try ephemeral.sharedSecretFromKeyAgreement(with: serverPublic)
-        let info = try JSONSerialization.data(withJSONObject: ["serein-backup-key-envelope-kdf-v1", account, device, 1, clientX, clientY, sxText, syText] as [Any], options: [.fragmentsAllowed])
-        let aad = try JSONSerialization.data(withJSONObject: ["serein-backup-key-envelope-aad-v1", account, device, 1, clientX, clientY, sxText, syText, saltText, nonceText] as [Any], options: [.fragmentsAllowed])
+        let info = try JSONSerialization.data(withJSONObject: ["serein-backup-key-envelope-kdf-v2", account, boundUsername, device, 2, clientX, clientY, sxText, syText] as [Any], options: [.fragmentsAllowed])
+        let aad = try JSONSerialization.data(withJSONObject: ["serein-backup-key-envelope-aad-v2", account, boundUsername, device, 2, clientX, clientY, sxText, syText, saltText, nonceText] as [Any], options: [.fragmentsAllowed])
         let wrappingKey = shared.hkdfDerivedSymmetricKey(using: SHA256.self, salt: salt, sharedInfo: info, outputByteCount: 32)
         let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: nonce), ciphertext: Data(ciphertext.prefix(32)), tag: Data(ciphertext.suffix(16)))
         let clear = try AES.GCM.open(box, using: wrappingKey, authenticating: aad)

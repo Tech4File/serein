@@ -54,17 +54,17 @@ final class SereinBackupStore {
         private final JSONObject clientPublicKey;
         private EphemeralKeyExchange(KeyPair pair,JSONObject publicKey){this.pair=pair;this.clientPublicKey=publicKey;}
         JSONObject publicKeyJwk() throws Exception{return new JSONObject(clientPublicKey.toString());}
-        byte[] unwrap(String accountId,String deviceId,JSONObject envelope) throws Exception {
+        byte[] unwrap(String accountId,String username,String deviceId,JSONObject envelope) throws Exception {
             if(pair==null)throw new IOException("The one-use backup key is no longer available.");
-            String user=canonicalId(accountId),device=canonicalId(deviceId);
-            if(envelope.optInt("key_version")!=1)throw new IOException("Unsupported backup key envelope.");
+            String user=canonicalId(accountId),boundUsername=username.trim().toLowerCase(java.util.Locale.ROOT),device=canonicalId(deviceId);if(!boundUsername.matches("[a-z0-9_.-]{3,32}"))throw new IOException("Invalid account username binding.");
+            if(envelope.optInt("key_version")!=2)throw new IOException("Unsupported backup key envelope.");
             JSONObject server=envelope.getJSONObject("server_public_key");if(!"EC".equals(server.optString("kty"))||!"P-256".equals(server.optString("crv")))throw new IOException("Malformed backup key envelope.");
             byte[] x=unb64(server.getString("x"),32),y=unb64(server.getString("y"),32),salt=unb64(envelope.getString("salt"),32),nonce=unb64(envelope.getString("nonce"),12),ciphertext=unb64(envelope.getString("ciphertext"),48),shared=null,wrapKey=null;
             try{
                 ECPublicKey own=(ECPublicKey)pair.getPublic();ECPublicKey serverPublic=(ECPublicKey)KeyFactory.getInstance("EC").generatePublic(new ECPublicKeySpec(new ECPoint(new BigInteger(1,x),new BigInteger(1,y)),own.getParams()));
                 KeyAgreement agreement=KeyAgreement.getInstance("ECDH");agreement.init(pair.getPrivate());agreement.doPhase(serverPublic,true);shared=agreement.generateSecret();if(shared.length!=32)throw new IOException("Invalid ECDH shared secret.");
                 String cx=clientPublicKey.getString("x"),cy=clientPublicKey.getString("y"),sx=server.getString("x"),sy=server.getString("y"),saltText=envelope.getString("salt"),nonceText=envelope.getString("nonce");
-                byte[] info=array("serein-backup-key-envelope-kdf-v1",user,device,1,cx,cy,sx,sy),aad=array("serein-backup-key-envelope-aad-v1",user,device,1,cx,cy,sx,sy,saltText,nonceText);
+                byte[] info=array("serein-backup-key-envelope-kdf-v2",user,boundUsername,device,2,cx,cy,sx,sy),aad=array("serein-backup-key-envelope-aad-v2",user,boundUsername,device,2,cx,cy,sx,sy,saltText,nonceText);
                 try{wrapKey=hkdf(shared,salt,info);Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.DECRYPT_MODE,new SecretKeySpec(wrapKey,"AES"),new GCMParameterSpec(128,nonce));cipher.updateAAD(aad);byte[] clear=cipher.doFinal(ciphertext);if(clear.length!=32){wipe(clear);throw new IOException("Malformed backup key envelope.");}return clear;}
                 finally{wipe(info);wipe(aad);}
             }finally{wipe(x);wipe(y);wipe(salt);wipe(nonce);wipe(ciphertext);wipe(shared);wipe(wrapKey);clear();}
