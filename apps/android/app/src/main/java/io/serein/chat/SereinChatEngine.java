@@ -106,8 +106,8 @@ final class SereinChatEngine {
                     JSONObject d=active.optJSONObject(i);if(d==null)continue;String id=d.optString("id");JSONObject entry=publishedById.get(id);if(entry==null)continue;
                     JSONObject jwk=entry.optJSONObject("public_key"),layer2Jwk=entry.optJSONObject("layer2_public_key");if(jwk==null||layer2Jwk==null||entry.optInt("key_version")!=2||!"ECDH-P256".equals(entry.optString("algorithm")))throw new IllegalStateException("A contact device has not published both E2EE key layers.");
                     String fingerprint=SereinDeviceCrypto.fingerprintBundle(jwk,layer2Jwk);if(!fingerprint.equals(entry.optString("fingerprint")))throw new IllegalStateException("A contact device key-bundle fingerprint is inconsistent.");
-                    int ratchetVersion=entry.optInt("ratchet_version",2);if(ratchetVersion!=2&&ratchetVersion!=3)throw new IllegalStateException("A contact device advertises an unsupported ratchet capability.");String trusted=local.trustedFingerprint(contactId,id);boolean trustedCapability=local.trustedRatchetVersion(contactId,id)==ratchetVersion;byte[] key=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,contactId,id,jwk);byte[] layer2Key=SereinDeviceCrypto.layer2ConversationKey(layer2Pair.getPrivate(),userId,deviceId,contactId,id,layer2Jwk);
-                    next.put(id,new Peer(contactId,id,d.optString("name","Device"),fingerprint,jwk,layer2Jwk,key,layer2Key,ratchetVersion,fingerprint.equals(trusted)&&trustedCapability));
+                    int ratchetVersion=entry.optInt("ratchet_version",2);if(ratchetVersion!=2&&ratchetVersion!=3)throw new IllegalStateException("A contact device advertises an unsupported ratchet capability.");String trustedFingerprint=local.trustedFingerprint(contactId,id);int pinnedVersion=local.trustedRatchetVersion(contactId,id);boolean firstSeen=trustedFingerprint.isEmpty();if(firstSeen){local.trustFingerprint(contactId,id,fingerprint,ratchetVersion);trustedFingerprint=fingerprint;pinnedVersion=ratchetVersion;}boolean sameFingerprint=fingerprint.equals(trustedFingerprint);boolean capabilityAccepted=(pinnedVersion==2||pinnedVersion==3)&&ratchetVersion>=pinnedVersion;if(sameFingerprint&&capabilityAccepted&&ratchetVersion>pinnedVersion){local.trustFingerprint(contactId,id,fingerprint,ratchetVersion);pinnedVersion=ratchetVersion;}boolean trustedBundle=sameFingerprint&&capabilityAccepted;byte[] key=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,contactId,id,jwk);byte[] layer2Key=SereinDeviceCrypto.layer2ConversationKey(layer2Pair.getPrivate(),userId,deviceId,contactId,id,layer2Jwk);
+                    next.put(id,new Peer(contactId,id,d.optString("name","Device"),fingerprint,jwk,layer2Jwk,key,layer2Key,ratchetVersion,trustedBundle));
                 }
                 if(publishedById.keySet().stream().anyMatch(id->{for(int i=0;i<active.length();i++)if(id.equals(active.optJSONObject(i)==null?"":active.optJSONObject(i).optString("id")))return false;return true;}))throw new IllegalStateException("The contact device list changed. Refresh Contacts and reopen this chat.");
                 synchronized(this){peers.clear();peers.putAll(next);}status=peerStatus();notifyUi();
@@ -118,15 +118,8 @@ final class SereinChatEngine {
         JSONArray active=contact.optJSONArray("devices");int total=active==null?0:active.length(),trusted=0; synchronized(this){for(Peer peer:peers.values())if(peer.trusted)trusted++;}
         if(total==0)return "No active recipient devices are available.";
         if(peers.size()<total)return (total-peers.size())+" active device(s) have not published an E2EE key.";
-        return trusted==total?"All "+trusted+" recipient-device fingerprints are verified on this device.":"Verify "+(total-trusted)+" recipient-device fingerprint(s) before sending.";
+        return trusted==total?"All "+trusted+" recipient device key bundles are app-checked and locally pinned.":(total-trusted)+" recipient-device key changes or capability downgrades are blocked.";
     }
-    CompletableFuture<Void> trust(String targetDeviceId){
-        return CompletableFuture.runAsync(()->{
-            try{Peer peer; synchronized(this){peer=peers.get(targetDeviceId);}if(peer==null)throw new IllegalStateException("Device key is no longer available.");local.trustFingerprint(contactId,targetDeviceId,peer.fingerprint,peer.ratchetVersion);synchronized(this){peers.put(targetDeviceId,new Peer(peer.userId,peer.deviceId,peer.name,peer.fingerprint,peer.publicJwk,peer.layer2PublicJwk,peer.conversationKey,peer.layer2Key,peer.ratchetVersion,true));}status=peerStatus();notifyUi();}
-            catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
-        });
-    }
-
     CompletableFuture<Void> sendText(String text){return sendMessage(text,null);}
     private CompletableFuture<Void> sendMessage(String text,JSONObject attachment){
         if(!ready)return failed(new IllegalStateException("Protected device setup is not ready."));
@@ -156,7 +149,7 @@ final class SereinChatEngine {
     }
     private List<Peer> trustedTargets(){
         List<Peer> targets=new ArrayList<>();JSONArray active=contact.optJSONArray("devices");if(active==null)throw new IllegalStateException("Contact has no active devices.");
-        synchronized(this){for(int i=0;i<active.length();i++){JSONObject d=active.optJSONObject(i);if(d==null)continue;Peer peer=peers.get(d.optString("id"));if(peer==null||!peer.trusted)throw new IllegalStateException("Verify every current recipient-device fingerprint before sending.");targets.add(peer);}}
+        synchronized(this){for(int i=0;i<active.length();i++){JSONObject d=active.optJSONObject(i);if(d==null)continue;Peer peer=peers.get(d.optString("id"));if(peer==null||!peer.trusted)throw new IllegalStateException("A recipient-device key is changed or not locally pinned; sending is blocked.");targets.add(peer);}}
         if(targets.isEmpty())throw new IllegalStateException("No recipient devices are available.");return targets;
     }
     private CompletableFuture<Void> deliver(JSONObject message){
@@ -205,7 +198,7 @@ final class SereinChatEngine {
                 String senderDevice=packet.optString("from");boolean belongs=false;JSONArray active=contact.optJSONArray("devices");if(active!=null)for(int i=0;i<active.length();i++){JSONObject d=active.optJSONObject(i);if(d!=null&&senderDevice.equals(d.optString("id")))belongs=true;}
                 if(!belongs){advance(created,id);return;}
                 if(local.containsMessage(id)){api.acknowledgeFuture(id).get(20,TimeUnit.SECONDS);advance(created,id);return;}
-                Peer peer; synchronized(this){peer=peers.get(senderDevice);}if(peer==null||!peer.trusted){status=peer==null?"Refresh Contacts: the sender device is not in the accepted contact list.":"Message is held until you verify the sender-device fingerprint.";notifyUi();throw new IllegalStateException(status);}
+                Peer peer; synchronized(this){peer=peers.get(senderDevice);}if(peer==null||!peer.trusted){status=peer==null?"Refresh Contacts: the sender device is not in the accepted contact list.":"Message is held because the sender-device key changed or is not locally pinned.";notifyUi();throw new IllegalStateException(status);}
                 JSONObject message=decryptAndStoreIncoming(peer,packet,id,senderDevice,created);
                 // Local message and ratchet advancement are durable before ACK deletes the server queue copy.
                 api.acknowledgeFuture(id).get(20,TimeUnit.SECONDS);advance(created,id);if(notificationsArmed)SereinNotifications.showIncoming(context,context.getSharedPreferences("serein",Context.MODE_PRIVATE).getBoolean("notification_sound",true));status="Encrypted message received and stored on this device.";notifyUi();
@@ -268,7 +261,7 @@ final class SereinChatEngine {
                     manifestKey=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,userId,deviceId,SereinDeviceCrypto.publicJwk(pair));
                     manifestLayer2Key=SereinDeviceCrypto.layer2ConversationKey(layer2Pair.getPrivate(),userId,deviceId,userId,deviceId,SereinDeviceCrypto.publicJwk(layer2Pair));
                 }else{
-                    if(!contactId.equals(senderUser))throw new SecurityException("The sender is not the selected contact.");Peer peer; synchronized(this){peer=peers.get(senderDevice);}if(peer==null||!peer.trusted)throw new SecurityException("Verify the sender-device fingerprint before downloading.");manifestKey=peer.conversationKey;manifestLayer2Key=peer.layer2Key;
+                    if(!contactId.equals(senderUser))throw new SecurityException("The sender is not the selected contact.");Peer peer; synchronized(this){peer=peers.get(senderDevice);}if(peer==null||!peer.trusted)throw new SecurityException("The sender-device key is not locally pinned or has changed; the file remains locked.");manifestKey=peer.conversationKey;manifestLayer2Key=peer.layer2Key;
                 }
                 int manifestVersion=transfer.optInt("manifest_crypto_version",1);if(manifestVersion!=1&&manifestVersion!=2)throw new SecurityException("Encrypted transfer uses an unsupported manifest version.");
                 JSONObject innerManifestEnvelope=manifestVersion==2?SereinDeviceCrypto.decryptManifestLayer2(manifestLayer2Key,transfer.optString("manifest_iv"),transfer.optString("manifest_ciphertext"),transferId,senderUser,senderDevice,recipientUser,deviceId):new JSONObject().put("version",1).put("algorithm","AES-256-GCM").put("iv",transfer.optString("manifest_iv")).put("ciphertext",transfer.optString("manifest_ciphertext"));

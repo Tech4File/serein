@@ -27,4 +27,12 @@ final class SereinTokens {
     static final float FONT_SCALE_LARGE = 1.15f;
     static final float FONT_SCALE_EXTRA_LARGE = 1.3f;
     static final float MIN_FONT_SIZE_SP = 12f;
+    static final int BUTTON_HEIGHT_DP = 44;
+    static final int ICON_BUTTON_SIZE_DP = 44;
+    static final int CHIP_HEIGHT_DP = 36;
+    static final int BUTTON_RADIUS_DP = 12;
+    static final int PROFILE_PANEL_MIN_WIDTH_DP = 320;
+    static final int PROFILE_PANEL_MAX_WIDTH_DP = 440;
+    static final int DIALOG_RADIUS_DP = 20;
+    static final int MOTION_DURATION_MS = 240;
 }

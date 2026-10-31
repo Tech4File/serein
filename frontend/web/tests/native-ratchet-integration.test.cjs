@@ -16,14 +16,14 @@ const web = read('frontend/web/app.js');
 const webCrypto = read('frontend/web/device-crypto.js');
 const webRatchet = read('frontend/web/layered-ratchet.js');
 
-test('native clients advertise v3 only with the shared core and route capable peers through crypto v3', () => {
+test('all clients advertise v3 only when the shared core is active and route capable peers through crypto v3', () => {
   assert.match(android, /SereinCoreNative\.isLoaded\(\)\?3:2/);
   assert.match(android, /target\.ratchetVersion>=3&&SereinCoreNative\.isLoaded\(\)/);
   assert.match(android, /cryptoVersion=3/);
   assert.match(ios, /SereinCoreBridge\.version == "unavailable" \? 2 : 3/);
   assert.match(ios, /peer\.ratchetVersion >= 3 && SereinCoreBridge\.version != "unavailable"/);
   assert.match(ios, /encrypted\["crypto_version"\] = "3"/);
-  assert.match(web, /ratchet_version:3/);
+  assert.match(web, /ratchet_version:window\.SereinCore\?\.wasmActive\?3:2/);
 });
 
 test('Android, iOS, and browser use the same v3 bootstrap, session, and layered AAD domains', () => {

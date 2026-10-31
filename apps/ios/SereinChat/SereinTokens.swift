@@ -17,4 +17,12 @@ enum SereinTokens {
     static let textDark = Color(red: 0.925490, green: 0.949020, blue: 0.949020)
     static let fontScaleLargeMinimum: DynamicTypeSize = .xLarge
     static let fontScaleExtraLargeMinimum: DynamicTypeSize = .xxLarge
+    static let buttonHeight: CGFloat = 44.0
+    static let iconButtonSize: CGFloat = 44.0
+    static let chipHeight: CGFloat = 36.0
+    static let buttonRadius: CGFloat = 12.0
+    static let profilePanelMinWidth: CGFloat = 320.0
+    static let profilePanelMaxWidth: CGFloat = 440.0
+    static let dialogRadius: CGFloat = 20.0
+    static let motionDurationMs: Double = 240.0
 }

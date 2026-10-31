@@ -118,7 +118,7 @@ private struct SereinWhatsNewView: View {
                     Label("Email verification and stronger account safeguards", systemImage: "checkmark.shield")
                     Label("Contact, privacy, and registered-device settings", systemImage: "person.2")
                     Label("Check or change your self-hosted server connection", systemImage: "network")
-                    Label("Native and web chats require explicit per-device fingerprint verification", systemImage: "lock.shield")
+                    Label("Apps check both key layers and pin first-seen device keys", systemImage: "lock.shield")
                     Label("Notification permissions can be requested in Settings; sound is configurable", systemImage: "bell.badge")
                 }
             }.listStyle(.insetGrouped).navigationTitle(isFirstInstall ? "Welcome to Serein" : "What’s New")
@@ -199,7 +199,7 @@ private struct SereinNativeAuthView: View {
                             }
                         }
                     }
-                    if !api.verificationRequired { Text("After sign-in, open a contact to set up encrypted native messaging. Verify every current device fingerprint before sending.").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }
+                    if !api.verificationRequired { Text("After sign-in, open a contact to set up encrypted native messaging. The app checks and pins first-seen device keys automatically.").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }
                 }.padding(22).frame(maxWidth: 540).frame(maxWidth: .infinity)
             }
         }.sheet(isPresented: $showConnectionSettings) { SereinConnectionSettings(api: api) }
@@ -264,7 +264,7 @@ private struct SereinNativeChats: View {
         NavigationView {
             Group {
                 if api.contacts.isEmpty {
-                    VStack(spacing: 12) { Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 36, relativeTo: .body)).foregroundStyle(SereinPalette.green); Text("No contacts yet").font(.system(size: 20, weight: .bold, relativeTo: .body)); Text("Add a username from Contacts, verify the device fingerprints, and start an encrypted conversation.").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(.horizontal, 28); Button("Refresh") { Task { await api.refreshAccountData() } } }
+                    VStack(spacing: 12) { Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 36, relativeTo: .body)).foregroundStyle(SereinPalette.green); Text("No contacts yet").font(.system(size: 20, weight: .bold, relativeTo: .body)); Text("Add a username from Contacts and start an encrypted conversation. Device keys are checked and pinned automatically by the app.").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(.horizontal, 28); Button("Refresh") { Task { await api.refreshAccountData() } } }
                 } else {
                     List(api.contacts) { contact in
                         NavigationLink(destination: SereinNativeConversation(api: api, contact: contact)) {
@@ -340,10 +340,7 @@ private struct SereinNativeGIFPicker: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 7) {
                         ForEach(categories, id: \.self) { item in
-                            Button(item.capitalized) { query="";category=item;resetAndLoad() }
-                                .font(.system(size: 11, weight: .semibold, relativeTo: .body))
-                                .padding(.horizontal, 12).padding(.vertical, 7)
-                                .background(query.isEmpty && category == item ? SereinPalette.paleMint : Color.secondary.opacity(0.1), in: Capsule())
+                            SereinChip(title:item.capitalized,selected:query.isEmpty && category==item){query="";category=item;resetAndLoad()}
                         }
                     }
                 }.frame(height: 36)
@@ -438,6 +435,7 @@ private struct SereinContactProfile: View {
     let messages: [SereinChatMessage]
     @Environment(\.dismiss) private var dismiss
     @State private var favorite = false
+    @State private var showBlockConfirmation = false
     @State private var showMediaLibrary = false
     @State private var selectedMedia: SereinMediaViewerItem?
     @State private var openingTransferID: String?
@@ -446,47 +444,79 @@ private struct SereinContactProfile: View {
     private var favoriteKey: String { "serein.favorite.\(api.user?.id ?? "local").\(contact.user_id)" }
     var body: some View {
         NavigationView {
-            List {
-                Section {
-                    VStack(spacing: 8) {
-                        SereinAvatar(name: contact.display_name, size: 82)
-                        Text(contact.display_name).font(.system(size: 22, weight: .bold, relativeTo: .body))
-                        Text("@\(contact.username)").font(.system(size: 13, relativeTo: .body)).foregroundStyle(.secondary)
-                        Label(contact.email_verified ? "Email verified" : "Email not verified", systemImage: contact.email_verified ? "checkmark.seal.fill" : "exclamationmark.circle")
-                            .font(.system(size: 11, relativeTo: .body)).foregroundStyle(contact.email_verified ? SereinPalette.green : .secondary)
-                        Text("Private account email is not shared.").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.tertiary)
-                    }.frame(maxWidth: .infinity).padding(.vertical, 10)
-                }
-                Section("About") {
-                    profileLine("Username", "@\(contact.username)")
-                    profileLine("Active devices", "\(contact.devices.count)")
-                    if let connected=contact.connected_at { profileLine("Friends since", profileDate(connected)) }
-                }
-                Section {
-                    HStack { Text("Shared media").font(.system(size: 14, weight: .semibold, relativeTo: .body)); Spacer(); Button("View all") { showMediaLibrary=true }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
-                    Text("\(allAttachments.count) file\(allAttachments.count == 1 ? "" : "s") · latest four").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
-                    if latestFour.isEmpty { Text("Shared photos, GIFs, videos, audio and documents will appear here.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary).padding(.vertical, 8) }
-                    else {
-                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 7), GridItem(.flexible(), spacing: 7)], spacing: 7) {
-                            ForEach(latestFour) { message in
-                                if let attachment=message.attachment {
-                                    SereinCompactMediaTile(attachment: attachment, localURL: engine.localFile(for: attachment), isLoading: openingTransferID == attachment.transferID) {
-                                        openMedia(attachment)
+            ScrollView {
+                VStack(spacing: 13) {
+                    SereinCard {
+                        VStack(spacing: 9) {
+                            SereinAvatar(name: contact.display_name, size: 86)
+                            Text(contact.display_name).font(.system(.title2, design: .rounded).weight(.bold))
+                            Text("@\(contact.username)").font(.system(.subheadline, relativeTo: .body)).foregroundStyle(.secondary)
+                            Label(contact.email_verified ? "Email verified" : "Email not verified", systemImage: contact.email_verified ? "checkmark.seal.fill" : "exclamationmark.circle")
+                                .font(.system(.subheadline, relativeTo: .body).weight(.semibold))
+                                .foregroundStyle(contact.email_verified ? SereinPalette.green : .secondary)
+                            Text("Private account email is not shared.").font(.system(.footnote, relativeTo: .body)).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity).padding(.vertical, 8)
+                    }
+                    SereinCard {
+                        VStack(alignment: .leading, spacing: 10) {
+                            SereinSectionLabel(title: "About")
+                            profileLine("Username", "@\(contact.username)")
+                            profileLine("Active devices", "\(contact.devices.count)")
+                            if let connected=contact.connected_at { profileLine("Friends since", profileDate(connected)) }
+                        }
+                    }
+                    SereinCard {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    SereinSectionLabel(title: "Shared media")
+                                    Text("\(allAttachments.count) file\(allAttachments.count == 1 ? "" : "s") · latest four")
+                                        .font(.system(.footnote, relativeTo: .body)).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("View all") { showMediaLibrary=true }
+                                    .font(.system(.subheadline, design: .rounded).weight(.semibold))
+                                    .foregroundStyle(SereinPalette.green)
+                            }
+                            if latestFour.isEmpty {
+                                Label("Shared photos, GIFs, videos, audio and documents will appear here.", systemImage: "square.stack.3d.up")
+                                    .font(.system(.subheadline, relativeTo: .body)).foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 10)
+                            } else {
+                                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                                    ForEach(latestFour) { message in
+                                        if let attachment=message.attachment {
+                                            SereinCompactMediaTile(attachment: attachment, localURL: engine.localFile(for: attachment), isLoading: openingTransferID == attachment.transferID) {
+                                                openMedia(attachment)
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }.padding(.vertical, 3)
+                        }
                     }
-                }
-                Section {
-                    Toggle(isOn: $favorite) { Label("Favorite", systemImage: favorite ? "star.fill" : "star") }
-                        .onChange(of: favorite) { value in UserDefaults.standard.set(value, forKey: favoriteKey) }
-                    Button(role: .destructive) { Task { await api.block(contact); dismiss() } } label: { Label("Block contact", systemImage: "hand.raised.fill") }
-                        .disabled(contact.isDeleted)
-                }
-            }.listStyle(.insetGrouped).navigationTitle("Contact profile").navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-                .onAppear { favorite=UserDefaults.standard.bool(forKey:favoriteKey) }
+                    SereinCard {
+                        VStack(spacing: 12) {
+                            Toggle(isOn: $favorite) { Label("Favorite", systemImage: favorite ? "star.fill" : "star") }
+                                .tint(SereinPalette.green)
+                                .onChange(of: favorite) { value in UserDefaults.standard.set(value, forKey: favoriteKey) }
+                            Button(role: .destructive) { showBlockConfirmation=true } label: {
+                                Label("Block contact", systemImage: "hand.raised.fill").frame(maxWidth: .infinity, minHeight: SereinTokens.buttonHeight)
+                            }.buttonStyle(SereinDestructiveButtonStyle()).disabled(contact.isDeleted)
+                        }
+                    }
+                }.padding(14)
+            }
+            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            .navigationTitle("Contact profile").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .onAppear { favorite=UserDefaults.standard.bool(forKey:favoriteKey) }
+        }
+        .confirmationDialog("Block @\(contact.username)?", isPresented: $showBlockConfirmation, titleVisibility: .visible) {
+            Button("Block contact", role: .destructive) { Task { await api.block(contact); dismiss() } }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Blocking removes this contact link and prevents new requests and messages. Existing encrypted history is retained.")
         }
         .fullScreenCover(isPresented: $showMediaLibrary) {
             SereinMediaLibrary(engine: engine, messages: allAttachments, onClose: { showMediaLibrary=false })
@@ -546,7 +576,7 @@ private struct SereinMediaLibrary: View {
                 HStack(spacing:5) {
                     tabButton("Media",value:"media");tabButton("Documents",value:"documents")
                 }.padding(4).background(Color.secondary.opacity(0.10),in:RoundedRectangle(cornerRadius:12))
-                if selectedTab=="media" { ScrollView(.horizontal,showsIndicators:false) { HStack(spacing:7) { for (label,value) in [("All","all"),("Photos","photo"),("GIFs","gif"),("Videos","video"),("Audio","audio")] { Button(label){mediaFilter=value}.font(.system(size:11,weight:.semibold,relativeTo:.body)).padding(.horizontal,12).padding(.vertical,7).background(mediaFilter==value ? SereinPalette.paleMint : Color.secondary.opacity(0.09),in:Capsule()) } } }.frame(height:34) }
+                if selectedTab=="media" { ScrollView(.horizontal,showsIndicators:false) { HStack(spacing:7) { for (label,value) in [("All","all"),("Photos","photo"),("GIFs","gif"),("Videos","video"),("Audio","audio")] { SereinChip(title:label,selected:mediaFilter==value){mediaFilter=value} } }.padding(.vertical,2) }.frame(height:SereinTokens.chipHeight+4) }
                 Text("\(displayed.count) \(selectedTab == "documents" ? "documents" : "media files") · newest first").font(.system(size:10,relativeTo:.body)).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading)
                 if displayed.isEmpty { Spacer();VStack(spacing:10){Image(systemName:selectedTab=="documents" ? "doc" : "photo.on.rectangle.angled").font(.system(size:32)).foregroundStyle(.secondary);Text(selectedTab=="documents" ? "No documents yet" : "No media yet").font(.system(size:16,weight:.semibold));Text("Files shared in this conversation will appear here.").font(.system(size:11)).foregroundStyle(.secondary).multilineTextAlignment(.center)}.padding(24);Spacer() }
                 else { ScrollView { LazyVGrid(columns:columns,spacing:9) { ForEach(displayed,id:\.transferID) { attachment in SereinCompactMediaTile(attachment:attachment,localURL:engine.localFile(for:attachment),isLoading:openingTransferID==attachment.transferID){openMedia(attachment)} } }.padding(.vertical,7) } }
@@ -658,8 +688,7 @@ private struct SereinNativeConversation: View {
     @State private var showKeys = false
     @State private var showFilePicker = false
     @State private var showEmojiPicker = false
-    @State private var pendingTrust: SereinPeerKey?
-    @State private var fileToOpen: OpenAttachment?
+        @State private var fileToOpen: OpenAttachment?
     @Environment(\.colorScheme) private var colorScheme
 
     private var outgoingBubble: Color { colorScheme == .dark ? Color(red: 0.02, green: 0.36, blue: 0.32) : Color(red: 0.84, green: 0.96, blue: 0.87) }
@@ -668,8 +697,8 @@ private struct SereinNativeConversation: View {
         if contact.isDeleted || engine.archived { return "Archived · read only" }
         guard engine.ready else { return "Preparing secure messaging…" }
         let detail = engine.status
-        if detail.hasPrefix("All ") && detail.localizedCaseInsensitiveContains("verified") { return "Encryption ready · verified devices" }
-        if detail.hasPrefix("Verify ") { return "Security setup required" }
+        if detail.hasPrefix("All ") && detail.localizedCaseInsensitiveContains("app-checked") { return "Encryption ready · device keys checked" }
+        if detail.localizedCaseInsensitiveContains("changed") { return "Security change · sending blocked" }
         if detail.localizedCaseInsensitiveContains("not published") { return "Recipient keys unavailable" }
         if detail.hasPrefix("No active") { return "No active recipient devices" }
         return "Review security details"
@@ -726,22 +755,25 @@ private struct SereinNativeConversation: View {
                     }.padding(.vertical, 8)
                 }.onChange(of: engine.messages.count) { _ in if let last = engine.messages.last { proxy.scrollTo(last.id, anchor: .bottom) } }
             }.background(SereinConversationWallpaper())
-            HStack(alignment: .bottom, spacing: 6) {
-                Button { showEmojiPicker.toggle() } label: { Image(systemName: "face.smiling").font(.system(size: 19, relativeTo: .body)).frame(width: 36, height: 40) }
-                    .buttonStyle(.bordered).accessibilityLabel("Choose an emoji").accessibilityHint("Insert an emoji or choose a GIF file").disabled(!engine.ready || contact.isDeleted || engine.archived)
-                Button { showFilePicker = true } label: { Image(systemName: "paperclip").font(.system(size: 18, relativeTo: .body)).frame(width: 36, height: 40) }
-                    .buttonStyle(.bordered).accessibilityLabel("Attach a file, GIF, or image").disabled(!engine.ready || contact.isDeleted || engine.archived)
+            HStack(alignment: .bottom, spacing: 5) {
+                Button { showEmojiPicker.toggle() } label: { Image(systemName: "face.smiling").font(.system(size: 19, weight: .medium, relativeTo: .body)).frame(width: 42, height: 44) }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).background(Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.045), in: RoundedRectangle(cornerRadius: 13, style: .continuous)).accessibilityLabel("Open emoji and GIF picker").disabled(!engine.ready || contact.isDeleted || engine.archived)
+                Button { showFilePicker = true } label: { Image(systemName: "paperclip").font(.system(size: 18, weight: .medium, relativeTo: .body)).frame(width: 42, height: 44) }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).background(Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.045), in: RoundedRectangle(cornerRadius: 13, style: .continuous)).accessibilityLabel("Attach an encrypted file").disabled(!engine.ready || contact.isDeleted || engine.archived)
                 SereinEmojiComposer(text: $draft, isEnabled: engine.ready && !contact.isDeleted && !engine.archived, onPastedFile: sendPastedImage)
-                    .frame(height: 40)
-                Button { let value = draft; draft = ""; Task { await engine.sendText(value) } } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 28, relativeTo: .body)) }
-                    .disabled(!engine.ready || contact.isDeleted || engine.archived || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .frame(minHeight: 44, maxHeight: 112)
+                Button { let value = draft; draft = ""; Task { await engine.sendText(value) } } label: { Image(systemName: "arrow.up").font(.system(size: 18, weight: .bold, relativeTo: .body)).frame(width: 44, height: 44).foregroundStyle(.white).background(SereinPalette.green, in: RoundedRectangle(cornerRadius: 15, style: .continuous)) }
+                    .buttonStyle(.plain).accessibilityLabel("Send encrypted message").disabled(!engine.ready || contact.isDeleted || engine.archived || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
+            .padding(6)
+            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 19, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 19, style: .continuous).stroke(Color.primary.opacity(colorScheme == .dark ? 0.17 : 0.09), lineWidth: 1))
         }
-        .padding()
+        .padding(.horizontal, 10).padding(.vertical, 8)
         .overlay(alignment: .bottom) {
             if showEmojiPicker {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack { Text("Emojis").font(.system(size: 12, weight: .semibold, relativeTo: .body)); Spacer(); Button("Browse GIFs") { showGIFPicker = true }.font(.system(size: 11, weight: .semibold, relativeTo: .body)); Button("Attach file") { showFilePicker = true }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
+                    HStack { Text("Emojis").font(.system(size: 12, weight: .semibold, relativeTo: .body)); Spacer(); Button("Browse GIFs") { showGIFPicker = true }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 8), spacing: 5) {
                         ForEach(Self.commonEmojis, id: \.self) { emoji in
                             Button { insertEmoji(emoji) } label: { Text(emoji).font(.system(size: 23)).frame(maxWidth: .infinity).frame(height: 34).contentShape(Rectangle()) }
@@ -756,11 +788,10 @@ private struct SereinNativeConversation: View {
         .navigationTitle(engine.peerDisplayName).navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                Button { showProfile = true } label: { Image(systemName: "info.circle") }.accessibilityLabel("Contact profile and shared media")
-                if !contact.isDeleted && !engine.archived { Button { Task { do { try await engine.refreshPeerKeys() } catch { } } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Refresh security details") }
+                Button { showProfile = true } label: { Image(systemName: "info.circle") }.buttonStyle(SereinIconButtonStyle()).accessibilityLabel("Contact profile and shared media")
             }
         }
-        .sheet(isPresented: $showProfile) { SereinContactProfile(api: api, engine: engine, contact: contact, messages: engine.messages) }
+        .fullScreenCover(isPresented: $showProfile) { SereinContactProfile(api: api, engine: engine, contact: contact, messages: engine.messages) }
         .sheet(isPresented: $showGIFPicker) { SereinNativeGIFPicker { url in Task { defer { try? FileManager.default.removeItem(at: url) }; await engine.sendFile(url: url, filename: url.lastPathComponent, contentType: "image/gif") } } }
         .task {
             if !engine.ready { await engine.initialize() }
@@ -775,31 +806,25 @@ private struct SereinNativeConversation: View {
         .sheet(isPresented: $showKeys) {
             NavigationView {
                 List {
-                    Section { Text("Compare every full fingerprint with your contact through a separate trusted channel. A changed fingerprint is not trusted automatically.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
-                    Section("Contact devices") {
+                    Section { Text("The app checks both ECDH key layers against their combined fingerprint and pins first-seen keys on this device. A previously pinned key change or capability downgrade is blocked; supported capability upgrades with the same key are adopted. First-use pinning detects later changes but cannot independently authenticate a first-seen key if the directory is compromised.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
+                    Section("Signed-in recipient devices") {
                         if engine.peerKeys.isEmpty { Text(engine.status).font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
                         ForEach(engine.peerKeys) { peer in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(peer.name).font(.system(size: 12, weight: .semibold, relativeTo: .body))
-                                Text("Message capability: \(peer.ratchetVersion >= 3 ? "experimental ratchet v3" : "two-layer static v2")").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                            DisclosureGroup {
+                                Text("Both public-key layers checked · \(peer.ratchetVersion >= 3 ? "ratchet v3 capability" : "static v2 capability")").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
                                 Text(peer.fingerprint.groupedFingerprint).font(.system(size: 10, design: .monospaced, relativeTo: .body)).textSelection(.enabled)
-                                Text(peer.trusted ? "Verified on this iPhone" : (peer.previousFingerprint.isEmpty ? "Not verified" : (peer.previousFingerprint != peer.fingerprint ? "Key changed · verify again" : "Capability changed · verify again")))
-                                    .font(.system(size: 10, relativeTo: .body)).foregroundStyle(peer.trusted ? SereinPalette.green : .orange)
-                                if !peer.trusted { Button("I compared this fingerprint and capability") { pendingTrust = peer }.font(.system(size: 11, weight: .semibold, relativeTo: .body)) }
-                            }.padding(.vertical, 4)
+                                if !peer.previousFingerprint.isEmpty && peer.previousFingerprint != peer.fingerprint { Text("Previously pinned: \(peer.previousFingerprint.groupedFingerprint)").font(.system(size: 10, design: .monospaced, relativeTo: .body)).foregroundStyle(.orange).textSelection(.enabled) }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    VStack(alignment: .leading, spacing: 4) { Text(peer.name).font(.system(size: 12, weight: .semibold, relativeTo: .body)); Text(peer.trusted ? (peer.previousFingerprint.isEmpty ? "App checked · first-use key pinned" : "App checked · pinned key matches") : "Key changed or capability downgraded · sending blocked").font(.system(size: 10, relativeTo: .body)).foregroundStyle(peer.trusted ? SereinPalette.green : .orange) }
+                                    Spacer(minLength: 4)
+                                }
+                            }
                         }
                     }
-                }.listStyle(.insetGrouped).navigationTitle("E2EE device keys")
+                }.listStyle(.insetGrouped).navigationTitle("Encryption status")
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showKeys = false } } }
             }
-        }
-        .alert(item: $pendingTrust) { peer in
-            let changed = !peer.previousFingerprint.isEmpty && peer.previousFingerprint != peer.fingerprint
-            let capabilityChanged = peer.previousRatchetVersion != peer.ratchetVersion
-            return Alert(title: Text(changed ? "Device key changed" : (capabilityChanged ? "Message capability changed" : "Trust this device?")),
-                         message: Text("Verify the complete fingerprint and reported capability with \(contact.display_name) through a separate trusted channel before continuing.\n\nCapability: \(peer.ratchetVersion >= 3 ? "experimental ratchet v3" : "two-layer static v2")\n\n\(peer.fingerprint.groupedFingerprint)" + (changed ? "\n\nPreviously trusted: \(peer.previousFingerprint.groupedFingerprint)" : "") + (capabilityChanged ? "\n\nRatchet capability changed from v\(peer.previousRatchetVersion) to v\(peer.ratchetVersion)." : "")),
-                         primaryButton: .default(Text("Trust after comparison")) { do { try engine.trust(peer) } catch { } },
-                         secondaryButton: .cancel())
         }
         .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
             guard case .success(let urls) = result, let url = urls.first else { return }
@@ -858,12 +883,11 @@ private struct SereinEmojiComposer: UIViewRepresentable {
         view.textContainerInset = UIEdgeInsets(top: 8, left: 7, bottom: 8, right: 7)
         view.textContainer.lineFragmentPadding = 0
         view.layer.cornerRadius = 8
-        view.layer.borderWidth = 0.7
-        view.layer.borderColor = UIColor.separator.cgColor
-        view.backgroundColor = .secondarySystemBackground
+        view.layer.borderWidth = 0
+        view.backgroundColor = .clear
         view.isScrollEnabled = true
         view.accessibilityLabel = "Message, including emoji"
-        view.accessibilityHint = "Emoji keyboard input is sent as text. Pasted GIFs and images are sent as encrypted attachments."
+        view.accessibilityHint = "Emoji input is sent as text. Pasted GIFs and images use encrypted attachments."
         return view
     }
     func updateUIView(_ view: SereinGIFTextView, context: Context) {
@@ -1040,11 +1064,12 @@ private struct SereinNativeSettings: View {
                     Toggle("Notification sound", isOn: $notificationSound).disabled(!api.notifications || !notificationsAuthorized)
                 }
                 Section("Privacy") { Picker("Online status", selection: $api.presenceVisibility) { Text("Contacts only").tag("contacts"); Text("Nobody").tag("nobody") }; Toggle("Allow contact requests", isOn: $api.allowContactRequests); Toggle("Find me by verified email", isOn: $api.discoverableByEmail); ForEach(api.blocks) { blocked in HStack { Text("@\(blocked.username)"); Spacer(); Button("Unblock") { Task { await api.unblock(blocked) } } } } }
-                Section("Registered devices") {
-                    ForEach(api.devices) { device in HStack { VStack(alignment: .leading, spacing: 3) { Text(device.name).font(.system(size: 12, weight: .semibold, relativeTo: .body)); Text(device.online == true ? "Online" : (device.last_seen_at ?? "Last active unavailable")).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Spacer(); if device.current == true { Text("THIS DEVICE").font(.system(size: 10, weight: .bold, relativeTo: .body)).foregroundStyle(SereinPalette.green) } else { Button("Revoke", role: .destructive) { Task { await api.revoke(device) } }.font(.system(size: 10, relativeTo: .body)) } } }
+                Section("Signed-in devices") {
+                    Text("Only devices with a live sign-in are listed. Signing out revokes that device session and removes its public-key registration from recipient lists.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary)
+                    ForEach(api.devices) { device in HStack { VStack(alignment: .leading, spacing: 3) { Text(device.name).font(.system(size: 12, weight: .semibold, relativeTo: .body)); Text(device.online == true ? "Online" : (device.last_seen_at ?? "Signed in · last active unavailable")).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Spacer(); if device.current == true { Text("THIS DEVICE").font(.system(size: 10, weight: .bold, relativeTo: .body)).foregroundStyle(SereinPalette.green) } else { Button("Revoke", role: .destructive) { Task { await api.revoke(device) } }.font(.system(size: 10, relativeTo: .body)) } } }
                     Button("Revoke other devices", role: .destructive) { confirmRevokeOthers = true }
                 }
-                Section("Security status") { Text("Web and native chat use separate Layer 1/Layer 2 per-device P-256 ECDH key pairs, HKDF-SHA256, and nested AES-GCM after combined local fingerprint verification. Native private keys use Secure Enclave when available and otherwise Keychain-protected CryptoKit keys; local history uses a device-only Keychain key. Capability-3 messages use an experimental symmetric ratchet with static P-256 bootstrap; there are no DH ratchet turns or forward secrecy. This implementation has not been independently reviewed and does not provide automatic key rotation/recovery or background message delivery. Use test data only.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery is not configured.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
+                Section("Security status") { Text("Web and native chat use separate Layer 1/Layer 2 per-device P-256 ECDH key pairs, HKDF-SHA256, and nested AES-GCM. Each app checks the combined fingerprint and pins first-seen keys locally; later key changes and capability downgrades are blocked; same-key capability upgrades are adopted. First-use pinning is not independent identity proof if the key directory is compromised. Native private keys use Secure Enclave when available and otherwise Keychain-protected CryptoKit keys. Capability-3 messages use an experimental symmetric ratchet with static P-256 bootstrap; there are no DH ratchet turns or forward secrecy. This implementation has not been independently reviewed. Use test data only.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Text("Email verification requires a configured server provider. Account recovery is not configured.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
                 Section("Danger zone") { Text("Account deletion removes server records, sessions, device keys, and this iPhone’s account-scoped local history. Contacts retain a read-only archived chat. Legacy downloads in shared Serein/Downloads cannot yet be attributed to this account and may remain; newer downloads are account-scoped.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary); Button("Permanently delete account", role: .destructive) { showDeleteAccount = true }.sheet(isPresented: $showDeleteAccount) { SereinDeleteAccountSheet(api: api) } }
                 Section { Button("Sign out", role: .destructive) { Task { _ = await api.signOut() } } }
             }.listStyle(.insetGrouped).navigationTitle("Settings")
@@ -1201,7 +1226,7 @@ private struct SereinConnectionSettings: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
             .confirmationDialog("Switch servers? You will be signed out of the current server.", isPresented: $showSwitchConfirmation, titleVisibility: .visible) {
-                Button("Sign out and switch", role: .destructive) { Task { let revoked = await api.signOut(); guard revoked else { localMessage = "Could not confirm sign-out from the current server. The local session was cleared; the connection was not changed."; return }; do { try api.setServerOrigin(pendingOrigin); dismiss() } catch { localMessage = error.localizedDescription } } }
+                Button("Sign out and switch", role: .destructive) { Task { let revoked = await api.signOut(); guard revoked else { localMessage = "Could not confirm sign-out from the current server. The device remains signed in because server revocation could not be confirmed; the connection was not changed."; return }; do { try api.setServerOrigin(pendingOrigin); dismiss() } catch { localMessage = error.localizedDescription } } }
                 Button("Cancel", role: .cancel) { }
             }
             .onAppear { serverOrigin = api.apiBase }

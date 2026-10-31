@@ -80,6 +80,10 @@ final class SereinApi {
     void resendVerification(String identity, Callback cb) {
         request("POST", "/api/v1/auth/resend-verification", json("identity", identity), cb);
     }
+    boolean hasSavedSession() {
+        try { URL origin = new URL(baseUrl); String token = sessionVault.load(origin(origin)); return token != null && !token.isEmpty(); }
+        catch (Exception ignored) { return false; }
+    }
     void me(Callback cb) { request("GET", "/api/v1/me", null, cb); }
     void contacts(Callback cb) { request("GET", "/api/v1/contacts", null, cb); }
     void devices(Callback cb) { request("GET", "/api/v1/devices", null, cb); }
@@ -191,7 +195,7 @@ final class SereinApi {
     void revokeDevice(String id, Callback cb) { request("DELETE", "/api/v1/devices/" + id, null, cb); }
     void revokeOthers(Callback cb) { request("POST", "/api/v1/devices/revoke-others", new JSONObject(), cb); }
     void deleteAccount(String password, Callback cb) { request("DELETE", "/api/v1/me", json("password", password), (result,error)->{if(error==null)sessionVault.clear();cb.complete(result,error);}); }
-    void logout(Callback cb) { request("POST", "/api/v1/auth/logout", new JSONObject(), (result,error)->{sessionVault.clear();cb.complete(result,error);}); }
+    void logout(Callback cb) { request("POST", "/api/v1/auth/logout", new JSONObject(), (result,error)->{if(error==null)sessionVault.clear();cb.complete(result,error);}); }
 
     private static JSONObject json(String... pairs) {
         JSONObject value = new JSONObject();

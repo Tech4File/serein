@@ -122,7 +122,7 @@ final class SereinChatEngine: ObservableObject {
         if activeDevices.isEmpty { return "No active recipient devices are available." }
         if peerKeys.count < activeDevices.count { return "\(activeDevices.count - peerKeys.count) active device(s) have not published a key." }
         let trusted = peerKeys.filter(\.trusted).count
-        return trusted == activeDevices.count ? "All \(trusted) recipient-device fingerprints are verified on this iPhone." : "Verify \(activeDevices.count - trusted) device fingerprint(s) before sending."
+        return trusted == activeDevices.count ? "All \(trusted) recipient-device key bundles are app-checked and locally pinned." : "\(activeDevices.count - trusted) recipient-device key changes or capability downgrades are blocked."
     }
 
     func refreshPeerKeys() async throws {
@@ -158,26 +158,22 @@ final class SereinChatEngine: ObservableObject {
             let layer2Key = try layer2Crypto.layer2ConversationKey(localUserID: user.id, localDeviceID: device.id, peerUserID: contact.user_id, peerDeviceID: target.id, peerJWK: layer2JWK)
             let ratchetVersion = entry["ratchet_version"] as? Int ?? 2
             guard ratchetVersion == 2 || ratchetVersion == 3 else { throw ChatError.keyDirectoryMismatch }
-            let old = local?.previousFingerprint(userID: contact.user_id, deviceID: target.id) ?? ""
-            let oldVersion = local?.previousRatchetVersion(userID: contact.user_id, deviceID: target.id) ?? 2
-            next.append(SereinPeerKey(id: target.id, name: target.name, fingerprint: fingerprint, previousFingerprint: old,
+            var old = local?.previousFingerprint(userID: contact.user_id, deviceID: target.id) ?? ""
+            var oldVersion = local?.previousRatchetVersion(userID: contact.user_id, deviceID: target.id) ?? 2
+            let firstSeen = old.isEmpty
+            if firstSeen { try local?.trust(userID: contact.user_id, deviceID: target.id, fingerprint: fingerprint, ratchetVersion: ratchetVersion); old = fingerprint; oldVersion = ratchetVersion }
+            let sameFingerprint = old == fingerprint
+            let capabilityAccepted = (2...3).contains(oldVersion) && ratchetVersion >= oldVersion
+            if sameFingerprint && capabilityAccepted && ratchetVersion > oldVersion {
+                try local?.trust(userID: contact.user_id, deviceID: target.id, fingerprint: fingerprint, ratchetVersion: ratchetVersion)
+                oldVersion = ratchetVersion
+            }
+            next.append(SereinPeerKey(id: target.id, name: target.name, fingerprint: fingerprint, previousFingerprint: firstSeen ? "" : old,
                 ratchetVersion: ratchetVersion, previousRatchetVersion: oldVersion, publicJWK: jwk, layer2PublicJWK: layer2JWK,
-                trusted: old == fingerprint && oldVersion == ratchetVersion, key: key, layer2Key: layer2Key))
+                trusted: sameFingerprint && capabilityAccepted, key: key, layer2Key: layer2Key))
         }
         activeDevices = latestDevices
         peerKeys = next
-        status = peerStatus
-    }
-
-    func trust(_ peer: SereinPeerKey) throws {
-        guard peerKeys.contains(where: { $0.id == peer.id && $0.fingerprint == peer.fingerprint }),
-              let local else { throw ChatError.deviceListChanged }
-        try local.trust(userID: contact.user_id, deviceID: peer.id, fingerprint: peer.fingerprint, ratchetVersion: peer.ratchetVersion)
-        peerKeys = peerKeys.map { value in
-            SereinPeerKey(id: value.id, name: value.name, fingerprint: value.fingerprint, previousFingerprint: value.fingerprint,
-                ratchetVersion: value.ratchetVersion, previousRatchetVersion: value.ratchetVersion, publicJWK: value.publicJWK,
-                layer2PublicJWK: value.layer2PublicJWK, trusted: value.id == peer.id || value.trusted, key: value.key, layer2Key: value.layer2Key)
-        }
         status = peerStatus
     }
 
@@ -352,7 +348,7 @@ final class SereinChatEngine: ObservableObject {
                     guard activeDevices.contains(where: { $0.id == senderDeviceID }) else { cursorTime = created; cursorID = id; continue }
                     if local.contains(messageID: id) { try await api.acknowledgeMessage(id); cursorTime = created; cursorID = id; continue }
                     guard let peer = peerKeys.first(where: { $0.id == senderDeviceID }), peer.trusted else {
-                        status = "A message is held. Verify the sender-device fingerprint before decrypting it."; stopped = true; break
+                        status = "A message is held because the sender-device key changed or is not locally pinned."; stopped = true; break
                     }
                     do {
                         try decryptAndStoreIncoming(peer: peer, packet: packet, messageID: id, senderDeviceID: senderDeviceID, createdAt: created, user: user, device: device)
@@ -585,9 +581,9 @@ final class SereinChatEngine: ObservableObject {
             case .deviceUnavailable: return "Protected device setup is not ready."
             case .contactUnavailable: return "This account is no longer an accepted contact."
             case .keyDirectoryMismatch: return "The authenticated device-key directory did not match this contact."
-            case .deviceListChanged: return "The contact device list changed. Refresh Contacts and verify the current fingerprints."
+            case .deviceListChanged: return "The signed-in contact-device list changed. Refresh Contacts and reopen this chat."
             case .noRecipientDevices: return "No active recipient devices are available."
-            case .fingerprintRequired: return "Compare and verify each current device fingerprint through a separate trusted channel."
+            case .fingerprintRequired: return "A recipient-device key changed or is not locally pinned; sending is blocked."
             case .fileUnavailable: return "The selected file is unavailable."
             case .fileTooLarge: return "This file exceeds the encrypted-transfer size limit."
             case .fileChanged: return "The selected file changed while it was being encrypted."

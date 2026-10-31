@@ -1,15 +1,23 @@
 package io.serein.chat;
 
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.graphics.Typeface;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.content.res.ColorStateList;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.EditText;
+import android.widget.ImageButton;
 
 /** Small first-party native UI kit. No design-system dependency. */
 final class SereinUi {
@@ -45,6 +53,11 @@ final class SereinUi {
         return d;
     }
     static int dp(Context c, float v) { return (int)(v * c.getResources().getDisplayMetrics().density + 0.5f); }
+    static void showStyledDialog(AlertDialog dialog,boolean destructive) {
+        dialog.show();Context c=dialog.getContext();if(dialog.getWindow()!=null)dialog.getWindow().setBackgroundDrawable(shape(c,surface(c),SereinTokens.DIALOG_RADIUS_DP));
+        Button positive=dialog.getButton(AlertDialog.BUTTON_POSITIVE);if(positive!=null){positive.setAllCaps(false);positive.setTypeface(Typeface.DEFAULT,Typeface.BOLD);positive.setTextColor(destructive?(isDark(c)?0xFFFF9A9A:0xFFA84347):accent(c));}
+        Button negative=dialog.getButton(AlertDialog.BUTTON_NEGATIVE);if(negative!=null){negative.setAllCaps(false);negative.setTypeface(Typeface.DEFAULT,Typeface.BOLD);negative.setTextColor(muted(c));}
+    }
     static float fontSize(Context c, float size) { String scale=c.getSharedPreferences("serein",0).getString("font_scale","system"); float factor=SereinTokens.FONT_SCALE_LARGE; if("extra_large".equals(scale))factor=SereinTokens.FONT_SCALE_EXTRA_LARGE;else if(!"large".equals(scale))factor=1f; return Math.max(SereinTokens.MIN_FONT_SIZE_SP,size*factor); }
     static GradientDrawable shape(Context c, int color, int radius) {
         GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(c, radius)); return d;
@@ -58,7 +71,32 @@ final class SereinUi {
     static Button button(Context c, String value, boolean primary) {
         Button b = new Button(c); b.setText(value); b.setAllCaps(false); b.setTextSize(fontSize(c,12)); b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         b.setTextColor(primary ? (isDark(c) ? 0xFF0B201A : WHITE) : text(c));
-        b.setBackground(shape(c, primary ? accent(c) : surface(c), 12)); b.setPadding(dp(c,16),dp(c,8),dp(c,16),dp(c,8)); return b;
+        b.setBackground(shape(c, primary ? accent(c) : surface(c), SereinTokens.BUTTON_RADIUS_DP));
+        b.setMinHeight(dp(c,SereinTokens.BUTTON_HEIGHT_DP)); b.setPadding(dp(c,16),dp(c,8),dp(c,16),dp(c,8)); return b;
+    }
+    static Button iconButton(Context c,String value,String description) {
+        Button b=new Button(c);b.setText(value);b.setAllCaps(false);b.setTextSize(fontSize(c,18));b.setTypeface(Typeface.DEFAULT,Typeface.BOLD);b.setGravity(Gravity.CENTER);b.setContentDescription(description);
+        GradientDrawable background=shape(c,isDark(c)?SereinTokens.ACCENT_SOFT_DARK:SereinTokens.ACCENT_SOFT_LIGHT,SereinTokens.BUTTON_RADIUS_DP);background.setStroke(dp(c,1),isDark(c)?SereinTokens.BORDER_DARK:SereinTokens.BORDER_LIGHT);b.setBackground(background);
+        b.setTextColor(accent(c));b.setMinWidth(dp(c,SereinTokens.ICON_BUTTON_SIZE_DP));b.setMinHeight(dp(c,SereinTokens.ICON_BUTTON_SIZE_DP));b.setPadding(0,0,0,0);return b;
+    }
+    static ImageButton composerIconButton(Context c,int icon, String description, boolean primary) {
+        ImageButton button=new ImageButton(c);button.setContentDescription(description);button.setFocusable(true);button.setScaleType(android.widget.ImageView.ScaleType.CENTER);button.setPadding(0,0,0,0);
+        int fill=primary?accent(c):(isDark(c)?SereinTokens.ACCENT_SOFT_DARK:SereinTokens.ACCENT_SOFT_LIGHT);
+        GradientDrawable base=shape(c,fill,14);if(!primary)base.setStroke(dp(c,1),isDark(c)?SereinTokens.BORDER_DARK:SereinTokens.BORDER_LIGHT);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(primary?0x33FFFFFF:(isDark(c)?0x337BCBB1:0x33187C68)),base,null));
+        button.setImageResource(icon);button.setImageTintList(ColorStateList.valueOf(primary?WHITE:accent(c)));button.setMinimumWidth(dp(c,SereinTokens.ICON_BUTTON_SIZE_DP));button.setMinimumHeight(dp(c,SereinTokens.ICON_BUTTON_SIZE_DP));return button;
+    }
+    static Button chip(Context c,String value,boolean selected) {
+        Button b=new Button(c);b.setText(value);b.setAllCaps(false);b.setTextSize(fontSize(c,11));b.setTypeface(Typeface.DEFAULT,Typeface.BOLD);
+        b.setTextColor(selected?accent(c):muted(c));b.setMinHeight(dp(c,SereinTokens.CHIP_HEIGHT_DP));b.setPadding(dp(c,14),0,dp(c,14),0);
+        GradientDrawable background=shape(c,selected?(isDark(c)?SereinTokens.ACCENT_SOFT_DARK:SereinTokens.ACCENT_SOFT_LIGHT):surface(c),SereinTokens.CHIP_HEIGHT_DP/2);
+        background.setStroke(dp(c,1),selected?accent(c):(isDark(c)?SereinTokens.BORDER_DARK:SereinTokens.BORDER_LIGHT));b.setBackground(background);return b;
+    }
+    static View lockIconButton(Context c,String label) { return new LockIconButton(c,label); }
+    private static final class LockIconButton extends View {
+        private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
+        LockIconButton(Context c,String label){super(c);setContentDescription(label);setFocusable(true);setClickable(true);GradientDrawable background=shape(c,isDark(c)?SereinTokens.ACCENT_SOFT_DARK:SereinTokens.ACCENT_SOFT_LIGHT,SereinTokens.BUTTON_RADIUS_DP);background.setStroke(dp(c,1),isDark(c)?SereinTokens.BORDER_DARK:SereinTokens.BORDER_LIGHT);setBackground(new RippleDrawable(ColorStateList.valueOf(isDark(c)?0x337BCBB1:0x33187C68),background,null));setMinimumWidth(dp(c,SereinTokens.ICON_BUTTON_SIZE_DP));setMinimumHeight(dp(c,SereinTokens.ICON_BUTTON_SIZE_DP));}
+        @Override protected void onDraw(Canvas canvas){super.onDraw(canvas);float unit=dp(getContext(),1),cx=getWidth()/2f,cy=getHeight()/2f;paint.setColor(accent(getContext()));paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(2.2f*unit);paint.setStrokeCap(Paint.Cap.ROUND);paint.setStrokeJoin(Paint.Join.ROUND);RectF body=new RectF(cx-7*unit,cy-1*unit,cx+7*unit,cy+9*unit);canvas.drawRoundRect(body,2*unit,2*unit,paint);Path shackle=new Path();shackle.moveTo(cx-4*unit,cy-1*unit);shackle.lineTo(cx-4*unit,cy-4*unit);shackle.quadTo(cx,cy-10*unit,cx+4*unit,cy-4*unit);shackle.lineTo(cx+4*unit,cy-1*unit);canvas.drawPath(shackle,paint);paint.setStyle(Paint.Style.FILL);canvas.drawCircle(cx,cy+3*unit,1.25f*unit,paint);paint.setStrokeWidth(1.5f*unit);canvas.drawLine(cx,cy+4*unit,cx,cy+6*unit,paint);}
     }
     static EditText field(Context c, String hint, boolean password) {
         EditText e = new EditText(c); e.setSingleLine(true); e.setTextSize(fontSize(c,12)); e.setHint(hint); e.setHintTextColor(muted(c)); e.setTextColor(text(c)); e.setPadding(dp(c,12),0,dp(c,12),0); e.setBackground(shape(c,surface(c),10));

@@ -11,7 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.UUID;
 
-/** App-private, Keystore-sealed message history and explicit per-device fingerprint trust. */
+/** App-private, Keystore-sealed message history and per-device first-use key pins. */
 final class SereinLocalStore {
     private final Context context;
     private final String accountId;

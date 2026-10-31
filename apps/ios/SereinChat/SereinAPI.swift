@@ -204,6 +204,7 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
             user = reply.account.user; currentDevice = reply.account.device
             defaults.set(reply.account.device.id, forKey: "serein.device-id")
             cancelVerification()
+            await ensureDeviceKeyEnrollment()
             await refreshAccountData()
         } catch { errorMessage = error.localizedDescription }
     }
@@ -226,6 +227,22 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
     private var deviceID: String { defaults.string(forKey: "serein.device-id") ?? UUID().uuidString.lowercased() }
     var backupDeviceID: String { deviceID }
 
+    private func ensureDeviceKeyEnrollment() async {
+        guard let user, let device = currentDevice else { return }
+        do {
+            let layer1 = try SereinDeviceCrypto.loadOrCreate(userID: user.id, deviceID: device.id)
+            let layer2 = try SereinDeviceCrypto.loadOrCreateLayer2(userID: user.id, deviceID: device.id)
+            let publicKey = layer1.publicJWK(), layer2PublicKey = layer2.publicJWK()
+            let fingerprint = try SereinDeviceCrypto.fingerprintBundle(layer1: publicKey, layer2: layer2PublicKey)
+            let capability = SereinCoreBridge.version == "unavailable" ? 2 : 3
+            let response = try await registerDeviceKey(publicKey, layer2PublicJWK: layer2PublicKey, ratchetVersion: capability)
+            guard response["fingerprint"] as? String == fingerprint else { throw SereinDeviceCrypto.CryptoError.invalidPublicKey }
+            statusMessage = nil
+        } catch {
+            statusMessage = "This device's encryption keys are not registered yet: \(error.localizedDescription)"
+        }
+    }
+
     private func authenticate(path: String, values: [String: Any]) async {
         busy = true; errorMessage = nil; statusMessage = nil
         defer { busy = false }
@@ -235,6 +252,7 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
             user = reply.account.user; currentDevice = reply.account.device
             defaults.set(reply.account.device.id, forKey: "serein.device-id")
             if path == "/api/v1/auth/login" { pendingLoginIdentity = ""; pendingLoginPassword = "" }
+            await ensureDeviceKeyEnrollment()
             await refreshAccountData()
         } catch {
             let ns = error as NSError
@@ -249,11 +267,14 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
     }
     func restoreSession() async {
         defer { startupReady = true }
+        guard let root = URL(string: apiBase),
+              HTTPCookieStorage.shared.cookies(for: root)?.contains(where: { $0.name == "serein_session" }) == true else { return }
         do {
             let data = try await request("/api/v1/me")
             let reply = try JSONDecoder().decode(SereinAccountReply.self, from: data)
             user = reply.user; currentDevice = reply.device
             defaults.set(reply.device.id, forKey: "serein.device-id")
+            await ensureDeviceKeyEnrollment()
             await refreshAccountData()
         } catch { /* No stored API session: show sign-in. */ }
     }
@@ -472,15 +493,14 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         catch { errorMessage = error.localizedDescription }
     }
     func signOut() async -> Bool {
-        var serverRevoked = false
-        do { _ = try await request("/api/v1/auth/logout", method: "POST", values: [:]); serverRevoked = true }
-        catch { errorMessage = error.localizedDescription }
+        do { _ = try await request("/api/v1/auth/logout", method: "POST", values: [:]) }
+        catch { errorMessage = error.localizedDescription; return false }
         if let root = URL(string: apiBase), let cookies = HTTPCookieStorage.shared.cookies(for: root) {
             cookies.filter { $0.name == "serein_session" }.forEach { HTTPCookieStorage.shared.deleteCookie($0) }
         }
         user = nil; currentDevice = nil; contacts = []; contactRequests = []; blocks = []; devices = []
         cancelVerification()
-        return serverRevoked
+        return true
     }
     private func request(_ path: String, method: String = "GET", values: [String: Any]? = nil) async throws -> Data {
         let base = apiBase.trimmingCharacters(in: CharacterSet(charactersIn: "/"))

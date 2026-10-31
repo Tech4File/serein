@@ -16,6 +16,10 @@ def css():
     lines=["/* Generated from design/tokens.json. Do not edit by hand. */",block(':root','light'),block(':root[data-theme="light"]','light'),block(':root[data-theme="dark"]','dark'),'@media(prefers-color-scheme:dark){'+block(':root[data-theme="system"]','dark')+'}']
     for key,value in DATA['spacing'].items(): lines[1]=lines[1][:-1]+f'--space-{key}:{value}px;'+'}'
     for key,value in DATA['radius'].items(): lines[1]=lines[1][:-1]+f'--radius-{key}:{value}px;'+'}'
+    for key,value in DATA.get('components',{}).items():
+        unit='ms' if key.endswith('_ms') else 'px'
+        name=key.removesuffix('_dp').removesuffix('_ms').replace('_','-')
+        lines[1]=lines[1][:-1]+f'--component-{name}:{value}{unit};'+'}'
     typography=DATA['typography']
     for key,value in typography['scale'].items(): lines[1]=lines[1][:-1]+f'--type-scale-{key.replace("_", "-")}:{value};'+'}'
     lines[1]=lines[1][:-1]+f'--type-size-floor:{typography["minimum_web_rem"]}rem;'+'}'
@@ -31,6 +35,9 @@ def java():
     lines.append(f'    static final float FONT_SCALE_LARGE = {typography["scale"]["large"]}f;')
     lines.append(f'    static final float FONT_SCALE_EXTRA_LARGE = {typography["scale"]["extra_large"]}f;')
     lines.append(f'    static final float MIN_FONT_SIZE_SP = {typography["minimum_android_sp"]}f;')
+    for key,value in DATA.get('components',{}).items():
+        name=key.upper().replace('_DP','_DP').replace('_MS','_MS')
+        lines.append(f'    static final int {name} = {value};')
     lines.append('}')
     return '\n'.join(lines)+'\n'
 
@@ -45,6 +52,13 @@ def swift():
     typography=DATA['typography']
     lines.append(f'    static let fontScaleLargeMinimum: DynamicTypeSize = .{typography["ios_dynamic_type_minimum"]["large"]}')
     lines.append(f'    static let fontScaleExtraLargeMinimum: DynamicTypeSize = .{typography["ios_dynamic_type_minimum"]["extra_large"]}')
+    for key,value in DATA.get('components',{}).items():
+        parts=key.removesuffix('_dp').removesuffix('_ms').split('_')
+        name=parts[0]+''.join(part.title() for part in parts[1:])
+        if key.endswith('_ms'):
+            lines.append(f'    static let {name}Ms: Double = {value}.0')
+        else:
+            lines.append(f'    static let {name}: CGFloat = {value}.0')
     lines.append('}')
     return '\n'.join(lines)+'\n'
 

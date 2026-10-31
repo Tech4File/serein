@@ -24,16 +24,32 @@ struct SereinCard<Content: View>: View {
     init(@ViewBuilder content: () -> Content) { self.content = content() }
     var body: some View {
         content.padding(16).frame(maxWidth: .infinity, alignment: .leading)
-            .background(.background, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(.primary.opacity(0.07), lineWidth: 1))
+            .background(.background, in: RoundedRectangle(cornerRadius: SereinTokens.dialogRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: SereinTokens.dialogRadius, style: .continuous).stroke(.primary.opacity(0.07), lineWidth: 1))
+    }
+}
+
+struct SereinChip: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Text(title).font(.system(.subheadline, design: .rounded).weight(.semibold))
+                .frame(minHeight: SereinTokens.chipHeight)
+                .padding(.horizontal, 13)
+                .foregroundStyle(selected ? SereinPalette.green : Color.primary.opacity(0.76))
+                .background(selected ? SereinPalette.green.opacity(0.13) : Color(uiColor: .secondarySystemBackground), in: Capsule())
+                .overlay(Capsule().stroke(selected ? SereinPalette.green.opacity(0.42) : Color.primary.opacity(0.08), lineWidth: 1))
+        }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
 struct SereinPrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.system(size: 14, weight: .semibold, relativeTo: .body))
-            .foregroundStyle(Color.white).frame(maxWidth: .infinity).padding(.vertical, 14)
-            .background(SereinPalette.green.opacity(configuration.isPressed ? 0.82 : 1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .foregroundStyle(Color.white).frame(maxWidth: .infinity, minHeight: SereinTokens.buttonHeight)
+            .background(SereinPalette.green.opacity(configuration.isPressed ? 0.82 : 1), in: RoundedRectangle(cornerRadius: SereinTokens.buttonRadius, style: .continuous))
             .scaleEffect(configuration.isPressed ? 0.99 : 1)
     }
 }
@@ -41,8 +57,25 @@ struct SereinPrimaryButtonStyle: ButtonStyle {
 struct SereinSecondaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.system(size: 13, weight: .semibold, relativeTo: .body)).foregroundStyle(SereinPalette.green)
-            .frame(maxWidth: .infinity).padding(.vertical, 12)
-            .background(SereinPalette.green.opacity(configuration.isPressed ? 0.12 : 0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .frame(maxWidth: .infinity, minHeight: SereinTokens.buttonHeight)
+            .background(SereinPalette.green.opacity(configuration.isPressed ? 0.12 : 0.07), in: RoundedRectangle(cornerRadius: SereinTokens.buttonRadius, style: .continuous))
+    }
+}
+
+struct SereinIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.system(size: 17, weight: .semibold, design: .rounded)).foregroundStyle(SereinPalette.green)
+            .frame(width: SereinTokens.iconButtonSize, height: SereinTokens.iconButtonSize)
+            .background(SereinPalette.green.opacity(configuration.isPressed ? 0.20 : 0.11), in: RoundedRectangle(cornerRadius: SereinTokens.buttonRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: SereinTokens.buttonRadius, style: .continuous).stroke(SereinPalette.green.opacity(0.20), lineWidth: 1))
+    }
+}
+
+struct SereinDestructiveButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.system(size: 13, weight: .semibold, relativeTo: .body)).foregroundStyle(Color.white)
+            .frame(maxWidth: .infinity, minHeight: SereinTokens.buttonHeight)
+            .background(Color(red: 0.68, green: 0.14, blue: 0.16).opacity(configuration.isPressed ? 0.78 : 1), in: RoundedRectangle(cornerRadius: SereinTokens.buttonRadius, style: .continuous))
     }
 }
 

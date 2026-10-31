@@ -1,0 +1,100 @@
+/* Fluid startup and authentication surfaces across phones through wide displays. */
+.session-curtain {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: clamp(12px, 3vw, 52px);
+  padding-top: max(clamp(12px, 3vw, 52px), env(safe-area-inset-top));
+  padding-bottom: max(clamp(12px, 3vw, 52px), env(safe-area-inset-bottom));
+}
+.curtain-card {
+  box-sizing: border-box;
+  width: min(100%, clamp(280px, 38vw, 640px));
+  max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  overflow: auto;
+  gap: clamp(10px, 1.2vw, 20px);
+  padding: clamp(20px, 3vw, 48px);
+  border-radius: clamp(18px, 2vw, 30px);
+}
+.curtain-mark {
+  box-sizing: border-box;
+  width: clamp(44px, min(10vw, 9dvh), 112px);
+  height: clamp(44px, min(10vw, 9dvh), 112px);
+  padding: clamp(7px, 1vw, 15px);
+  border-radius: clamp(12px, 1.5vw, 24px);
+}
+.curtain-card b {
+  font-size: clamp(calc(1.125rem * var(--font-scale, 1)), calc((1rem + .45vw) * var(--font-scale, 1)), calc(1.8rem * var(--font-scale, 1)));
+}
+.curtain-card > span:not(.curtain-spinner) {
+  max-width: min(100%, 42ch);
+  font-size: clamp(calc(.875rem * var(--font-scale, 1)), calc((.8rem + .2vw) * var(--font-scale, 1)), calc(1.2rem * var(--font-scale, 1)));
+}
+.curtain-spinner {
+  width: clamp(20px, 2vw, 30px);
+  height: clamp(20px, 2vw, 30px);
+  flex: 0 0 auto;
+}
+.auth-shell {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 100svh;
+  min-height: 100dvh;
+  grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr);
+  overflow-x: clip;
+}
+.auth-art, .auth-main { min-width: 0; }
+.auth-main {
+  min-height: 100svh;
+  min-height: 100dvh;
+  padding-inline: clamp(18px, 4vw, 72px);
+}
+.auth-card, .auth-top, .auth-legal { width: min(100%, clamp(420px, 34vw, 720px)); }
+.auth-card { padding-block: clamp(22px, 3.4vh, 54px); }
+.auth-art-brand .brand-icon { width: clamp(38px, 3.2vw, 56px); height: clamp(38px, 3.2vw, 56px); }
+.auth-art-content h1 {
+  max-width: 13ch;
+  font-size: clamp(calc(2.3rem * var(--font-scale, 1)), calc((1.8rem + 2vw) * var(--font-scale, 1)), calc(5rem * var(--font-scale, 1)));
+}
+
+@media (min-width: 1200px) {
+  .auth-card h2 {
+    font-size: clamp(calc(2rem * var(--font-scale, 1)), calc((1.6rem + .8vw) * var(--font-scale, 1)), calc(3.2rem * var(--font-scale, 1)));
+  }
+  .auth-subtitle, .auth-card label, .auth-notice b {
+    font-size: clamp(calc(.95rem * var(--font-scale, 1)), calc((.82rem + .18vw) * var(--font-scale, 1)), calc(1.3rem * var(--font-scale, 1)));
+    line-height: 1.5;
+  }
+  .auth-card input, .auth-card select {
+    min-height: clamp(48px, 3.2vw, 64px);
+    font-size: clamp(calc(1rem * var(--font-scale, 1)), calc((.86rem + .18vw) * var(--font-scale, 1)), calc(1.3rem * var(--font-scale, 1)));
+  }
+  .auth-tabs button, .auth-card .btn, .auth-theme select {
+    min-height: clamp(46px, 3vw, 60px);
+    font-size: clamp(calc(.95rem * var(--font-scale, 1)), calc((.82rem + .17vw) * var(--font-scale, 1)), calc(1.25rem * var(--font-scale, 1)));
+  }
+  .auth-notice small, .auth-foot, .auth-legal {
+    font-size: clamp(calc(.78rem * var(--font-scale, 1)), calc((.7rem + .1vw) * var(--font-scale, 1)), calc(1rem * var(--font-scale, 1)));
+    line-height: 1.6;
+  }
+}
+
+@media (max-width: 760px) {
+  .auth-shell { display: block; min-height: 100svh; min-height: 100dvh; }
+  .auth-art { display: none; }
+  .auth-main { min-height: 100svh; min-height: 100dvh; padding-inline: clamp(16px, 5vw, 40px); }
+  .auth-top { justify-content: space-between; gap: 8px; }
+  .mobile-brand { display: flex; }
+  .mobile-brand .brand-icon { width: clamp(28px, 6vw, 40px); height: clamp(28px, 6vw, 40px); }
+  .auth-card { width: min(100%, clamp(320px, 74vw, 560px)); padding-block: clamp(20px, 4vh, 36px); }
+  .auth-legal { flex-wrap: wrap; justify-content: center; gap: 8px 16px; padding-bottom: max(6px, env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 360px) {
+  .auth-main { padding-inline: 14px; }
+  .auth-top { flex-wrap: wrap; height: auto; min-height: 38px; }
+  .auth-theme { gap: 5px; }
+  .auth-theme span { display: none; }
+  .auth-card { width: 100%; }
+  .auth-card input, .auth-card select { max-width: 100%; }
+  .curtain-card { width: 100%; }
+}

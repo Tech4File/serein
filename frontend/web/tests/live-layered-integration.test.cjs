@@ -11,7 +11,7 @@ const backend = read('../../../backend/src/main.rs');
 test('web v3 messages use a canonical conversation AAD in both directions and atomically persist ratchet snapshots', () => {
   assert.ok(app.includes("function ratchetConversationId(firstUserId,secondUserId){return[firstUserId,secondUserId].map(String).sort().join(':');}"));
   assert.match(app, /conversationId:ratchetConversationId\(state\.user\.id,contact\.id\)/);
-  assert.match(app, /ratchet_version:3/);
+  assert.match(app, /ratchet_version:window\.SereinCore\?\.wasmActive\?3:2/);
   assert.match(app, /peer\.ratchetVersion>=3/);
   assert.match(app, /crypto_version:3,iv:encrypted\.iv,ciphertext:encrypted\.ciphertext/);
   assert.match(app, /await commitRatchetMessage\(contact\.id,id,\{text,sender:state\.name,mine:true,envelopes,attachment\},'pending',createdAt,states\)/);

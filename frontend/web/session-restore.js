@@ -17,5 +17,13 @@
     throw lastError;
   }
 
-  window.SereinSessionRestore = Object.freeze({ fetchAccount });
+  function hasSavedSession(storage, key, serverOrigin) {
+    try {
+      return storage?.getItem(key) === serverOrigin;
+    } catch {
+      return false;
+    }
+  }
+
+  window.SereinSessionRestore = Object.freeze({ fetchAccount, hasSavedSession });
 })();

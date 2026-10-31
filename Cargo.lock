@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "serein-api"
-version = "0.4.0-dev.39"
+version = "0.4.4-dev"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "serein-core"
-version = "0.4.0-dev.39"
+version = "0.4.4-dev"
 dependencies = [
  "aes-gcm",
  "hkdf 0.13.0",
@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "serein-moq-engine"
-version = "0.4.0-dev.39"
+version = "0.4.4-dev"
 
 [[package]]
 name = "sha1"
