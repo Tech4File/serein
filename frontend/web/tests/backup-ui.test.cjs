@@ -21,7 +21,7 @@ test('web settings expose manual encrypted backup and restore controls with corr
   assert.match(app, /SereinBackupCrypto\.encrypt\(identity,snapshot,backupKey\)/);
   assert.match(app, /SereinBackupCrypto\.decrypt\(identity,fileBytes,legacyPassword,backupKey\)/);
   assert.match(app, /api\('\/api\/v1\/backups\/key-envelope'/);
-  assert.match(app, /serein-backup-key-envelope-kdf-v1/);
+  assert.match(app, /serein-backup-key-envelope-kdf-v2/);
   assert.match(app, /generateKey\(\{name:'ECDH',namedCurve:'P-256'\},false,\['deriveBits'\]\)/);
   assert.match(app, /backupKey\?\.fill\(0\)/);
 });
@@ -30,7 +30,7 @@ test('verified sign-in requires OTP before returning the account UUID to the cli
   const backend = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'backend', 'src', 'main.rs'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
   assert.match(backend, /\/api\/v1\/auth\/verify-login/);
-  assert.match(backend, /verification_login_response\(&email,message,delivery\)/);
+  assert.match(backend, /verification_login_response\s*\(\s*&email\s*,\s*message\s*,\s*delivery\s*\)/);
   assert.match(backend, /struct VerifyLoginInput \{ identity: String, password: String, code: String/);
   assert.match(backend, /email_verification_challenges SET expires_at=now\(\),resend_after=now\(\),attempt_count=5/);
   assert.match(app, /loginVerification\?['"]\/api\/v1\/auth\/verify-login/);

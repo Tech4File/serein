@@ -60,6 +60,8 @@ test('web session restore exposes connection failure and retry rather than silen
   const androidApi = fs.readFileSync(path.resolve(root, '../../apps/android/app/src/main/java/io/serein/chat/SereinApi.java'), 'utf8');
   const iosApi = fs.readFileSync(path.resolve(root, '../../apps/ios/SereinChat/SereinAPI.swift'), 'utf8');
   assert.match(html, /id="restoreSessionRetry"/);
+  assert.match(html, /id="sessionCurtain" class="session-curtain hidden"[^>]*aria-hidden="true"/);
+  assert.match(app, /state\.sessionRestoreInProgress=true;sessionCurtain\.show\(\)/);
   assert.match(html, /Sign in to Serein/);
   assert.match(app, /if\(!hasSavedSessionHint\(\)\)[\s\S]*?return;/);
   assert.match(app, /rememberSavedSession\(\)/);

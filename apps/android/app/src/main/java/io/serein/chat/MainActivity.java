@@ -51,6 +51,8 @@ public final class MainActivity extends Activity {
     private boolean restorePromptInProgress;
     private boolean startupSessionResolved, startupContactsResolved, startupPreferencesResolved;
     private Dialog startupCurtain;
+    private Dialog startupCurtainClosing;
+    private AnimatorSet startupCurtainOpening;
     private Dialog backupProgressDialog;
     private TextView backupProgressText;
     private View startupLeftPanel, startupRightPanel;
@@ -88,19 +90,20 @@ public final class MainActivity extends Activity {
     }
     private void showStartupCurtain(){
         if(isFinishing()||startupCurtain!=null)return;int width=getResources().getDisplayMetrics().widthPixels;
-        FrameLayout stage=new FrameLayout(this);stage.setBackgroundColor(0xFF08151C);
+        FrameLayout stage=new FrameLayout(this);stage.setBackgroundColor(Color.TRANSPARENT);
         startupLeftPanel=new View(this);startupLeftPanel.setBackground(curtainDrawable(true));FrameLayout.LayoutParams left=new FrameLayout.LayoutParams(Math.max(1,width/2),-1,Gravity.LEFT);stage.addView(startupLeftPanel,left);
         startupRightPanel=new View(this);startupRightPanel.setBackground(curtainDrawable(false));FrameLayout.LayoutParams right=new FrameLayout.LayoutParams(Math.max(1,width-width/2),-1,Gravity.RIGHT);stage.addView(startupRightPanel,right);
-        LinearLayout center=SereinUi.column(this);center.setGravity(Gravity.CENTER);center.setPadding(pad(22),pad(20),pad(22),pad(20));center.setBackground(SereinUi.shape(this,0xAA280A10,20));
-        TextView lock=SereinUi.text(this,"▣",32,Color.WHITE,true);lock.setGravity(Gravity.CENTER);center.addView(lock);
-        TextView brand=SereinUi.text(this,"S E R E I N",18,Color.WHITE,true);brand.setGravity(Gravity.CENTER);center.addView(brand,SereinUi.margin(this,-1,-2,0,7,0,7));
-        ProgressBar progress=new ProgressBar(this);center.addView(progress,SereinUi.margin(this,36,36,0,3,0,7));
-        TextView message=SereinUi.text(this,"Restoring your secure session…",12,0xFFEADDE0,false);message.setGravity(Gravity.CENTER);center.addView(message);
+        LinearLayout center=SereinUi.column(this);center.setGravity(Gravity.CENTER);center.setPadding(pad(22),pad(20),pad(22),pad(20));GradientDrawable cardSurface=SereinUi.shape(this,SereinTokens.LOADING_BACKGROUND,20);cardSurface.setStroke(pad(1),0x44A8DFC6);center.setBackground(cardSurface);
+        FrameLayout logoPlate=new FrameLayout(this);logoPlate.setBackground(SereinUi.shape(this,SereinTokens.LOADING_ACCENT,16));ImageView mark=new ImageView(this);mark.setImageResource(R.drawable.ic_launcher_foreground);mark.setScaleType(ImageView.ScaleType.FIT_CENTER);mark.setPadding(pad(8),pad(8),pad(8),pad(8));logoPlate.addView(mark,new FrameLayout.LayoutParams(-1,-1,Gravity.CENTER));center.addView(logoPlate,SereinUi.margin(this,56,56,0,0,0,2));
+        TextView brand=SereinUi.text(this,"Serein",18,SereinTokens.LOADING_FOREGROUND,true);brand.setGravity(Gravity.CENTER);center.addView(brand,SereinUi.margin(this,-1,-2,0,2,0,1));
+        TextView title=SereinUi.text(this,"Restoring your session",14,SereinTokens.LOADING_FOREGROUND,true);title.setGravity(Gravity.CENTER);center.addView(title,SereinUi.margin(this,-1,-2,0,0,0,3));
+        ProgressBar progress=new ProgressBar(this);progress.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(SereinTokens.LOADING_ACCENT));center.addView(progress,SereinUi.margin(this,30,30,0,1,0,5));
+        TextView message=SereinUi.text(this,"Checking this device securely…",12,SereinTokens.LOADING_MUTED,false);message.setGravity(Gravity.CENTER);center.addView(message);
         FrameLayout.LayoutParams centerParams=new FrameLayout.LayoutParams(-2,-2,Gravity.CENTER);stage.addView(center,centerParams);
-        startupCurtain=new Dialog(this);startupCurtain.requestWindowFeature(Window.FEATURE_NO_TITLE);startupCurtain.setContentView(stage);startupCurtain.setCancelable(false);Window window=startupCurtain.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setLayout(WindowManager.LayoutParams.MATCH_PARENT,WindowManager.LayoutParams.MATCH_PARENT);}startupCurtain.show();if(window!=null)window.setLayout(WindowManager.LayoutParams.MATCH_PARENT,WindowManager.LayoutParams.MATCH_PARENT);
+        startupCurtain=new Dialog(this);startupCurtain.requestWindowFeature(Window.FEATURE_NO_TITLE);startupCurtain.setContentView(stage);startupCurtain.setCancelable(false);Window window=startupCurtain.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);window.setLayout(WindowManager.LayoutParams.MATCH_PARENT,WindowManager.LayoutParams.MATCH_PARENT);}startupCurtain.show();if(window!=null)window.setLayout(WindowManager.LayoutParams.MATCH_PARENT,WindowManager.LayoutParams.MATCH_PARENT);
     }
-    private android.graphics.drawable.Drawable curtainDrawable(boolean left){GradientDrawable curtain=new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,left?new int[]{0xFF53111B,0xFF81202B,0xFF5B121D}:new int[]{0xFF5B121D,0xFF81202B,0xFF53111B});return curtain;}
-    private void dismissStartupCurtain(){runOnUiThread(()->{if(startupCurtain==null)return;Dialog dialog=startupCurtain;startupCurtain=null;if(getSharedPreferences("serein",MODE_PRIVATE).getBoolean("reduce_motion",false)||startupLeftPanel==null||startupRightPanel==null){dialog.dismiss();if(root!=null)root.post(this::showWhatsNewIfNeeded);return;}float distance=getResources().getDisplayMetrics().widthPixels/2f;ObjectAnimator left=ObjectAnimator.ofFloat(startupLeftPanel,View.TRANSLATION_X,-distance);ObjectAnimator right=ObjectAnimator.ofFloat(startupRightPanel,View.TRANSLATION_X,distance);AnimatorSet opening=new AnimatorSet();opening.playTogether(left,right);opening.setDuration(520);opening.addListener(new android.animation.AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator animation){if(!isFinishing()){dialog.dismiss();if(root!=null)root.post(MainActivity.this::showWhatsNewIfNeeded);}startupLeftPanel=null;startupRightPanel=null;}});opening.start();});}
+    private android.graphics.drawable.Drawable curtainDrawable(boolean left){int[] colors=left?new int[]{SereinTokens.LOADING_PANEL,SereinTokens.LOADING_PANEL_HIGHLIGHT}:new int[]{SereinTokens.LOADING_PANEL_HIGHLIGHT,SereinTokens.LOADING_PANEL};return new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,colors);}
+    private void dismissStartupCurtain(){runOnUiThread(()->{if(startupCurtain==null)return;Dialog dialog=startupCurtain;startupCurtain=null;if(getSharedPreferences("serein",MODE_PRIVATE).getBoolean("reduce_motion",false)||startupLeftPanel==null||startupRightPanel==null){dialog.dismiss();if(root!=null)root.post(this::showWhatsNewIfNeeded);return;}startupCurtainClosing=dialog;float distance=getResources().getDisplayMetrics().widthPixels/2f;ObjectAnimator left=ObjectAnimator.ofFloat(startupLeftPanel,View.TRANSLATION_X,-distance);ObjectAnimator right=ObjectAnimator.ofFloat(startupRightPanel,View.TRANSLATION_X,distance);AnimatorSet opening=new AnimatorSet();startupCurtainOpening=opening;opening.playTogether(left,right);opening.setDuration(SereinTokens.LOADING_CURTAIN_DURATION_MS);opening.addListener(new android.animation.AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator animation){dialog.dismiss();startupCurtainClosing=null;startupCurtainOpening=null;if(!isFinishing()&&root!=null)root.post(MainActivity.this::showWhatsNewIfNeeded);startupLeftPanel=null;startupRightPanel=null;}});opening.start();});}
     private boolean verifySharedCore(){
         try {
             String appVersion=getPackageManager().getPackageInfo(getPackageName(),0).versionName;
@@ -113,7 +116,7 @@ public final class MainActivity extends Activity {
     }
     private void applyReducedMotion(boolean enabled){if(getWindow()!=null)getWindow().setWindowAnimations(enabled?0:defaultWindowAnimations);}
     @Override protected void onResume(){super.onResume();if(account!=null){syncAccountPreferences();if("Settings".equals(activePage))renderMain("Settings");}}
-    @Override protected void onDestroy(){if(startupCurtain!=null){startupCurtain.dismiss();startupCurtain=null;}backupExecutor.shutdownNow();super.onDestroy();}
+    @Override protected void onDestroy(){if(startupCurtainOpening!=null){startupCurtainOpening.cancel();startupCurtainOpening=null;}if(startupCurtainClosing!=null){startupCurtainClosing.dismiss();startupCurtainClosing=null;}if(startupCurtain!=null){startupCurtain.dismiss();startupCurtain=null;}backupExecutor.shutdownNow();super.onDestroy();}
     private void syncAccountPreferences(){api.settings((result,error)->{startupPreferencesResolved=true;finishStartupIfReady();if(account==null||error!=null||!(result instanceof JSONObject))return;JSONObject remote=(JSONObject)result;String theme=remote.optString("theme","system");if(!java.util.Arrays.asList("system","light","dark").contains(theme))theme="system";String scale=remote.optString("font_scale","system");if("standard".equals(scale))scale="system";if(!java.util.Arrays.asList("system","large","extra_large").contains(scale))scale="system";boolean reduced=remote.optBoolean("reduce_motion",false),notifications=remote.optBoolean("notifications",false);android.content.SharedPreferences prefs=getSharedPreferences("serein",MODE_PRIVATE);boolean changed=!theme.equals(prefs.getString("theme","system"))||!scale.equals(prefs.getString("font_scale","system"))||reduced!=prefs.getBoolean("reduce_motion",false);prefs.edit().putString("theme",theme).putString("font_scale",scale).putBoolean("reduce_motion",reduced).putBoolean("notifications_enabled",notifications&&SereinNotifications.permissionGranted(this)).apply();applyReducedMotion(reduced);if(changed)renderMain(activePage);});}
     private int pad(int n) { return SereinUi.dp(this, n); }
     private void base(String title) {
@@ -153,7 +156,7 @@ public final class MainActivity extends Activity {
     private void renderAuth() {
         base(registerMode ? "Create account" : "Sign in");
         root.addView(paragraph("Account access and device management"),SereinUi.margin(this,-1,-2,0,0,0,12));
-        Button connection=SereinUi.button(this,"Server connection · "+connectionStatus,false);root.addView(connection,SereinUi.margin(this,-1,42,0,0,0,12));connection.setOnClickListener(v->showConnectionSettings());
+        LinearLayout connectionRow=SereinUi.row(this);connectionRow.setGravity(Gravity.CENTER);Button connection=SereinUi.chip(this,"↗  Server connection",true);connection.setContentDescription("Open server connection settings. Current status: "+connectionStatus);connection.setOnClickListener(v->showConnectionSettings());connectionRow.addView(connection);root.addView(connectionRow,SereinUi.margin(this,-1,42,0,0,0,12));
         LinearLayout tabs=SereinUi.row(this);Button signin=SereinUi.button(this,"Sign in",!registerMode);Button create=SereinUi.button(this,"Create account",registerMode);
         tabs.addView(signin,new LinearLayout.LayoutParams(0,pad(42),1));tabs.addView(create,new LinearLayout.LayoutParams(0,pad(42),1));root.addView(tabs);
         signin.setOnClickListener(v->{registerMode=false;renderAuth();});create.setOnClickListener(v->{registerMode=true;renderAuth();});

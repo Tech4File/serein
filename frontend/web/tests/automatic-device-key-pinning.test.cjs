@@ -42,7 +42,7 @@ test('clients and server reject unsupported key algorithms, ratchet capabilities
   assert.match(web, /peer\.ratchetVersion!==3\|\|!window\.SereinCore\?\.wasmActive/);
   assert.match(android, /if\(ratchetVersion!=2&&ratchetVersion!=3\)/);
   assert.match(ios, /guard ratchetVersion == 2 \|\| ratchetVersion == 3/);
-  assert.match(backend, /parse_p256_public_jwk\(layer1\)\?;parse_p256_public_jwk\(layer2\)\?/);
+  assert.match(backend, /parse_p256_public_jwk\s*\(\s*layer1\s*\)\s*\?\s*;\s*parse_p256_public_jwk\s*\(\s*layer2\s*\)\s*\?/);
   assert.match(backend, /device_key_bundle_fingerprint_rejects_off_curve_points/);
 });
 

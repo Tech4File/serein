@@ -55,7 +55,7 @@ test('each open chat uses its own account UUID, device-key scope, local timeline
 
 test('server accepts delivery only to a non-revoked device with at least one live session', () => {
   assert.match(backend, /SELECT d\.user_id FROM devices d WHERE d\.id=\$1 AND d\.revoked_at IS NULL AND EXISTS\(SELECT 1 FROM auth_sessions s WHERE s\.device_id=d\.id AND s\.user_id=d\.user_id AND s\.expires_at>now\(\)\)/);
-  assert.match(backend, /input\.to==ctx\.device_id/);
+  assert.match(backend, /input\.to\s*==\s*ctx\.device_id/);
   assert.match(backend, /recipient device not found/);
   assert.match(backend, /SELECT k\.device_id,k\.public_key,k\.layer2_public_key[\s\S]*?EXISTS\(SELECT 1 FROM auth_sessions/);
 });

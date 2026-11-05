@@ -8,17 +8,56 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const html = read('frontend/web/index.html');
 const css = read('frontend/web/experience.css');
 const app = read('frontend/web/app.js');
+const curtainCss = read('frontend/web/components/session-curtain.css');
+const curtainJs = read('frontend/web/components/session-curtain.js');
 const androidUi = read('apps/android/app/src/main/java/io/serein/chat/SereinUi.java');
+const androidMain = read('apps/android/app/src/main/java/io/serein/chat/MainActivity.java');
 const androidConversation = read('apps/android/app/src/main/java/io/serein/chat/SereinConversationActivity.java');
 const iosDesign = read('apps/ios/SereinChat/SereinDesign.swift');
 const iosProduct = read('apps/ios/SereinChat/SereinProductView.swift');
 
-test('loading curtain scales its mark to the viewport and honors reduced motion', () => {
-  assert.match(html, /curtain-mark-stage/);
-  assert.match(html, /curtain-loading-indicator/);
-  assert.match(css, /width:\s*clamp\(156px, min\(38vw, 34dvh\), 276px\)/);
-  assert.match(css, /prefers-reduced-motion:\s*reduce/);
-  assert.match(css, /\.session-curtain\.is-ready/);
+test('loading curtain is a polished full-screen reveal component using the shared visual tokens', () => {
+  assert.match(html, /class="curtain-mark"/);
+  assert.match(curtainCss, /position:\s*fixed;[\s\S]*z-index:\s*2000;[\s\S]*inset:\s*0;/);
+  assert.match(curtainCss, /--token-loading-panel/);
+  assert.match(curtainCss, /translateX\(-102%\)/);
+  assert.match(curtainCss, /translateX\(102%\)/);
+  assert.match(curtainCss, /prefers-reduced-motion:\s*reduce/);
+  assert.match(curtainJs, /transitionend/);
+  assert.match(curtainJs, /matchMedia\('\(prefers-reduced-motion: reduce\)'\)/);
+  assert.match(app, /sessionCurtain\.show/);
+  assert.match(app, /sessionCurtain\.hide/);
+});
+
+test('first-visit auth is separate and inertness is scoped to the temporary full-screen curtain', () => {
+  assert.match(html, /id="sessionCurtain" class="session-curtain hidden"[^>]*hidden inert/);
+  assert.match(html, /<\/div>\s*<div id="login"/);
+  assert.match(app, /if\(!hasSavedSessionHint\(\)\)\{[\s\S]*?return;/);
+  assert.match(app, /state\.sessionRestoreInProgress=true;sessionCurtain\.show\(\)/);
+  assert.match(curtainCss, /\.session-curtain\[hidden\][\s\S]*display:\s*none\s*!important/);
+  assert.match(curtainJs, /element\.inert = true/);
+  assert.match(curtainJs, /restoreUnderlyingPage/);
+});
+
+test('web and native sign-in make server connection an obvious bordered control', () => {
+  assert.match(html, /id="authConnectionOpen" class="connection-chip"/);
+  assert.match(css, /\.connection-chip\s*\{[\s\S]*border:\s*1px solid var\(--border-strong\)/);
+  assert.match(androidMain, /SereinUi\.chip\(this,"↗  Server connection",true\)/);
+  assert.match(iosProduct, /Label\("Server connection", systemImage: "network"\)[\s\S]*Capsule\(\)\.stroke/);
+  assert.match(iosProduct, /RoundedRectangle\(cornerRadius: 11\)\.stroke/);
+});
+
+test('contact-profile header aligns navigation and title, with modern SVG action buttons and restrained palette', () => {
+  assert.match(html, /id="profileBack"[^>]*aria-label="Back to conversation"[\s\S]*?<svg/);
+  assert.match(html, /id="profileClose"[^>]*aria-label="Close contact profile"[\s\S]*?<svg/);
+  assert.match(html, /id="profileAudio" class="profile-action"[^>]*disabled[\s\S]*?<svg/);
+  assert.match(html, /id="profileVideo" class="profile-action"[^>]*disabled[\s\S]*?<svg/);
+  assert.match(css, /\.profile-screen-head\s*\{\s*display:\s*flex;\s*flex: 0 0 auto;\s*flex-direction:\s*row/);
+  assert.match(css, /\.profile-quick-actions\s*\{\s*display:\s*grid;\s*grid-template-columns:\s*repeat\(3/);
+  assert.match(css, /\.profile-action-icon svg\s*\{[^}]*stroke:/);
+  assert.match(css, /\.profile-media-strip\s*\{[^}]*scroll-snap-type:\s*x mandatory/);
+  assert.match(iosProduct, /NavigationLink\(isActive: \$showMediaLibrary\)/);
+  assert.match(androidConversation, /R\.drawable\.ic_nav_back_24/);
 });
 
 test('short auth view can scroll while respecting safe areas and mobile sizing', () => {
@@ -32,10 +71,11 @@ test('contact profile is a responsive pane/page and media filters preserve the r
   assert.match(html, /id="contactProfilePanel"[^>]*aria-hidden="true"[^>]*inert/);
   assert.match(css, /\.app\.profile-open\s*\{\s*grid-template-columns/);
   assert.match(css, /@media\s*\(max-width:\s*680px\)\s*\{[\s\S]*\.contact-profile-panel\s*\{\s*position:\s*fixed/);
-  assert.match(html, /id="mediaLibraryDialog"[\s\S]*data-library-filter="image"[\s\S]*data-library-filter="video"/);
-  assert.match(app, /function openMediaLibrary\(fromProfile=true\)/);
-  assert.match(app, /mediaLibraryReturnToProfile/);
-  assert.match(app, /mediaLibraryDialog'\)\.addEventListener\('close'/);
+  assert.match(html, /id="mediaLibraryView"[\s\S]*data-library-filter="image"[\s\S]*data-library-filter="video"/);
+  assert.doesNotMatch(html, /id="mediaLibraryDialog"/);
+  assert.match(app, /function openMediaLibrary\(\)[\s\S]*?panel\.classList\.add\('media-library-open'\)/);
+  assert.match(app, /function closeMediaLibrary\(\{restoreFocus=true\}={}\)/);
+  assert.match(app, /profileHeaderTitle/);
   assert.match(app, /loadProfileThumbnail\(item,image\)/);
 });
 
@@ -76,7 +116,13 @@ test('native profile and media surfaces use shared chips, full-screen presentati
   assert.match(androidConversation, /SereinUi\.showStyledDialog\(confirm,true\)/);
   assert.match(androidConversation, /private void showContactProfile\(\)/);
   assert.match(androidConversation, /profile\.getWindow\(\)\.setLayout\(-1,-1\)/);
-  assert.match(androidConversation, /library\.setOnDismissListener\(dialog->\{if\(!isFinishing\(\)\)showContactProfile\(\);\}\)/);
+  assert.match(androidConversation, /private void switchProfilePage\(Dialog dialog,View outgoing,View incoming,boolean forward\)/);
+  assert.match(androidConversation, /R\.drawable\.ic_nav_back_24/);
+  assert.match(androidConversation, /R\.drawable\.ic_nav_close_24/);
+  assert.match(androidConversation, /R\.drawable\.ic_action_message_24/);
+  assert.match(androidConversation, /R\.drawable\.ic_action_phone_24/);
+  assert.match(iosProduct, /profileAction\("Audio", systemImage: "phone\.fill", enabled: false\)/);
+  assert.match(iosProduct, /profileAction\("Video", systemImage: "video\.fill", enabled: false\)/);
   assert.match(iosDesign, /struct SereinChip: View/);
   assert.match(iosProduct, /\.fullScreenCover\(isPresented: \$showProfile\)/);
   assert.match(iosProduct, /\.confirmationDialog\("Block @\\\(contact\.username\)/);

@@ -42,11 +42,11 @@ struct SereinProductRootView: View {
                 if api.signedIn { SereinProductTabs(api: api) }
                 else { SereinNativeAuthView(api: api) }
             }
-            if !api.startupReady {
-                SereinStartupCurtain().transition(.opacity.combined(with: .move(edge: .top))).zIndex(100)
-            }
+            SereinStartupCurtain(isReady: api.startupReady, reduceMotion: api.reduceMotion || systemReduceMotion)
+                .zIndex(100)
+                .allowsHitTesting(!api.startupReady)
+                .accessibilityHidden(api.startupReady)
         }
-        .animation(api.reduceMotion || systemReduceMotion ? nil : .easeInOut(duration: 0.55), value: api.startupReady)
         .tint(SereinPalette.green)
         .environment(\.dynamicTypeSize, effectiveDynamicTypeSize)
         .transaction { transaction in
@@ -76,33 +76,44 @@ struct SereinProductRootView: View {
 }
 
 private struct SereinStartupCurtain: View {
+    let isReady: Bool
+    let reduceMotion: Bool
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    private var motionDisabled: Bool { reduceMotion || systemReduceMotion }
     var body: some View {
         GeometryReader { geometry in
             ZStack {
-                Color(red: 0.035, green: 0.08, blue: 0.10)
-                HStack(spacing: 2) {
-                    curtainPanel
-                    curtainPanel
-                }
-                .overlay(alignment: .center) {
-                    VStack(spacing: 12) {
-                        Image(systemName: "lock.fill").font(.system(size: 28, weight: .medium)).foregroundStyle(.white)
-                        Text("SEREIN").font(.system(size: 19, weight: .bold, design: .rounded)).tracking(3).foregroundStyle(.white)
-                        ProgressView().tint(.white).padding(.top, 2)
-                        Text("Restoring your secure session…").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.white.opacity(0.78))
-                    }.padding(22).background(.black.opacity(0.17), in: RoundedRectangle(cornerRadius: 18))
+                HStack(spacing: 0) {
+                    curtainPanel(reverse: false).frame(width: geometry.size.width / 2).offset(x: isReady ? -geometry.size.width / 2 : 0)
+                    curtainPanel(reverse: true).frame(width: geometry.size.width / 2).offset(x: isReady ? geometry.size.width / 2 : 0)
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height)
+                VStack(spacing: 10) {
+                    Image("SereinMark").resizable().scaledToFit().frame(width: 56, height: 56).padding(9)
+                        .background(SereinTokens.loadingAccent, in: RoundedRectangle(cornerRadius: 17))
+                    Text("Serein").font(.system(size: 11, weight: .bold, relativeTo: .body)).tracking(2.2).foregroundStyle(SereinTokens.loadingMuted).textCase(.uppercase)
+                    Text("Restoring your session").font(.system(size: 19, weight: .semibold, design: .rounded, relativeTo: .body)).foregroundStyle(SereinTokens.loadingForeground)
+                    ProgressView().tint(SereinTokens.loadingAccent).padding(.top, 2)
+                    Text("Checking this device securely…").font(.system(size: 13, relativeTo: .body)).foregroundStyle(SereinTokens.loadingMuted).multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: 340).padding(24)
+                .background(SereinTokens.loadingBackground, in: RoundedRectangle(cornerRadius: 20))
+                .overlay(RoundedRectangle(cornerRadius: 20).stroke(SereinTokens.loadingAccent.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.24), radius: 24, y: 12)
+                .opacity(isReady ? 0 : 1).offset(y: isReady ? -8 : 0)
             }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .background(Color.clear)
+            .animation(motionDisabled ? nil : .easeInOut(duration: SereinTokens.loadingCurtainDurationMs / 1000), value: isReady)
             .ignoresSafeArea()
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Serein is restoring your secure session")
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Serein is restoring your secure session")
     }
-    private var curtainPanel: some View {
-        Rectangle().fill(LinearGradient(colors: [Color(red: 0.34, green: 0.08, blue: 0.13), Color(red: 0.52, green: 0.12, blue: 0.18), Color(red: 0.34, green: 0.08, blue: 0.13)], startPoint: .leading, endPoint: .trailing))
-            .overlay(alignment: .leading) { Rectangle().fill(Color.white.opacity(0.035)).frame(width: 2) }
-            .overlay(alignment: .trailing) { Rectangle().fill(Color.black.opacity(0.12)).frame(width: 2) }
+    private func curtainPanel(reverse: Bool) -> some View {
+        let colors = reverse ? [SereinTokens.loadingPanelHighlight, SereinTokens.loadingPanel] : [SereinTokens.loadingPanel, SereinTokens.loadingPanelHighlight]
+        return Rectangle().fill(LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing))
+            .overlay(alignment: reverse ? .leading : .trailing) { Rectangle().fill(SereinTokens.loadingAccent.opacity(0.16)).frame(width: 1) }
     }
 }
 
@@ -146,7 +157,7 @@ private struct SereinNativeAuthView: View {
             LinearGradient(colors: [Color(uiColor: .systemBackground), SereinPalette.paleMint.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    HStack { SereinAvatar(name: "Serein", size: 42); VStack(alignment: .leading) { Text("Serein").font(.system(size: 20, weight: .bold, design: .rounded, relativeTo: .body)); Text("SEREIN ACCOUNT").font(.system(size: 10, weight: .bold, relativeTo: .body)).tracking(1.1).foregroundStyle(.secondary) }; Spacer(); Button { showConnectionSettings = true } label: { Label("Connection", systemImage: "network").font(.system(size: 10, weight: .semibold, relativeTo: .body)) } }
+                    HStack { SereinAvatar(name: "Serein", size: 42); VStack(alignment: .leading) { Text("Serein").font(.system(size: 20, weight: .bold, design: .rounded, relativeTo: .body)); Text("SEREIN ACCOUNT").font(.system(size: 10, weight: .bold, relativeTo: .body)).tracking(1.1).foregroundStyle(.secondary) }; Spacer(); Button { showConnectionSettings = true } label: { Label("Server connection", systemImage: "network").font(.system(size: 11, weight: .semibold, relativeTo: .body)).foregroundStyle(SereinPalette.green).padding(.horizontal, 11).padding(.vertical, 8).background(Color(uiColor: .secondarySystemBackground), in: Capsule()).overlay(Capsule().stroke(Color.secondary.opacity(0.24), lineWidth: 1)) }.buttonStyle(.plain).accessibilityLabel("Server connection settings") }
                     VStack(alignment: .leading, spacing: 7) { SereinSectionLabel(title: api.verificationRequired ? (api.verificationPurpose == "login" ? "TWO-STEP SIGN-IN" : "EMAIL VERIFICATION") : "ACCOUNT"); Text(api.verificationRequired ? (api.verificationPurpose == "login" ? "Finish signing in" : "Verify your email") : (registering ? "Create your account" : "Welcome back")).font(.system(size: 29, weight: .bold, design: .rounded, relativeTo: .body)); Text(api.verificationRequired ? (api.verificationPurpose == "login" ? "Enter the emailed code; your password is also required." : "Enter the six-digit code sent to your inbox.") : "Connect to your Serein API over HTTPS.").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary) }
                     SereinCard {
                         VStack(spacing: 13) {
@@ -174,7 +185,7 @@ private struct SereinNativeAuthView: View {
                                     }.font(.system(size: 11, relativeTo: .body))
                                 }.onAppear { focusedOtp = 0 }
                             } else {
-                                Button { showConnectionSettings = true } label: { HStack { Image(systemName: "network"); VStack(alignment: .leading) { Text("Server connection").font(.system(size: 11, weight: .semibold, relativeTo: .body)); Text(api.connectionStatus).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Spacer(); Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold, relativeTo: .body)) }.foregroundStyle(SereinPalette.green).padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11)) }
+                                Button { showConnectionSettings = true } label: { HStack { Image(systemName: "network"); VStack(alignment: .leading) { Text("Server connection").font(.system(size: 11, weight: .semibold, relativeTo: .body)); Text(api.connectionStatus).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Spacer(); Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold, relativeTo: .body)) }.foregroundStyle(SereinPalette.green).padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11)).overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.secondary.opacity(0.22), lineWidth: 1)) }.buttonStyle(.plain).accessibilityLabel("Server connection settings")
                                 HStack(spacing: 6) { modeButton("Sign in", active: !registering) { withAnimation(.easeInOut(duration: 0.2)) { registering = false } }; modeButton("Create account", active: registering) { withAnimation(.easeInOut(duration: 0.2)) { registering = true } } }
                                 if registering {
                                     input("Display name", text: $displayName, icon: "person")
@@ -440,7 +451,7 @@ private struct SereinContactProfile: View {
     @State private var selectedMedia: SereinMediaViewerItem?
     @State private var openingTransferID: String?
     private var allAttachments: [SereinChatMessage] { messages.filter { $0.attachment != nil }.sorted { $0.createdAt > $1.createdAt } }
-    private var latestFour: [SereinChatMessage] { Array(allAttachments.prefix(4)) }
+    private var latestTen: [SereinChatMessage] { Array(allAttachments.prefix(10)) }
     private var favoriteKey: String { "serein.favorite.\(api.user?.id ?? "local").\(contact.user_id)" }
     var body: some View {
         NavigationView {
@@ -454,6 +465,11 @@ private struct SereinContactProfile: View {
                             Label(contact.email_verified ? "Email verified" : "Email not verified", systemImage: contact.email_verified ? "checkmark.seal.fill" : "exclamationmark.circle")
                                 .font(.system(.subheadline, relativeTo: .body).weight(.semibold))
                                 .foregroundStyle(contact.email_verified ? SereinPalette.green : .secondary)
+                            HStack(spacing: 8) {
+                                profileAction("Message", systemImage: "bubble.left.and.bubble.right.fill", enabled: true) { dismiss() }
+                                profileAction("Audio", systemImage: "phone.fill", enabled: false) { }
+                                profileAction("Video", systemImage: "video.fill", enabled: false) { }
+                            }.frame(maxWidth: 360).padding(.top, 5)
                             Text("Private account email is not shared.").font(.system(.footnote, relativeTo: .body)).foregroundStyle(.secondary)
                         }.frame(maxWidth: .infinity).padding(.vertical, 8)
                     }
@@ -467,32 +483,39 @@ private struct SereinContactProfile: View {
                     }
                     SereinCard {
                         VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    SereinSectionLabel(title: "Shared media")
-                                    Text("\(allAttachments.count) file\(allAttachments.count == 1 ? "" : "s") · latest four")
-                                        .font(.system(.footnote, relativeTo: .body)).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button("View all") { showMediaLibrary=true }
-                                    .font(.system(.subheadline, design: .rounded).weight(.semibold))
-                                    .foregroundStyle(SereinPalette.green)
+                            VStack(alignment: .leading, spacing: 3) {
+                                SereinSectionLabel(title: "Shared media")
+                                Text("\(allAttachments.count) shared file\(allAttachments.count == 1 ? "" : "s") · newest first")
+                                    .font(.system(.footnote, relativeTo: .body)).foregroundStyle(.secondary)
                             }
-                            if latestFour.isEmpty {
-                                Label("Shared photos, GIFs, videos, audio and documents will appear here.", systemImage: "square.stack.3d.up")
+                            if latestTen.isEmpty {
+                                Text("Photos, videos and files shared here will appear in this gallery.")
                                     .font(.system(.subheadline, relativeTo: .body)).foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 10)
-                            } else {
-                                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                                    ForEach(latestFour) { message in
+                                    .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
+                            }
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 9) {
+                                    ForEach(latestTen) { message in
                                         if let attachment=message.attachment {
                                             SereinCompactMediaTile(attachment: attachment, localURL: engine.localFile(for: attachment), isLoading: openingTransferID == attachment.transferID) {
                                                 openMedia(attachment)
-                                            }
+                                            }.frame(width: 124, height: 146)
                                         }
                                     }
-                                }
-                            }
+                                    Button { showMediaLibrary=true } label: {
+                                        VStack(spacing: 8) {
+                                            Image(systemName: "square.grid.2x2")
+                                                .font(.system(size: 23, weight: .medium))
+                                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                                .background(SereinPalette.green.opacity(0.11), in: RoundedRectangle(cornerRadius: 10))
+                                            Text("View all").font(.system(size: 12, weight: .semibold, relativeTo: .body))
+                                            Text("\(allAttachments.count) shared files").font(.system(size: 9, relativeTo: .body)).foregroundStyle(.secondary).lineLimit(1)
+                                        }.foregroundStyle(SereinPalette.green).padding(7).frame(width: 124, height: 146)
+                                            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.secondary.opacity(0.18), lineWidth: 1))
+                                    }.buttonStyle(.plain).accessibilityLabel("View all shared files")
+                                }.padding(.vertical, 2)
+                            }.scrollIndicators(.hidden)
                         }
                     }
                     SereinCard {
@@ -510,6 +533,7 @@ private struct SereinContactProfile: View {
             .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
             .navigationTitle("Contact profile").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .background(NavigationLink(isActive: $showMediaLibrary) { SereinMediaLibrary(engine: engine, messages: allAttachments, onClose: { showMediaLibrary=false }) } label: { EmptyView() }.hidden())
             .onAppear { favorite=UserDefaults.standard.bool(forKey:favoriteKey) }
         }
         .confirmationDialog("Block @\(contact.username)?", isPresented: $showBlockConfirmation, titleVisibility: .visible) {
@@ -517,9 +541,6 @@ private struct SereinContactProfile: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Blocking removes this contact link and prevents new requests and messages. Existing encrypted history is retained.")
-        }
-        .fullScreenCover(isPresented: $showMediaLibrary) {
-            SereinMediaLibrary(engine: engine, messages: allAttachments, onClose: { showMediaLibrary=false })
         }
         .fullScreenCover(item: $selectedMedia) { item in SereinDirectMediaViewer(item: item) }
     }
@@ -532,6 +553,17 @@ private struct SereinContactProfile: View {
             openingTransferID=nil
             if let url { selectedMedia=SereinMediaViewerItem(attachment:attachment,url:url) }
         }
+    }
+    private func profileAction(_ title: String, systemImage: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 7) {
+                Image(systemName: systemImage).font(.system(size: 19, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .background(enabled ? SereinPalette.green.opacity(0.12) : Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 15))
+                Text(title).font(.system(size: 11, weight: .semibold, relativeTo: .body))
+            }.frame(maxWidth: .infinity, minHeight: 72).contentShape(Rectangle())
+        }.buttonStyle(.plain).foregroundStyle(enabled ? Color.primary : Color.secondary).disabled(!enabled)
+            .accessibilityLabel(enabled ? title : "\(title) calls are not available yet")
     }
     @ViewBuilder private func profileLine(_ title: String, _ value: String) -> some View { HStack { Text(title).foregroundStyle(.secondary); Spacer(); Text(value).multilineTextAlignment(.trailing) }.font(.system(size: 12, relativeTo: .body)) }
     private func profileDate(_ value: String) -> String { guard let date=ISO8601DateFormatter().date(from:value) else { return value };let f=DateFormatter();f.dateStyle = .medium;return f.string(from:date) }
@@ -547,15 +579,22 @@ private struct SereinCompactMediaTile: View {
         Button(action:action) {
             VStack(alignment:.leading,spacing:5) {
                 ZStack {
-                    RoundedRectangle(cornerRadius:9).fill(Color.secondary.opacity(0.10))
-                    if (kind == "photo" || kind == "gif"),let localURL,let image=UIImage(contentsOfFile:localURL.path) { Image(uiImage:image).resizable().scaledToFill().frame(maxWidth:.infinity).frame(height:78).clipped().clipShape(RoundedRectangle(cornerRadius:9)) }
-                    else { Image(systemName:kind == "video" ? "play.rectangle.fill" : kind == "audio" ? "waveform" : kind == "gif" ? "sparkles" : kind == "photo" ? "photo" : "doc.fill").font(.system(size:22,weight:.medium)).foregroundStyle(SereinPalette.green) }
+                    RoundedRectangle(cornerRadius:10).fill(Color.secondary.opacity(0.10))
+                    if (kind == "photo" || kind == "gif"), let localURL, let image=UIImage(contentsOfFile:localURL.path) {
+                        Image(uiImage:image).resizable().scaledToFill().frame(maxWidth:.infinity).frame(height:82).clipped()
+                    } else {
+                        Image(systemName:kind == "video" ? "play.rectangle.fill" : kind == "audio" ? "waveform" : kind == "gif" ? "sparkles" : kind == "photo" ? "photo" : "doc.fill")
+                            .font(.system(size:23,weight:.medium)).foregroundStyle(SereinPalette.green)
+                    }
+                    if kind == "video" { Image(systemName:"play.fill").font(.system(size:11,weight:.bold)).foregroundStyle(.white).padding(8).background(.black.opacity(0.55),in:Circle()) }
                     if isLoading { ProgressView().padding(5).background(.thinMaterial,in:Circle()) }
-                }.frame(height:78).frame(maxWidth:.infinity).clipped()
-                Text(attachment.filename).font(.system(size:10,weight:.medium,relativeTo:.body)).lineLimit(1).frame(maxWidth:.infinity,alignment:.leading)
+                }.frame(height:82).frame(maxWidth:.infinity).clipped().clipShape(RoundedRectangle(cornerRadius:10))
+                Text(attachment.filename).font(.system(size:10,weight:.semibold,relativeTo:.body)).lineLimit(1).frame(maxWidth:.infinity,alignment:.leading)
                 Text("\(kind.capitalized) · \(SereinMediaLibrary.bytes(attachment.size))").font(.system(size:9,relativeTo:.body)).foregroundStyle(.secondary).lineLimit(1)
-            }.padding(6).background(Color.secondary.opacity(0.07),in:RoundedRectangle(cornerRadius:11))
-        }.buttonStyle(.plain).disabled(isLoading)
+            }.padding(7).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading)
+                .background(Color(uiColor:.secondarySystemGroupedBackground),in:RoundedRectangle(cornerRadius:14))
+                .overlay(RoundedRectangle(cornerRadius:14).stroke(Color.secondary.opacity(0.18),lineWidth:1))
+        }.buttonStyle(.plain).disabled(isLoading).accessibilityLabel("Open \(kind) \(attachment.filename)")
     }
 }
 
@@ -571,19 +610,43 @@ private struct SereinMediaLibrary: View {
     private var attachments:[SereinEncryptedAttachment]{messages.filter{$0.attachment != nil}.sorted{$0.createdAt>$1.createdAt}.compactMap(\.attachment)}
     private var displayed:[SereinEncryptedAttachment]{attachments.filter{attachment in let kind=Self.kind(for:attachment);if selectedTab=="documents"{return kind=="document"};return kind != "document" && (mediaFilter=="all" || kind==mediaFilter)}}
     var body: some View {
-        NavigationView {
-            VStack(spacing:8) {
-                HStack(spacing:5) {
-                    tabButton("Media",value:"media");tabButton("Documents",value:"documents")
-                }.padding(4).background(Color.secondary.opacity(0.10),in:RoundedRectangle(cornerRadius:12))
-                if selectedTab=="media" { ScrollView(.horizontal,showsIndicators:false) { HStack(spacing:7) { for (label,value) in [("All","all"),("Photos","photo"),("GIFs","gif"),("Videos","video"),("Audio","audio")] { SereinChip(title:label,selected:mediaFilter==value){mediaFilter=value} } }.padding(.vertical,2) }.frame(height:SereinTokens.chipHeight+4) }
-                Text("\(displayed.count) \(selectedTab == "documents" ? "documents" : "media files") · newest first").font(.system(size:10,relativeTo:.body)).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading)
-                if displayed.isEmpty { Spacer();VStack(spacing:10){Image(systemName:selectedTab=="documents" ? "doc" : "photo.on.rectangle.angled").font(.system(size:32)).foregroundStyle(.secondary);Text(selectedTab=="documents" ? "No documents yet" : "No media yet").font(.system(size:16,weight:.semibold));Text("Files shared in this conversation will appear here.").font(.system(size:11)).foregroundStyle(.secondary).multilineTextAlignment(.center)}.padding(24);Spacer() }
-                else { ScrollView { LazyVGrid(columns:columns,spacing:9) { ForEach(displayed,id:\.transferID) { attachment in SereinCompactMediaTile(attachment:attachment,localURL:engine.localFile(for:attachment),isLoading:openingTransferID==attachment.transferID){openMedia(attachment)} } }.padding(.vertical,7) } }
-            }.padding(12).navigationTitle("Shared files").navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement:.cancellationAction) { Button("Close",action:onClose) } }
-        }
-        .fullScreenCover(item:$selectedMedia){item in SereinDirectMediaViewer(item:item)}
+        VStack(spacing: 10) {
+            HStack(spacing: 5) {
+                tabButton("Media",value:"media");tabButton("Documents",value:"documents")
+            }.padding(4).background(Color.secondary.opacity(0.10),in:RoundedRectangle(cornerRadius:12))
+            if selectedTab=="media" {
+                ScrollView(.horizontal,showsIndicators:false) {
+                    HStack(spacing:7) {
+                        ForEach(["all","photo","gif","video","audio"],id:\.self) { value in
+                            let label = value == "all" ? "All" : value == "photo" ? "Photos" : value == "gif" ? "GIFs" : value == "video" ? "Videos" : "Audio"
+                            SereinChip(title:label,selected:mediaFilter==value){mediaFilter=value}
+                        }
+                    }.padding(.vertical,2)
+                }.frame(height:SereinTokens.chipHeight+4)
+            }
+            Text("\(displayed.count) \(selectedTab == "documents" ? "documents" : "media files") · newest first")
+                .font(.system(size:11,relativeTo:.body)).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading)
+            if displayed.isEmpty {
+                Spacer()
+                VStack(spacing:10) {
+                    Image(systemName:selectedTab=="documents" ? "doc" : "photo.on.rectangle.angled").font(.system(size:32)).foregroundStyle(SereinPalette.green)
+                    Text(selectedTab=="documents" ? "No documents yet" : "No media yet").font(.system(size:16,weight:.semibold))
+                    Text("Files shared in this conversation will appear here.").font(.system(size:11)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }.padding(24)
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVGrid(columns:columns,spacing:10) {
+                        ForEach(displayed,id:\.transferID) { attachment in
+                            SereinCompactMediaTile(attachment:attachment,localURL:engine.localFile(for:attachment),isLoading:openingTransferID==attachment.transferID) { openMedia(attachment) }
+                        }
+                    }.padding(.vertical,7)
+                }
+            }
+        }.padding(12)
+            .navigationTitle("Shared files").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement:.primaryAction) { Button("Close",action:onClose) } }
+            .fullScreenCover(item:$selectedMedia){item in SereinDirectMediaViewer(item:item)}
     }
     private func openMedia(_ attachment:SereinEncryptedAttachment){guard openingTransferID==nil else{return};openingTransferID=attachment.transferID;Task{var url=engine.localFile(for:attachment);if url==nil{url=await engine.download(attachment)};openingTransferID=nil;if let url{selectedMedia=SereinMediaViewerItem(attachment:attachment,url:url)}}}
     private func tabButton(_ title:String,value:String)->some View { Button { selectedTab=value } label:{ Text(title).font(.system(size:13,weight:.semibold,relativeTo:.body)).frame(maxWidth:.infinity).padding(.vertical,9).background(selectedTab==value ? Color(uiColor:.systemBackground) : .clear,in:RoundedRectangle(cornerRadius:9)) }.buttonStyle(.plain) }

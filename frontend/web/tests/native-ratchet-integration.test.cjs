@@ -55,7 +55,7 @@ test('new file uploads use nested chunk crypto v2 across clients while v1 remain
   assert.match(android, /:SereinDeviceCrypto\.decryptChunk\(contentKey/);
   assert.match(ios, /SereinDeviceCrypto\.decryptChunk\(ciphertext/);
   assert.match(read('backend/src/main.rs'), /chunk_crypto_version SMALLINT NOT NULL DEFAULT 1/);
-  assert.match(read('backend/src/main.rs'), /minimum_tag_bytes=match input\.chunk_crypto_version\{1=>16,2=>32/);
+  assert.match(read('backend/src/main.rs'), /minimum_tag_bytes\s*=\s*match\s+input\.chunk_crypto_version\s*\{\s*1\s*=>\s*16\s*,\s*2\s*=>\s*32/);
   assert.match(read('backend/migrations/0014_transfer_chunk_layer2.sql'), /DEFAULT 1/);
   assert.match(read('apps/android/app/src/androidTest/java/io/serein/chat/SereinDeviceCryptoTest.java'), /testLayeredTransferChunkMatchesSharedVector/);
   const vector = JSON.parse(read('frontend/web/tests/fixtures/transfer-chunk-v2-vector.json'));

@@ -14,7 +14,7 @@ test('mobile clients complete login-purpose OTP without persisting the password'
   const securityPage = read('frontend/web/security.html');
 
   assert.match(backend, /\/api\/v1\/auth\/verify-login/);
-  assert.match(backend, /struct LoginInput \{ identity: String, password: String \}/);
+  assert.match(backend, /struct\s+LoginInput\s*\{\s*identity:\s*String\s*,\s*password:\s*String\s*,?\s*\}/);
   assert.match(backend, /deny_unknown_fields/);
   assert.match(backend, /"native_clients": "source_implemented_unverified"/);
   assert.match(securityPage, /Android and iOS chat source is not fully device\/live-tested/);

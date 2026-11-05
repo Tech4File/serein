@@ -16,7 +16,7 @@ test('mailbox pages contain only unacknowledged ciphertext and use an accurate b
   const body = backend.slice(start, end);
   assert.match(body, /delivered_at IS NULL/);
   assert.match(body, /\.bind\(limit\+1\)/);
-  assert.match(body, /let has_more=rows\.len\(\) as i64>limit/);
+  assert.match(body, /let\s+has_more\s*=\s*rows\.len\(\)\s+as\s+i64\s*>\s*limit/);
   assert.match(body, /"has_more":has_more/);
 });
 

@@ -27,7 +27,7 @@ test('all platforms use the same v3 backup-key salt, payload HKDF info, AAD doma
   assert.doesNotMatch(backend, /SEREIN_BACKUP_KEY_ENCRYPTION_KEY/);
   assert.match(backend, /CREATE TABLE IF NOT EXISTS account_backup_keys/);
   assert.match(backend, /\/api\/v1\/backups\/key-envelope/);
-  assert.match(backend, /"backup-key-envelope",10/);
+  assert.match(backend, /"backup-key-envelope"\s*,\s*10/);
   assert.match(backend, /INSERT INTO account_backup_keys[\s\S]*ON CONFLICT\(user_id\) DO NOTHING/);
   assert.match(backend, /key_material BYTEA/);
   assert.match(backend, /ensure_account_backup_key\(&state\.db,ctx\.user_id\)/);

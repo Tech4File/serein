@@ -15,6 +15,12 @@ enum SereinTokens {
     static let surfaceDark = Color(red: 0.090196, green: 0.121569, blue: 0.145098)
     static let textLight = Color(red: 0.090196, green: 0.137255, blue: 0.168627)
     static let textDark = Color(red: 0.925490, green: 0.949020, blue: 0.949020)
+    static let loadingBackground = Color(red: 0.050980, green: 0.098039, blue: 0.082353)
+    static let loadingPanel = Color(red: 0.090196, green: 0.164706, blue: 0.133333)
+    static let loadingPanelHighlight = Color(red: 0.121569, green: 0.231373, blue: 0.184314)
+    static let loadingAccent = Color(red: 0.658824, green: 0.874510, blue: 0.776471)
+    static let loadingForeground = Color(red: 0.952941, green: 1.000000, blue: 0.972549)
+    static let loadingMuted = Color(red: 0.725490, green: 0.819608, blue: 0.780392)
     static let fontScaleLargeMinimum: DynamicTypeSize = .xLarge
     static let fontScaleExtraLargeMinimum: DynamicTypeSize = .xxLarge
     static let buttonHeight: CGFloat = 44.0
@@ -25,4 +31,5 @@ enum SereinTokens {
     static let profilePanelMaxWidth: CGFloat = 440.0
     static let dialogRadius: CGFloat = 20.0
     static let motionDurationMs: Double = 240.0
+    static let loadingCurtainDurationMs: Double = 540.0
 }

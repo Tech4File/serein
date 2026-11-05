@@ -12,7 +12,7 @@ const iosApi = read('apps/ios/SereinChat/SereinAPI.swift');
 
 test('sign-out atomically revokes the device and every session, then removes its public key registration', () => {
   const logout = backend.slice(backend.indexOf('async fn logout('), backend.indexOf('\nasync fn me('));
-  assert.match(logout, /let mut tx=match state\.db\.begin\(\)/);
+  assert.match(logout, /let\s+mut\s+tx\s*=\s*match\s+state\.db\.begin\(\)/);
   assert.match(logout, /SELECT id FROM devices WHERE id=\$1 FOR UPDATE/);
   assert.match(logout, /DELETE FROM auth_sessions WHERE device_id=\$1/);
   assert.doesNotMatch(logout, /SELECT EXISTS\(SELECT 1 FROM auth_sessions/);

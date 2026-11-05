@@ -1,39 +1,4 @@
-/* Fluid startup and authentication surfaces across phones through wide displays. */
-.session-curtain {
-  box-sizing: border-box;
-  min-width: 0;
-  padding: clamp(12px, 3vw, 52px);
-  padding-top: max(clamp(12px, 3vw, 52px), env(safe-area-inset-top));
-  padding-bottom: max(clamp(12px, 3vw, 52px), env(safe-area-inset-bottom));
-}
-.curtain-card {
-  box-sizing: border-box;
-  width: min(100%, clamp(280px, 38vw, 640px));
-  max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-  overflow: auto;
-  gap: clamp(10px, 1.2vw, 20px);
-  padding: clamp(20px, 3vw, 48px);
-  border-radius: clamp(18px, 2vw, 30px);
-}
-.curtain-mark {
-  box-sizing: border-box;
-  width: clamp(44px, min(10vw, 9dvh), 112px);
-  height: clamp(44px, min(10vw, 9dvh), 112px);
-  padding: clamp(7px, 1vw, 15px);
-  border-radius: clamp(12px, 1.5vw, 24px);
-}
-.curtain-card b {
-  font-size: clamp(calc(1.125rem * var(--font-scale, 1)), calc((1rem + .45vw) * var(--font-scale, 1)), calc(1.8rem * var(--font-scale, 1)));
-}
-.curtain-card > span:not(.curtain-spinner) {
-  max-width: min(100%, 42ch);
-  font-size: clamp(calc(.875rem * var(--font-scale, 1)), calc((.8rem + .2vw) * var(--font-scale, 1)), calc(1.2rem * var(--font-scale, 1)));
-}
-.curtain-spinner {
-  width: clamp(20px, 2vw, 30px);
-  height: clamp(20px, 2vw, 30px);
-  flex: 0 0 auto;
-}
+/* Fluid authentication surfaces across phones through wide displays. */
 .auth-shell {
   box-sizing: border-box;
   width: 100%;
@@ -96,5 +61,4 @@
   .auth-theme span { display: none; }
   .auth-card { width: 100%; }
   .auth-card input, .auth-card select { max-width: 100%; }
-  .curtain-card { width: 100%; }
 }

@@ -107,6 +107,10 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         config.httpCookieAcceptPolicy = .always
         let redirectDelegate = SereinNoRedirectDelegate()
         session = URLSession(configuration: config, delegate: redirectDelegate, delegateQueue: nil)
+        let hasSavedSession = URL(string: apiBase).flatMap { origin in
+            HTTPCookieStorage.shared.cookies(for: origin)?.contains(where: { $0.name == "serein_session" })
+        } ?? false
+        startupReady = !hasSavedSession
         if defaults.string(forKey: "serein.device-id") == nil {
             defaults.set(UUID().uuidString.lowercased(), forKey: "serein.device-id")
         }

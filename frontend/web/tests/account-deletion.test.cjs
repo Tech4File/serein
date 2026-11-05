@@ -8,7 +8,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 test('account deletion is authenticated, password-confirmed, and returns a cleared session', () => {
   const backend = read('backend/src/main.rs');
   assert.match(backend, /\.route\("\/api\/v1\/me", get\(me\)\.delete\(delete_account\)\)/);
-  assert.match(backend, /struct DeleteAccountInput \{ password: String \}/);
+  assert.match(backend, /struct\s+DeleteAccountInput\s*\{\s*password:\s*String\s*,?\s*\}/);
   assert.match(backend, /verify_password\(input\.password\.as_bytes\(\),&parsed\)/);
   assert.match(backend, /DELETE FROM accounts WHERE id=\$1/);
   assert.match(backend, /clear_session_cookie\(&mut response,state\.cookie_secure\)/);

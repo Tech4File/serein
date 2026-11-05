@@ -24,6 +24,12 @@ final class SereinTokens {
     static final int NOTICE_TEXT_DARK = 0xFFEDDAA5;
     static final int ACCENT_SOFT_LIGHT = 0xFFE3F4EF;
     static final int ACCENT_SOFT_DARK = 0xFF203B36;
+    static final int LOADING_BACKGROUND = 0xFF0D1915;
+    static final int LOADING_PANEL = 0xFF172A22;
+    static final int LOADING_PANEL_HIGHLIGHT = 0xFF1F3B2F;
+    static final int LOADING_ACCENT = 0xFFA8DFC6;
+    static final int LOADING_FOREGROUND = 0xFFF3FFF8;
+    static final int LOADING_MUTED = 0xFFB9D1C7;
     static final float FONT_SCALE_LARGE = 1.15f;
     static final float FONT_SCALE_EXTRA_LARGE = 1.3f;
     static final float MIN_FONT_SIZE_SP = 12f;
@@ -35,4 +41,5 @@ final class SereinTokens {
     static final int PROFILE_PANEL_MAX_WIDTH_DP = 440;
     static final int DIALOG_RADIUS_DP = 20;
     static final int MOTION_DURATION_MS = 240;
+    static final int LOADING_CURTAIN_DURATION_MS = 540;
 }
