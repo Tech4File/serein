@@ -5,6 +5,12 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '../../..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
+test('Android contact profile helper methods have explicit bodies so Java compilation reaches the UI logic', () => {
+  const conversation = read('apps/android/app/src/main/java/io/serein/chat/SereinConversationActivity.java');
+  assert.match(conversation, /private LinearLayout viewAllMediaTile\([^)]*\)\s*\{/);
+  assert.match(conversation, /private void showMediaLibrary\([^)]*\)\s*\{/);
+});
+
 test('Android declares adaptive launcher icons and compiles platform instrumentation APIs', () => {
   const manifest = read('apps/android/app/src/main/AndroidManifest.xml');
   const appBuild = read('apps/android/app/build.gradle');
