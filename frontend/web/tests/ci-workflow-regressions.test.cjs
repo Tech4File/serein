@@ -26,6 +26,7 @@ test('iOS simulator build uses installed SDK and does not block compilation on X
   const ci = read('.github/workflows/ci.yml');
   assert.match(ci, /Check preinstalled iOS simulator runtime/);
   assert.match(ci, /generic\/platform=iOS Simulator/);
+  assert.match(ci, /grep -Fxq 'Xcode 16\.3'/);
   assert.match(ci, /IOS_SIM_RUNTIME_AVAILABLE/);
   assert.doesNotMatch(ci, /xcodebuild\s+-downloadPlatform/);
   const adhoc = read('.github/workflows/ios-adhoc-test.yml');

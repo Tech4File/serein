@@ -1,7 +1,9 @@
 //! Shared Serein core for Rust services, WebAssembly clients, and native FFI.
-//! It includes validation primitives and a development-stage symmetric message
-//! ratchet. The ratchet is not yet a complete Double Ratchet and is not an
-//! independently reviewed production security claim.
+//! It includes validation primitives, a symmetric chain ratchet, and a separate
+//! development-stage X25519 Double Ratchet. Neither ratchet supplies an
+//! authenticated prekey/identity bootstrap or a complete, independently reviewed
+//! messaging protocol; callers must not treat these modules as production-ready
+//! identity authentication or post-compromise recovery without those layers.
 
 pub mod double_ratchet;
 pub mod ratchet;

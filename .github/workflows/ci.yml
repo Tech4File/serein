@@ -182,9 +182,8 @@ jobs:
 
   ios-simulator:
     needs: version-consistency
-    # The Xcode 16.4 x64 runner has repeatedly segfaulted inside xcodebuild before
-    # Swift compilation. Use the Apple-silicon macOS 15 runner and capture native
-    # diagnostics; do not treat a launcher crash as a successful simulator build.
+    # Xcode 16.4 segfaulted before Swift compilation on both x64 and Apple silicon.
+    # Trial the preinstalled Xcode 16.3 on macOS 15 and retain crash diagnostics.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -196,10 +195,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = "arm64"
-          test -d /Applications/Xcode_16.4.app/Contents/Developer
-          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          test -d /Applications/Xcode_16.3.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
           uname -a
-          xcodebuild -version
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.log"
+          grep -Fxq 'Xcode 16.3' "$RUNNER_TEMP/xcode-version.log"
           xcodebuild -showsdks
       - name: Check preinstalled iOS simulator runtime
         run: |

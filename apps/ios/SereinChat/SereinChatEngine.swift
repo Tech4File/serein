@@ -109,7 +109,7 @@ final class SereinChatEngine: ObservableObject {
             guard registration["fingerprint"] as? String == ownFingerprint else {
                 throw SereinDeviceCrypto.CryptoError.invalidPublicKey
             }
-            try await refreshPeerKeys()
+            try await refreshPeerKeysForSend()
             loadMessages()
             ready = true; status = peerStatus
             await retryPending()
@@ -177,6 +177,11 @@ final class SereinChatEngine: ObservableObject {
         status = peerStatus
     }
 
+    private func refreshPeerKeysForSend() async throws {
+        do { try await refreshPeerKeys() }
+        catch ChatError.deviceListChanged { try await refreshPeerKeys() }
+    }
+
     func sendText(_ input: String) async {
         guard !contact.isDeleted && !archived else { status = "This archived conversation is read-only."; return }
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -232,6 +237,8 @@ final class SereinChatEngine: ObservableObject {
 
     private func sendMessage(_ text: String, attachment: SereinEncryptedAttachment?) async throws {
         guard ready, let user = api.user, let device = api.currentDevice, let crypto, let local else { throw ChatError.deviceUnavailable }
+        try await refreshPeerKeysForSend()
+        guard !archived else { throw ChatError.contactUnavailable }
         let targets = try trustedTargets()
         let messageID = UUID().uuidString.lowercased(), createdAt = Self.timestamp()
         var envelopes: [[String: String]] = [], snapshots: [String: Data] = [], opened: [SereinLayeredRatchet] = []
@@ -403,6 +410,8 @@ final class SereinChatEngine: ObservableObject {
         do { contentKeyData = try SereinDeviceCrypto.randomData(count: 32); layer2ContentKeyData = try SereinDeviceCrypto.randomData(count: 32) } catch { status = error.localizedDescription; return }
         defer { contentKeyData.resetBytes(in: 0..<contentKeyData.count); layer2ContentKeyData.resetBytes(in: 0..<layer2ContentKeyData.count) }
         do {
+            try await refreshPeerKeysForSend()
+            guard !archived else { throw ChatError.contactUnavailable }
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
             guard let number = attributes[.size] as? NSNumber else { throw ChatError.fileUnavailable }
             let size = number.int64Value
@@ -581,7 +590,7 @@ final class SereinChatEngine: ObservableObject {
             case .deviceUnavailable: return "Protected device setup is not ready."
             case .contactUnavailable: return "This account is no longer an accepted contact."
             case .keyDirectoryMismatch: return "The authenticated device-key directory did not match this contact."
-            case .deviceListChanged: return "The signed-in contact-device list changed. Refresh Contacts and reopen this chat."
+            case .deviceListChanged: return "The signed-in device list is still changing. Retry shortly; changed pinned keys remain blocked."
             case .noRecipientDevices: return "No active recipient devices are available."
             case .fingerprintRequired: return "A recipient-device key changed or is not locally pinned; sending is blocked."
             case .fileUnavailable: return "The selected file is unavailable."

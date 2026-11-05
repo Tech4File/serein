@@ -11,6 +11,15 @@ test('Android contact profile helper methods have explicit bodies so Java compil
   assert.match(conversation, /private void showMediaLibrary\([^)]*\)\s*\{/);
 });
 
+test('Android Java sources import the referenced APIs and use the media tile return type', () => {
+  const conversation = read('apps/android/app/src/main/java/io/serein/chat/SereinConversationActivity.java');
+  const api = read('apps/android/app/src/main/java/io/serein/chat/SereinApi.java');
+  assert.ok(conversation.includes('import android.widget.FrameLayout;'));
+  assert.ok(conversation.includes('import java.nio.charset.StandardCharsets;'));
+  assert.ok(conversation.includes('LinearLayout viewAll=viewAllMediaTile('));
+  assert.ok(api.includes('import org.json.JSONArray;'));
+});
+
 test('Android declares adaptive launcher icons and compiles platform instrumentation APIs', () => {
   const manifest = read('apps/android/app/src/main/AndroidManifest.xml');
   const appBuild = read('apps/android/app/build.gradle');

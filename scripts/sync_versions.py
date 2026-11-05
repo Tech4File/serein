@@ -111,6 +111,24 @@ def main() -> int:
     if write(web_config, web_updated):
         changed.append("frontend/web/config.js")
 
+    # Keep the static client assets cache-busted whenever VERSION changes. This
+    # prevents a browser from mixing newly served HTML with a cached app.js,
+    # crypto module, or stylesheet after an update.
+    web_index = ROOT / "frontend/web/index.html"
+    index_text = web_index.read_text(encoding="utf-8")
+    asset_pattern = re.compile(
+        r'((?:href|src)=["\'])(?!https?://|//)([^"\'?#]+\.(?:css|js))'
+        r'(?:\?[^"\']*)?(["\'])',
+        re.IGNORECASE,
+    )
+    index_updated, asset_count = asset_pattern.subn(
+        lambda m: m.group(1) + m.group(2) + "?v=" + version + m.group(3), index_text
+    )
+    if asset_count == 0:
+        raise ValueError("Could not find local CSS/JavaScript assets in frontend/web/index.html")
+    if write(web_index, index_updated):
+        changed.append("frontend/web/index.html asset cache-busters")
+
     ios_project = ROOT / "apps/ios/SereinChat.xcodeproj/project.pbxproj"
     ios_text = ios_project.read_text(encoding="utf-8")
     ios_updated, full_count = re.subn(

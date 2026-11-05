@@ -109,10 +109,21 @@ final class SereinChatEngine {
                     int ratchetVersion=entry.optInt("ratchet_version",2);if(ratchetVersion!=2&&ratchetVersion!=3)throw new IllegalStateException("A contact device advertises an unsupported ratchet capability.");String trustedFingerprint=local.trustedFingerprint(contactId,id);int pinnedVersion=local.trustedRatchetVersion(contactId,id);boolean firstSeen=trustedFingerprint.isEmpty();if(firstSeen){local.trustFingerprint(contactId,id,fingerprint,ratchetVersion);trustedFingerprint=fingerprint;pinnedVersion=ratchetVersion;}boolean sameFingerprint=fingerprint.equals(trustedFingerprint);boolean capabilityAccepted=(pinnedVersion==2||pinnedVersion==3)&&ratchetVersion>=pinnedVersion;if(sameFingerprint&&capabilityAccepted&&ratchetVersion>pinnedVersion){local.trustFingerprint(contactId,id,fingerprint,ratchetVersion);pinnedVersion=ratchetVersion;}boolean trustedBundle=sameFingerprint&&capabilityAccepted;byte[] key=SereinDeviceCrypto.conversationKey(pair.getPrivate(),userId,deviceId,contactId,id,jwk);byte[] layer2Key=SereinDeviceCrypto.layer2ConversationKey(layer2Pair.getPrivate(),userId,deviceId,contactId,id,layer2Jwk);
                     next.put(id,new Peer(contactId,id,d.optString("name","Device"),fingerprint,jwk,layer2Jwk,key,layer2Key,ratchetVersion,trustedBundle));
                 }
-                if(publishedById.keySet().stream().anyMatch(id->{for(int i=0;i<active.length();i++)if(id.equals(active.optJSONObject(i)==null?"":active.optJSONObject(i).optString("id")))return false;return true;}))throw new IllegalStateException("The contact device list changed. Refresh Contacts and reopen this chat.");
+                if(publishedById.keySet().stream().anyMatch(id->{for(int i=0;i<active.length();i++)if(id.equals(active.optJSONObject(i)==null?"":active.optJSONObject(i).optString("id")))return false;return true;}))throw new IllegalStateException("The contact device list is still changing. Retry shortly; changed pinned keys remain blocked.");
                 synchronized(this){peers.clear();peers.putAll(next);}status=peerStatus();notifyUi();
             }catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
         });
+    }
+    private CompletableFuture<Void> refreshPeersForSend(){
+        CompletableFuture<Void> result=new CompletableFuture<>();
+        refreshPeers().whenComplete((ignored,error)->{
+            if(error==null){result.complete(null);return;}
+            Throwable cause=unwrap(error);
+            if(cause instanceof IllegalStateException&&"The contact device list is still changing. Retry shortly; changed pinned keys remain blocked.".equals(cause.getMessage())){
+                refreshPeers().whenComplete((retry,retryError)->{if(retryError==null)result.complete(null);else result.completeExceptionally(unwrap(retryError));});
+            }else result.completeExceptionally(cause);
+        });
+        return result;
     }
     private String peerStatus(){
         JSONArray active=contact.optJSONArray("devices");int total=active==null?0:active.length(),trusted=0; synchronized(this){for(Peer peer:peers.values())if(peer.trusted)trusted++;}
@@ -125,7 +136,7 @@ final class SereinChatEngine {
         if(!ready)return failed(new IllegalStateException("Protected device setup is not ready."));
         if(text==null||text.trim().isEmpty())return failed(new IllegalArgumentException("Message cannot be empty."));
         if(text.codePointCount(0,text.length())>4000)return failed(new IllegalArgumentException("Messages are limited to 4,000 characters."));
-        return CompletableFuture.supplyAsync(()->{
+        return refreshPeersForSend().thenComposeAsync(ignored->CompletableFuture.supplyAsync(()->{
             synchronized(ratchetLock){
                 Map<String,byte[]> snapshots=new HashMap<>();List<SereinRatchetSession> opened=new ArrayList<>();
                 try{
@@ -145,7 +156,7 @@ final class SereinChatEngine {
                 }catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
                 finally{for(byte[] snapshot:snapshots.values())Arrays.fill(snapshot,(byte)0);for(SereinRatchetSession session:opened)session.close();}
             }
-        }).thenComposeAsync(message->deliver(message));
+        })).thenComposeAsync(message->deliver(message));
     }
     private List<Peer> trustedTargets(){
         List<Peer> targets=new ArrayList<>();JSONArray active=contact.optJSONArray("devices");if(active==null)throw new IllegalStateException("Contact has no active devices.");
@@ -295,7 +306,7 @@ final class SereinChatEngine {
     CompletableFuture<Void> uploadAttachment(File source,String filename,String contentType){
         final String selectedName=filename==null?"attachment":filename;
         final String selectedType=contentType==null?"application/octet-stream":contentType;
-        return CompletableFuture.runAsync(()->{
+        return refreshPeersForSend().thenComposeAsync(ignored->CompletableFuture.runAsync(()->{
             byte[] contentKey=SereinDeviceCrypto.randomBytes(32),prefix=SereinDeviceCrypto.randomBytes(4),layer2ContentKey=SereinDeviceCrypto.randomBytes(32),layer2Prefix=SereinDeviceCrypto.randomBytes(4);String transferId=UUID.randomUUID().toString().toLowerCase(Locale.ROOT);boolean created=false,uploaded=false;
             try{
                 long size=source.length();if(size<0||size>MAX_CLEAR_BYTES)throw new IllegalArgumentException("This file exceeds the 64 MiB transfer limit.");
@@ -320,7 +331,7 @@ final class SereinChatEngine {
                 uploaded=true;JSONObject attachment=new JSONObject().put("transfer_id",transferId).put("filename",cleanFilename).put("content_type",safeContentType).put("size",size);sendMessage("📎 "+cleanFilename,attachment).join();
             }catch(Throwable error){if(created&&!uploaded)try{api.abortTransfer(transferId).join();}catch(Throwable ignored){}throw new java.util.concurrent.CompletionException(unwrap(error));}
             finally{Arrays.fill(contentKey,(byte)0);Arrays.fill(prefix,(byte)0);Arrays.fill(layer2ContentKey,(byte)0);Arrays.fill(layer2Prefix,(byte)0);}
-        });
+        }));
     }
 
     static String mimeType(Context context,Uri uri,String filename){String type=context.getContentResolver().getType(uri);if(type!=null&&!type.isEmpty())return type;String extension=MimeTypeMap.getFileExtensionFromUrl(filename);String guess=MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension==null?"":extension.toLowerCase(Locale.ROOT));return guess==null?"application/octet-stream":guess;}

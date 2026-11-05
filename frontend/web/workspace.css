@@ -217,3 +217,24 @@ dialog:not(.security-dialog) .dialog-head h2 { letter-spacing: -.025em; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* One readable scroll surface for the security dialog; keep device rows intact. */
+.security-dialog[open] { display: flex; flex-direction: column; overflow: hidden; }
+.security-dialog > .dialog-head, .security-dialog > .connection-actions { flex: 0 0 auto; }
+.security-dialog-body { min-width: 0; min-height: 0; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.security-dialog-body > .muted:first-child { margin-top: 2px; }
+.security-dialog .peer-key-controls { max-height: none; overflow: visible; }
+.peer-key-row { box-sizing: border-box; }
+.peer-key-summary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(92px, 38%); align-items: center; gap: 8px 12px; }
+.peer-key-summary b { min-width: 0; overflow-wrap: break-word; word-break: normal; }
+.peer-key-summary .peer-key-trusted, .peer-key-summary .peer-key-unverified { min-width: 0; max-width: none; white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 420px) {
+  .security-dialog { padding: 14px; }
+  .security-dialog .dialog-head { gap: 8px; }
+  .security-dialog .dialog-head h2 { font-size: 1.15rem; }
+  .security-banner { align-items: flex-start; gap: 8px; padding: 10px; }
+  .peer-key-summary { grid-template-columns: minmax(0, 1fr) minmax(76px, 37%); gap: 6px 8px; padding: 9px; }
+  .peer-key-summary b { font-size: .78rem; line-height: 1.35; }
+  .peer-key-summary .peer-key-trusted, .peer-key-summary .peer-key-unverified { font-size: .68rem; }
+  .peer-key-detail { padding-inline: 9px; }
+}

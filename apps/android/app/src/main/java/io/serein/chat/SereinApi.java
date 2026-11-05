@@ -3,6 +3,7 @@ package io.serein.chat;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;

@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 const pickerSource = fs.readFileSync(path.resolve(__dirname, '../gif-picker.js'), 'utf8');
 const html = fs.readFileSync(path.resolve(__dirname, '../index.html'), 'utf8');
+const app = fs.readFileSync(path.resolve(__dirname, '../app.js'), 'utf8');
 
 class FakeClassList {
   constructor() { this.values = new Set(); }
@@ -114,6 +115,11 @@ test('opening the GIF tab discovers categories, shows featured GIFs, and dispatc
   assert.equal(h.dispatched[0].type, 'serein:gif-selected');
   assert.equal(h.dispatched[0].detail.file.name, 'nekos-test-gif-id.gif');
   assert.equal(h.dispatched[0].detail.file.type, 'image/gif');
+});
+
+test('the selected provider GIF reaches the normal encrypted attachment uploader', () => {
+  assert.match(app, /window\.addEventListener\('serein:gif-selected',[\s\S]*?sendComposerFile\(event\.detail\.file\)/);
+  assert.match(app, /async function sendComposerFile\(file\)[\s\S]*?await encryptAndUploadAttachment\(file\)/);
 });
 
 test('typing searches dynamically after debounce; Enter and Search click use the same API route', async () => {

@@ -713,3 +713,32 @@ body.auth-visible .auth-card { flex: 0 0 auto; }
   .profile-page-view, .profile-latest-item, .profile-quick-actions .profile-action { transition: none !important; scroll-behavior: auto !important; }
 }
 .reduce-motion .profile-page-view, .reduce-motion .profile-latest-item, .reduce-motion .profile-quick-actions .profile-action { transition: none !important; scroll-behavior: auto !important; }
+
+/* Narrow GIF search rows must shrink the input before squeezing controls. */
+.gif-search { min-width: 0; }
+.gif-search-wrap { min-width: 0; }
+.gif-search-wrap input { min-width: 0; }
+.gif-search-button { min-width: 0; white-space: nowrap; }
+@media (max-width: 360px) {
+  .gif-search-button { padding-inline: 8px; font-size: .74rem; }
+  .gif-search-clear { width: 36px; min-width: 36px; }
+  .gif-search-wrap { gap: 6px; padding-inline: 8px; }
+}
+.security-dialog .peer-key-summary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(92px, 38%) auto; align-items: center; gap: 8px 12px; }
+.security-dialog .peer-key-summary b { min-width: 0; overflow-wrap: break-word; word-break: normal; }
+.security-dialog .peer-key-summary .peer-key-trusted, .security-dialog .peer-key-summary .peer-key-unverified { min-width: 0; max-width: none; white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 420px) {
+  .security-dialog { padding: 14px; }
+  .security-dialog .peer-key-summary { grid-template-columns: minmax(0, 1fr) minmax(76px, 37%) auto; gap: 6px 8px; padding: 9px; }
+  .security-dialog .peer-key-summary b { font-size: .78rem; line-height: 1.35; }
+  .security-dialog .peer-key-summary .peer-key-trusted, .security-dialog .peer-key-summary .peer-key-unverified { font-size: .68rem; }
+}
+/* Legacy rules assigned peer-key details a grid layout; the dialog card is one block row. */
+.security-dialog .peer-key-row { display: block; padding: 0; }
+.gif-search-button { width: auto; height: auto; }
+:root { scrollbar-color: color-mix(in srgb, var(--workspace-muted) 42%, transparent) transparent; scrollbar-width: thin; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 999px; background: color-mix(in srgb, var(--workspace-muted) 38%, transparent); background-clip: padding-box; }
+*::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--workspace-muted) 62%, transparent); background-clip: padding-box; }
+@media (max-width: 420px) { *::-webkit-scrollbar { width: 7px; height: 7px; } }

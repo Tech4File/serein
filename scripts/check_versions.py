@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync generated version mirrors, then fail fast on drift or unsafe tags."""
+"""Validate version mirrors and release-tag consistency without modifying files."""
 from __future__ import annotations
 
 import os
@@ -10,18 +10,6 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sync = subprocess.run(
-    [sys.executable, str(ROOT / "scripts/sync_versions.py")],
-    cwd=ROOT,
-    check=False,
-    capture_output=True,
-    text=True,
-)
-if sync.returncode:
-    sys.stderr.write(sync.stderr or sync.stdout)
-    sys.exit(sync.returncode)
-if sync.stdout.strip():
-    print(sync.stdout.strip())
 version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 match = re.fullmatch(
     r"(?P<base>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))"
@@ -60,6 +48,14 @@ web_config = (ROOT / "frontend/web/config.js").read_text(encoding="utf-8")
 web_version = re.search(r"version\s*:\s*[\"']([^\"']+)[\"']", web_config)
 if not web_version or web_version.group(1) != version:
     sys.exit(f"frontend/web/config.js version must match VERSION={version!r}")
+web_index = (ROOT / "frontend/web/index.html").read_text(encoding="utf-8")
+asset_refs = re.findall(
+    r'(?:href|src)=["\'](?!https?://|//)([^"\'?#]+\.(?:css|js))(?:\?([^"\']*))?["\']',
+    web_index,
+    re.IGNORECASE,
+)
+if not asset_refs or any(query != f"v={version}" for _, query in asset_refs):
+    sys.exit(f"frontend/web/index.html local CSS/JavaScript assets must use ?v={version}")
 
 core_src = (ROOT / "crates/serein-core/src/lib.rs").read_text(encoding="utf-8")
 if 'concat!(env!("CARGO_PKG_VERSION"), "\\0")' not in core_src:

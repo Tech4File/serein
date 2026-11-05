@@ -43,7 +43,7 @@ test('each open chat uses its own account UUID, device-key scope, local timeline
   assert.match(openContact, /catch\(error\)\{if\(state\.selected\?\.id!==contact\.id\)return/);
   assert.match(web, /state\.conversationKeys\.get\(`\$\{contact\.id\}:\$\{device\.id\}`\)/);
   assert.match(web, /state\.messages\[contact\.id\]/);
-  assert.match(web, /const contact=state\.contacts\.find\(item=>item\.devices\.some\(device=>device\.id===packet\.from\)\)/);
+  assert.match(web, /let contact=state\.contacts\.find\(item=>item\.devices\.some\(device=>device\.id===packet\.from\)\);\s*if\(!contact\)\{await refreshContacts\(\)/);
   assert.match(web, /content\.sender_user_id!==contact\.id[\s\S]*?content\.recipient_user_id!==state\.user\.id/);
   assert.match(androidEngine, /contactId=contact\.optString\("user_id"\)/);
   assert.match(androidEngine, /canonicalConversationId\(String first,String second\)/);

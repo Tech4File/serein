@@ -52,7 +52,7 @@ test('notification permission status refreshes after returning from system setti
   const web = read('frontend/web/app.js');
   const android = read('apps/android/app/src/main/java/io/serein/chat/MainActivity.java');
   const ios = read('apps/ios/SereinChat/SereinProductView.swift');
-  assert.match(web, /window\.addEventListener\('focus',syncNotificationControls\)/);
+  assert.match(web, /window\.addEventListener\('focus',\(\)=>\{syncNotificationControls\(\);markSelectedConversationViewed\(\);\}\)/);
   assert.match(android, /onResume\(\).*renderMain\("Settings"\)/);
   assert.match(ios, /onChange\(of: scenePhase\).*refreshNotificationStatus/s);
 });

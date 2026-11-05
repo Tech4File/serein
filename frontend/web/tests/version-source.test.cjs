@@ -14,6 +14,9 @@ test('VERSION is the sole editable product version; platform values are generate
     assert.match(read(manifest), /^version\.workspace = true$/m);
   }
   assert.match(read('frontend/web/config.js'), new RegExp(`version: "${escapedVersion}"`));
+  const assetRefs = [...read('frontend/web/index.html').matchAll(/(?:href|src)="([^"?#]+\.(?:css|js))(?:\?([^" ]*))?"/g)];
+  assert.ok(assetRefs.length > 0, 'the page references local CSS/JavaScript assets');
+  assert.ok(assetRefs.every(match => match[2] === `v=${version}`), 'all local app assets are cache-busted with VERSION');
   const iosProject = read('apps/ios/SereinChat.xcodeproj/project.pbxproj');
   assert.equal((iosProject.match(/INFOPLIST_KEY_SereinVersion = /g) || []).length, 2);
   assert.equal((iosProject.match(new RegExp(`INFOPLIST_KEY_SereinVersion = "${escapedVersion}"`, 'g')) || []).length, 2);

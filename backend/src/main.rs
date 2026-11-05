@@ -75,7 +75,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter(env::var("RUST_LOG").unwrap_or_else(|_| "serein_api=info,tower_http=info".into())).init();
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL is required");
     let db = PgPoolOptions::new().max_connections(20).connect(&database_url).await?;
-    initialize_schema(&db).await?;
+    if env::var("SEREIN_QA_SKIP_SCHEMA_INIT").as_deref() == Ok("1") {
+        warn!("QA-safe startup: skipping schema initialization; database schema must already be current");
+    } else {
+        initialize_schema(&db).await?;
+    }
     let cookie_secure = env::var("COOKIE_SECURE").map(|v| v != "false").unwrap_or(true);
     let allowed_origins = parse_web_origins(&env::var("ALLOWED_WEB_ORIGINS").unwrap_or_else(|_| "http://localhost:8080".into()))
         .map_err(std::io::Error::other)?;
@@ -84,6 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cors = CorsLayer::new().allow_origin(AllowOrigin::list(cors_origins)).allow_methods([Method::GET,Method::POST,Method::PUT,Method::DELETE,Method::OPTIONS]).allow_headers([header::CONTENT_TYPE,HeaderName::from_static("x-chunk-sha256")]).expose_headers([header::RETRY_AFTER,HeaderName::from_static("x-chunk-sha256")]).allow_credentials(true);
     let mailer = Arc::new(mail::Mailer::from_env().map_err(std::io::Error::other)?);
     info!(provider=mailer.provider_name(),"email delivery configuration loaded");
+    if env::var("SEREIN_QA_DISABLE_CLEANUP").as_deref() == Ok("1") {
+        warn!("QA-safe startup: background database cleanup disabled");
+    } else {
     let cleanup_db=db.clone();
     tokio::spawn(async move {
         let mut interval=tokio::time::interval(Duration::from_secs(60));
@@ -111,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+    }
     let state = AppState { peers: Arc::new(PeerMap::new()), db, mailer, cookie_secure, allowed_origins: Arc::new(allowed_origins) };
     let app = Router::new()
         .route("/healthz", get(healthz)).route("/api/v1/security/capabilities", get(security_capabilities)).route("/status", get(|| async { axum::response::Html(include_str!("../../frontend/web/status.html")) }))
@@ -815,7 +823,10 @@ async fn create_encrypted_transfer(State(state):State<AppState>,headers:HeaderMa
     // Serialize quota accounting for both participants, in a stable lock order.
     let mut quota_users=vec![ctx.user_id,input.recipient_user_id];quota_users.sort_unstable();quota_users.dedup();
     for user_id in quota_users{
-        if sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text),hashtext('encrypted-transfer-quota'))").bind(user_id.to_string()).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer quota check unavailable");}
+        if let Err(error)=sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text),hashtext('encrypted-transfer-quota'))").bind(user_id.to_string()).execute(&mut *tx).await{
+            warn!(error=%error,"encrypted transfer quota advisory lock failed");
+            let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer quota lock unavailable");
+        }
     }
     let recipient_verified=match sqlx::query_scalar::<_,bool>("SELECT email_verified FROM accounts WHERE id=$1").bind(input.recipient_user_id).fetch_optional(&mut *tx).await{Ok(Some(value))=>value,Ok(None)=>{let _=tx.rollback().await;return api_error(StatusCode::NOT_FOUND,"recipient account not found");},Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer service unavailable");}};
     if !recipient_verified{let _=tx.rollback().await;return api_error(StatusCode::FORBIDDEN,"recipient account is not verified");}
@@ -826,7 +837,7 @@ async fn create_encrypted_transfer(State(state):State<AppState>,headers:HeaderMa
         let contact=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM contacts WHERE owner_id=$1 AND contact_id=$2 AND deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE (owner_id=$1 AND blocked_user_id=$2) OR (owner_id=$2 AND blocked_user_id=$1))").bind(ctx.user_id).bind(input.recipient_user_id).fetch_optional(&mut *tx).await;
         if !matches!(contact,Ok(Some(true))){let _=tx.rollback().await;return api_error(StatusCode::FORBIDDEN,"recipient must be an accepted contact");}
     }
-    let mut active_devices=match sqlx::query_as::<_,(Uuid,Uuid)>("SELECT id,user_id FROM devices WHERE user_id IN ($1,$2) AND revoked_at IS NULL ORDER BY id FOR SHARE").bind(ctx.user_id).bind(input.recipient_user_id).fetch_all(&mut *tx).await{Ok(rows)=>rows,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer devices unavailable");}};
+    let mut active_devices=match sqlx::query_as::<_,(Uuid,Uuid)>("SELECT d.id,d.user_id FROM devices d WHERE d.user_id IN ($1,$2) AND d.revoked_at IS NULL AND EXISTS(SELECT 1 FROM auth_sessions s WHERE s.device_id=d.id AND s.user_id=d.user_id AND s.expires_at>now()) ORDER BY d.id FOR SHARE").bind(ctx.user_id).bind(input.recipient_user_id).fetch_all(&mut *tx).await{Ok(rows)=>rows,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer devices unavailable");}};
     // Transfer manifests are scoped to the sending session plus every active recipient device.
     // Other sender devices cannot silently inherit an in-progress transfer.
     active_devices.retain(|(device_id,user_id)|*user_id!=ctx.user_id||*device_id==ctx.device_id);
@@ -837,7 +848,7 @@ async fn create_encrypted_transfer(State(state):State<AppState>,headers:HeaderMa
     let expected=active_devices.iter().map(|(id,_)|*id).collect::<BTreeSet<_>>();
     if supplied!=expected{let _=tx.rollback().await;return api_error(StatusCode::BAD_REQUEST,"manifest must include the sending session and every active recipient device");}
     let usage=sqlx::query_as::<_,(i64,i64,i64,i64)>("SELECT (SELECT COALESCE(SUM(total_ciphertext_bytes),0) FROM encrypted_transfers WHERE expires_at>now() AND (sender_user_id=$1 OR recipient_user_id=$1)),(SELECT COALESCE(SUM(total_ciphertext_bytes),0) FROM encrypted_transfers WHERE expires_at>now() AND (sender_user_id=$2 OR recipient_user_id=$2)),(SELECT COUNT(*) FROM encrypted_transfers WHERE expires_at>now() AND (sender_user_id=$1 OR recipient_user_id=$1)),(SELECT COUNT(*) FROM encrypted_transfers WHERE expires_at>now() AND (sender_user_id=$2 OR recipient_user_id=$2))").bind(ctx.user_id).bind(input.recipient_user_id).fetch_one(&mut *tx).await;
-    let(usage_sender,usage_recipient,count_sender,count_recipient)=match usage{Ok(value)=>value,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer quota check unavailable");}};
+    let(usage_sender,usage_recipient,count_sender,count_recipient)=match usage{Ok(value)=>value,Err(error)=>{warn!(error=%error,"encrypted transfer quota usage query failed");let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"transfer quota usage unavailable");}};
     if usage_sender.saturating_add(input.total_ciphertext_bytes)>MAX_ACTIVE_TRANSFER_BYTES_PER_ACCOUNT
         ||usage_recipient.saturating_add(input.total_ciphertext_bytes)>MAX_ACTIVE_TRANSFER_BYTES_PER_ACCOUNT
         ||count_sender>=MAX_ACTIVE_TRANSFERS_PER_ACCOUNT||count_recipient>=MAX_ACTIVE_TRANSFERS_PER_ACCOUNT{

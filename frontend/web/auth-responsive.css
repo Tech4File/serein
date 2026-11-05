@@ -62,3 +62,8 @@
   .auth-card { width: 100%; }
   .auth-card input, .auth-card select { max-width: 100%; }
 }
+
+/* Keep short auth viewports scrollable without clipping the centered form. */
+html.auth-visible, body.auth-visible { overflow-x: clip; overflow-y: auto; }
+body.auth-visible #login, body.auth-visible .auth-main { box-sizing: border-box; min-height: 100svh; min-height: 100dvh; height: auto; }
+body.auth-visible .auth-card { flex: 0 0 auto; }

@@ -31,7 +31,8 @@ test('mobile core is cross-checked and native static-library builds are linked i
 });
 
 test('Android minimum-API instrumentation tests exercise backup, identity binding, and idempotent restore', () => {
-  assert.match(androidTest, /testV2RoundTripAndAccountBinding/);
+  assert.match(androidTest, /testV3RoundTripAndAccountBinding/);
+  assert.doesNotMatch(androidTest, /testV2RoundTripAndAccountBinding/);
   assert.match(androidTest, /testLocalRestoreMergeIsIdempotentAndKeepsExistingRows/);
   assert.match(androidTest, /testMalformedTimestampAndDuplicateBackupIdsAreRejected/);
 });

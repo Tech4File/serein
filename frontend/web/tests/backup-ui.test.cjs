@@ -9,8 +9,8 @@ test('web settings expose manual encrypted backup and restore controls with corr
   const required = ['createBackupOpen', 'restoreBackupOpen', 'backupStatus', 'backupDialog', 'backupForm', 'backupFileInput', 'backupPassword', 'backupDialogSubmit'];
   for (const id of required) assert.match(html, new RegExp(`id=["']${id}["']`), `missing backup UI control ${id}`);
   assert.match(html, /data-panel="storage"[\s\S]*?createBackupOpen[\s\S]*?restoreBackupOpen/);
-  const backupScript = html.indexOf('src="backup-crypto.js"');
-  const appScript = html.indexOf('src="app.js"');
+  const backupScript = html.indexOf('src="backup-crypto.js?v=');
+  const appScript = html.indexOf('src="app.js?v=');
   assert.ok(backupScript >= 0 && appScript > backupScript, 'backup crypto adapter must load before the application');
   assert.match(html, /\.srbk/);
   assert.match(html, /Automatic scheduling[\s\S]*?not wired yet/);
