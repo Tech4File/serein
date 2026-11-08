@@ -10,6 +10,7 @@ const css = read('frontend/web/experience.css');
 const app = read('frontend/web/app.js');
 const curtainCss = read('frontend/web/components/session-curtain.css');
 const curtainJs = read('frontend/web/components/session-curtain.js');
+const confirmDialog = read('frontend/web/components/confirm-dialog.js');
 const androidUi = read('apps/android/app/src/main/java/io/serein/chat/SereinUi.java');
 const androidMain = read('apps/android/app/src/main/java/io/serein/chat/MainActivity.java');
 const androidConversation = read('apps/android/app/src/main/java/io/serein/chat/SereinConversationActivity.java');
@@ -82,7 +83,8 @@ test('contact profile is a responsive pane/page and media filters preserve the r
 test('app automatically pins first-seen dual-key bundles while keeping restore and destructive actions explicit', () => {
   assert.match(html, /id="confirmDialog"[\s\S]*id="confirmDialogAccept"/);
   assert.match(css, /\.confirm-dialog\.is-danger/);
-  assert.match(app, /function askConfirmation\(/);
+  assert.match(app, /const askConfirmation = confirmationDialog\.ask/);
+  assert.match(confirmDialog, /function ask\(/);
   assert.match(app, /source:'app-first-use'/);
   assert.match(app, /fingerprintDeviceKeyBundle\(entry\.public_key,entry\.layer2_public_key\)/);
   assert.match(html, /first-use pinning is automatic/i);

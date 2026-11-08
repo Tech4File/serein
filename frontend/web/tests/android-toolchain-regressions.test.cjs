@@ -20,6 +20,15 @@ test('Android Java sources import the referenced APIs and use the media tile ret
   assert.ok(api.includes('import org.json.JSONArray;'));
 });
 
+test('Android media preview lambdas capture a final view and transfer cleanup avoids shadowed lambda names', () => {
+  const conversation = read('apps/android/app/src/main/java/io/serein/chat/SereinConversationActivity.java');
+  const engine = read('apps/android/app/src/main/java/io/serein/chat/SereinChatEngine.java');
+  assert.match(conversation, /final View previewContent=content/);
+  assert.match(conversation, /setOnDismissListener\(dialog->\{if\(previewContent instanceof android\.widget\.VideoView\)/);
+  assert.match(engine, /thenComposeAsync\(ignored->CompletableFuture\.runAsync/);
+  assert.match(engine, /catch\(Throwable abortError\)\{\}throw new java\.util\.concurrent\.CompletionException/);
+});
+
 test('Android declares adaptive launcher icons and compiles platform instrumentation APIs', () => {
   const manifest = read('apps/android/app/src/main/AndroidManifest.xml');
   const appBuild = read('apps/android/app/build.gradle');

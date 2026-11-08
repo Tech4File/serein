@@ -25,6 +25,8 @@ struct SereinContact: Decodable, Identifiable {
     let display_name: String
     let email_verified: Bool
     let online: Bool
+    let presence_visible: Bool?
+    let last_seen_at: String?
     let devices: [SereinDevice]
     let connected_at: String?
     let deleted: Bool?
@@ -308,6 +310,12 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         } catch { errorMessage = error.localizedDescription }
     }
     func contactsData() async throws -> Data { try await request("/api/v1/contacts") }
+    func refreshContactPresence() async {
+        do {
+            let data = try await request("/api/v1/contacts")
+            contacts = try JSONDecoder().decode([SereinContact].self, from: data)
+        } catch { /* Keep the last known presence snapshot if a transient refresh fails. */ }
+    }
     func requestBackupKey(accountID: String, username: String) async throws -> Data {
         guard let accountUUID = UUID(uuidString: accountID), let deviceUUID = UUID(uuidString: deviceID) else {
             throw NSError(domain: "SereinBackupKey", code: 1, userInfo: [NSLocalizedDescriptionKey: "Signed-in account or device identity is unavailable."])

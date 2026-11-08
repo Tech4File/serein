@@ -283,7 +283,7 @@ private struct SereinNativeChats: View {
                                 SereinAvatar(name: contact.display_name, size: 42)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(contact.display_name).font(.system(size: 13, weight: .semibold, relativeTo: .body))
-                                    Text(contact.isDeleted ? "Deleted account · archived read-only chat" : "@\(contact.username) · \(contact.online ? "Online" : "Offline")").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
+                                    Text(contact.isDeleted ? "Deleted account · archived read-only chat" : "@\(contact.username)\(contact.presence_visible == false ? "" : " · \(contact.online ? "Online" : "Offline")")").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
                                 }
                                 Spacer()
                                 if !contact.isDeleted { Text("\(contact.devices.count) devices").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.tertiary) }
@@ -756,6 +756,14 @@ private struct SereinNativeConversation: View {
 
     private var outgoingBubble: Color { colorScheme == .dark ? Color(red: 0.02, green: 0.36, blue: 0.32) : Color(red: 0.84, green: 0.96, blue: 0.87) }
     private var incomingBubble: Color { colorScheme == .dark ? Color(uiColor: .secondarySystemBackground) : Color.white }
+    private var livePresenceContact: SereinContact { api.contacts.first(where: { $0.user_id == contact.user_id }) ?? contact }
+    private var presenceSummary: String {
+        if contact.isDeleted || engine.archived { return "Archived · read only" }
+        guard livePresenceContact.presence_visible != false else { return "" }
+        if livePresenceContact.online { return "Online now" }
+        guard let raw = livePresenceContact.last_seen_at, let date = ISO8601DateFormatter().date(from: raw) else { return "Offline" }
+        return "Last seen " + date.formatted(date: .abbreviated, time: .shortened)
+    }
     private var securitySummary: String {
         if contact.isDeleted || engine.archived { return "Archived · read only" }
         guard engine.ready else { return "Preparing secure messaging…" }
@@ -850,6 +858,14 @@ private struct SereinNativeConversation: View {
         .animation(.easeOut(duration: 0.18), value: showEmojiPicker)
         .navigationTitle(engine.peerDisplayName).navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text(engine.peerDisplayName).font(.system(size: 15, weight: .semibold, relativeTo: .body)).lineLimit(1)
+                    if livePresenceContact.presence_visible != false || contact.isDeleted || engine.archived {
+                        Text(presenceSummary).font(.system(size: 10, weight: livePresenceContact.online ? .semibold : .regular, relativeTo: .body)).foregroundStyle(livePresenceContact.online ? SereinPalette.green : Color.secondary).lineLimit(1)
+                    }
+                }.accessibilityElement(children: .combine)
+            }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button { showProfile = true } label: { Image(systemName: "info.circle") }.buttonStyle(SereinIconButtonStyle()).accessibilityLabel("Contact profile and shared media")
             }
@@ -863,6 +879,7 @@ private struct SereinNativeConversation: View {
             while !Task.isCancelled && !engine.archived {
                 await engine.poll(); cycles += 1
                 if cycles % 12 == 0 { try? await engine.refreshPeerKeys() }
+                if cycles % 6 == 0 { await api.refreshContactPresence() }
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }

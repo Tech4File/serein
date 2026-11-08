@@ -106,7 +106,7 @@ test('recipient key pins and exact transfer manifests remain fail-closed with ac
   assert.match(app, /previousFingerprint===fingerprint&&\[2,3\]\.includes\(previousRatchetVersion\)&&ratchetVersion>=previousRatchetVersion/);
   assert.match(app, /recipient device key changed or its ratchet capability was downgraded\. Sending remains blocked by the local pin/);
   assert.match(app, /Recipient devices changed again while preparing the encrypted upload\. No transfer was created/);
-  assert.match(backend, /SELECT d\.id,d\.user_id FROM devices d WHERE d\.user_id IN \(\$1,\$2\) AND d\.revoked_at IS NULL AND EXISTS\(SELECT 1 FROM auth_sessions s WHERE s\.device_id=d\.id AND s\.user_id=d\.user_id AND s\.expires_at>now\(\)\)/);
+  assert.match(backend, /SELECT d\.id,d\.user_id FROM devices d WHERE d\.user_id IN \(\$1,\$2\) AND d\.revoked_at IS NULL AND EXISTS\(SELECT 1 FROM auth_sessions s WHERE s\.device_id=d\.id AND s\.user_id=d\.user_id AND s\.expires_at>now\(\)\)\s+ORDER BY d\.id FOR SHARE/);
   assert.match(backend, /if supplied!=expected\{[\s\S]*?manifest must include the sending session and every active recipient device/);
   assert.match(backend, /encrypted transfer quota advisory lock failed/);
   assert.match(backend, /encrypted transfer quota usage query failed/);

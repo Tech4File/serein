@@ -16,10 +16,12 @@ test('mobile back leaves the conversation instead of keeping a stale selected co
 });
 
 test('unread state and in-app sound depend on the visible foreground conversation, not only selection', () => {
-  assert.match(app, /function isConversationActivelyViewed\(contactId\)\{return !!contactId&&document\.visibilityState==='visible'&&state\.selected\?\.id===contactId&&!\$\('app'\)\.classList\.contains\('hidden'\)&&!\$\('conversation'\)\.classList\.contains\('hidden'\);\}/);
+  assert.match(app, /function isConversationActivelyViewed\(contactId\)\{return !!contactId&&document\.visibilityState==='visible'&&document\.hasFocus\?\.\(\)!==false&&state\.selected\?\.id===contactId&&!\$\('app'\)\.classList\.contains\('hidden'\)&&!\$\('conversation'\)\.classList\.contains\('hidden'\);\}/);
   const notify = app.slice(app.indexOf('function notifyIncomingMessage('), app.indexOf('function loadTheme('));
-  assert.match(notify, /viewed=isConversationActivelyViewed\(contact\.id\)/);
-  assert.match(notify, /state\.settings\.notification_sound&&!viewed\)playIncomingTone\(\)/);
+  assert.match(notify, /if\(isConversationActivelyViewed\(contact\.id\)\)return/);
+  assert.match(notify, /pageActive=document\.visibilityState==='visible'&&document\.hasFocus\?\.\(\)!==false/);
+  assert.match(notify, /if\(pageActive&&state\.settings\.notification_sound\)playIncomingTone\(\)/);
+  assert.match(notify, /state\.settings\.notifications&&'Notification'in window&&Notification\.permission==='granted'/);
   const process = app.slice(app.indexOf('async function processPacket('), app.indexOf('async function handlePacket('));
   assert.match(process, /if\(isConversationActivelyViewed\(contact\.id\)\)contact\.unread=0;else\{contact\.unread\+\+;/);
   assert.match(process, /if\(isConversationActivelyViewed\(contact\.id\)\)await markMessageRead\(packet\.id\)/);

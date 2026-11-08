@@ -329,7 +329,7 @@ final class SereinChatEngine {
                     if(input.read()!=-1)throw new java.io.IOException("Selected file changed while being encrypted.");
                 }finally{Arrays.fill(buffer,(byte)0);}
                 uploaded=true;JSONObject attachment=new JSONObject().put("transfer_id",transferId).put("filename",cleanFilename).put("content_type",safeContentType).put("size",size);sendMessage("📎 "+cleanFilename,attachment).join();
-            }catch(Throwable error){if(created&&!uploaded)try{api.abortTransfer(transferId).join();}catch(Throwable ignored){}throw new java.util.concurrent.CompletionException(unwrap(error));}
+            }catch(Throwable error){if(created&&!uploaded)try{api.abortTransfer(transferId).join();}catch(Throwable abortError){}throw new java.util.concurrent.CompletionException(unwrap(error));}
             finally{Arrays.fill(contentKey,(byte)0);Arrays.fill(prefix,(byte)0);Arrays.fill(layer2ContentKey,(byte)0);Arrays.fill(layer2Prefix,(byte)0);}
         }));
     }
