@@ -45,6 +45,7 @@ struct SereinChatMessage: Identifiable {
     let deliveredCount: Int
     let readCount: Int
     let attachment: SereinEncryptedAttachment?
+    let isSystem: Bool
 }
 
 struct SereinPeerKey: Identifiable {
@@ -67,6 +68,12 @@ final class SereinChatEngine: ObservableObject {
     @Published private(set) var messages: [SereinChatMessage] = []
     @Published private(set) var peerKeys: [SereinPeerKey] = []
     @Published private(set) var status = "Preparing protected device keys…"
+    @Published private(set) var historySyncRequests:[[String:Any]]=[]
+    @Published private(set) var mainDeviceID:String?=nil
+    @Published private(set) var mainDevicePlatform:String?=nil
+    @Published private(set) var mainDeviceOnline=false
+    @Published private(set) var currentDevicePlatform:String?=nil
+    @Published private(set) var preferredMobileDeviceID:String?=nil
     @Published private(set) var ready = false
     @Published private(set) var busy = false
     @Published private(set) var activeDevices: [SereinDevice] = []
@@ -80,11 +87,18 @@ final class SereinChatEngine: ObservableObject {
     private var layer2Crypto: SereinDeviceCrypto?
     private var local: SereinLocalStore?
     private var ownFingerprint = ""
+    private var keyEpoch = 1
     private var cursorTime: String?
     private var cursorID: String?
     private var readMarkedIDs = Set<String>()
     private var lastReceiptRefresh = Date.distantPast
+    private var lastExpiryRefresh = Date.distantPast
+    private var expiryCursorTime: String?
+    private var expiryCursorID: String?
     private var pollRunning = false
+    private var pendingRetryRunning = false
+    private var nextPendingRetryAt = Date.distantPast
+    private let pendingRetryInterval: TimeInterval = 30
     private var notificationsArmed = false
     private let chunkCipherBytes = 256 * 1024
     private let chunkClearBytes = 256 * 1024 - 32
@@ -100,19 +114,23 @@ final class SereinChatEngine: ObservableObject {
             SereinAttachmentStore.shared.cleanTemporaryFiles()
             let deviceCrypto = try SereinDeviceCrypto.loadOrCreate(userID: user.id, deviceID: device.id)
             let deviceLayer2Crypto = try SereinDeviceCrypto.loadOrCreateLayer2(userID: user.id, deviceID: device.id)
+            let signingKey = try SereinDeviceCrypto.loadOrCreateSigning(userID:user.id,deviceID:device.id)
             let localStore = try SereinLocalStore(accountID: user.id)
             crypto = deviceCrypto; layer2Crypto = deviceLayer2Crypto; local = localStore
+            let expiryCursor=localStore.metadata("expiryCursor:\(contact.user_id)");expiryCursorTime=expiryCursor?["after_created_at"] as? String;expiryCursorID=expiryCursor?["after_id"] as? String
             if contact.isDeleted { loadMessages(); ready = true; status = "Archived conversation · this account was deleted · read-only"; return }
             ownFingerprint = try SereinDeviceCrypto.fingerprintBundle(layer1: deviceCrypto.publicJWK(), layer2: deviceLayer2Crypto.publicJWK())
             let ratchetVersion = SereinCoreBridge.version == "unavailable" ? 2 : 3
-            let registration = try await api.registerDeviceKey(deviceCrypto.publicJWK(), layer2PublicJWK: deviceLayer2Crypto.publicJWK(), ratchetVersion: ratchetVersion)
+            let signingJWK=SereinDeviceCrypto.signingPublicJWK(signingKey),rotationTimestamp=Int(Date().timeIntervalSince1970);let proof=try SereinDeviceCrypto.signDeviceKeyRotation(signingKey,userID:user.id,deviceID:device.id,oldFingerprint:"",newFingerprint:ownFingerprint,timestamp:rotationTimestamp,epoch:1)
+            let registration = try await api.registerDeviceKey(deviceCrypto.publicJWK(), layer2PublicJWK: deviceLayer2Crypto.publicJWK(), signingPublicJWK:signingJWK, rotationProof:proof, rotationTimestamp:rotationTimestamp, keyEpoch:1, ratchetVersion: ratchetVersion)
+            keyEpoch=registration["key_epoch"] as? Int ?? 1
             guard registration["fingerprint"] as? String == ownFingerprint else {
                 throw SereinDeviceCrypto.CryptoError.invalidPublicKey
             }
             try await refreshPeerKeysForSend()
             loadMessages()
             ready = true; status = peerStatus
-            await retryPending()
+            await retryPendingIfNeeded(force: true)
             await poll()
             notificationsArmed = true
         } catch { status = error.localizedDescription }
@@ -123,6 +141,25 @@ final class SereinChatEngine: ObservableObject {
         if peerKeys.count < activeDevices.count { return "\(activeDevices.count - peerKeys.count) active device(s) have not published a key." }
         let trusted = peerKeys.filter(\.trusted).count
         return trusted == activeDevices.count ? "All \(trusted) recipient-device key bundles are app-checked and locally pinned." : "\(activeDevices.count - trusted) recipient-device key changes or capability downgrades are blocked."
+    }
+
+    func rotateDeviceKeys() async throws {
+        guard let user=api.user,let device=api.currentDevice,let oldLayer1=crypto,let oldLayer2=layer2Crypto else{throw ChatError.deviceUnavailable}
+        let oldFingerprint=ownFingerprint,nextEpoch=keyEpoch+1,timestamp=Int(Date().timeIntervalSince1970)
+        let staged1=try SereinDeviceCrypto.stageRotatedKey(userID:user.id,deviceID:device.id,layer2:false,epoch:keyEpoch)
+        let staged2: (SereinDeviceCrypto,Data?)
+        do { staged2=try SereinDeviceCrypto.stageRotatedKey(userID:user.id,deviceID:device.id,layer2:true,epoch:keyEpoch) }
+        catch { try? SereinDeviceCrypto.restoreKeyMaterial(staged1.1,userID:user.id,deviceID:device.id,layer2:false);throw error }
+        do {
+            let nextFingerprint=try SereinDeviceCrypto.fingerprintBundle(layer1:staged1.0.publicJWK(),layer2:staged2.0.publicJWK()),signing=try SereinDeviceCrypto.loadOrCreateSigning(userID:user.id,deviceID:device.id),signingJWK=SereinDeviceCrypto.signingPublicJWK(signing),proof=try SereinDeviceCrypto.signDeviceKeyRotation(signing,userID:user.id,deviceID:device.id,oldFingerprint:oldFingerprint,newFingerprint:nextFingerprint,timestamp:timestamp,epoch:nextEpoch)
+            let response=try await api.registerDeviceKey(staged1.0.publicJWK(),layer2PublicJWK:staged2.0.publicJWK(),signingPublicJWK:signingJWK,rotationProof:proof,rotationTimestamp:timestamp,keyEpoch:nextEpoch,ratchetVersion:3)
+            guard response["fingerprint"] as? String==nextFingerprint,response["key_epoch"] as? Int==nextEpoch else{throw ChatError.keyDirectoryMismatch}
+            crypto=staged1.0;layer2Crypto=staged2.0;ownFingerprint=nextFingerprint;keyEpoch=nextEpoch;peerKeys=[];try await refreshPeerKeys()
+        } catch {
+            try? SereinDeviceCrypto.restoreKeyMaterial(staged1.1,userID:user.id,deviceID:device.id,layer2:false)
+            try? SereinDeviceCrypto.restoreKeyMaterial(staged2.1,userID:user.id,deviceID:device.id,layer2:true)
+            crypto=oldLayer1;layer2Crypto=oldLayer2;throw error
+        }
     }
 
     func refreshPeerKeys() async throws {
@@ -160,23 +197,62 @@ final class SereinChatEngine: ObservableObject {
             guard ratchetVersion == 2 || ratchetVersion == 3 else { throw ChatError.keyDirectoryMismatch }
             var old = local?.previousFingerprint(userID: contact.user_id, deviceID: target.id) ?? ""
             var oldVersion = local?.previousRatchetVersion(userID: contact.user_id, deviceID: target.id) ?? 2
-            let firstSeen = old.isEmpty
-            if firstSeen { try local?.trust(userID: contact.user_id, deviceID: target.id, fingerprint: fingerprint, ratchetVersion: ratchetVersion); old = fingerprint; oldVersion = ratchetVersion }
-            let sameFingerprint = old == fingerprint
-            let capabilityAccepted = (2...3).contains(oldVersion) && ratchetVersion >= oldVersion
-            if sameFingerprint && capabilityAccepted && ratchetVersion > oldVersion {
-                try local?.trust(userID: contact.user_id, deviceID: target.id, fingerprint: fingerprint, ratchetVersion: ratchetVersion)
-                oldVersion = ratchetVersion
+            let firstSeen = old.isEmpty,signingJWK=entry["signing_public_key"] as? [String:Any],keyEpoch=entry["key_epoch"] as? Int ?? 1
+            let pinnedSigner=local?.previousSigningPublicKey(userID:contact.user_id,deviceID:target.id),pinnedEpoch=local?.previousKeyEpoch(userID:contact.user_id,deviceID:target.id) ?? 0
+            let signerMatches:Bool = { guard let signingJWK else{return pinnedSigner == nil};guard let pinnedSigner else{return true};return signingJWK["x"] as? String == pinnedSigner["x"] as? String && signingJWK["y"] as? String == pinnedSigner["y"] as? String }()
+            let sameFingerprint=old==fingerprint,capabilityAccepted=(2...3).contains(oldVersion)&&ratchetVersion>=oldVersion
+            let legacyBootstrapAccepted:Bool = { guard !firstSeen,sameFingerprint,pinnedSigner==nil,let signingJWK else{return true};guard let proof=entry["rotation_proof"] as? String else{return false};return SereinDeviceCrypto.verifyDeviceKeyRotation(signingJWK:signingJWK,userID:contact.user_id,deviceID:target.id,oldFingerprint:"",newFingerprint:fingerprint,timestamp:entry["rotation_timestamp"] as? Int ?? 0,epoch:1,proof:proof) }()
+            var continuityAccepted=false
+            if !firstSeen && !sameFingerprint && signerMatches,let pinnedSigner,pinnedEpoch>0 {
+                var expectedFingerprint=old,expectedEpoch=pinnedEpoch
+                for step in (entry["rotation_chain"] as? [[String:Any]] ?? []).sorted(by:{($0["key_epoch"] as? Int ?? 0)<($1["key_epoch"] as? Int ?? 0)}) where ($0["key_epoch"] as? Int ?? 0)>pinnedEpoch {
+                    guard let epoch=step["key_epoch"] as? Int,epoch==expectedEpoch+1,let oldValue=step["old_fingerprint"] as? String,oldValue==expectedFingerprint,let newValue=step["new_fingerprint"] as? String,let proof=step["proof"] as? String,SereinDeviceCrypto.verifyDeviceKeyRotation(signingJWK:pinnedSigner,userID:contact.user_id,deviceID:target.id,oldFingerprint:oldValue,newFingerprint:newValue,timestamp:step["timestamp"] as? Int ?? 0,epoch:epoch,proof:proof) else { continuityAccepted=false;break }
+                    expectedEpoch=epoch;expectedFingerprint=newValue;continuityAccepted=expectedEpoch==keyEpoch&&expectedFingerprint==fingerprint
+                }
             }
+            let trustedBundle=firstSeen||(sameFingerprint&&capabilityAccepted&&signerMatches&&legacyBootstrapAccepted)||(continuityAccepted&&capabilityAccepted)
+            if firstSeen { try local?.trust(userID:contact.user_id,deviceID:target.id,fingerprint:fingerprint,ratchetVersion:ratchetVersion,keyEpoch:keyEpoch,signingPublicJWK:signingJWK);old=fingerprint;oldVersion=ratchetVersion }
+            else if trustedBundle { try local?.trust(userID:contact.user_id,deviceID:target.id,fingerprint:fingerprint,ratchetVersion:ratchetVersion,keyEpoch:keyEpoch,signingPublicJWK:pinnedSigner ?? signingJWK);old=fingerprint;oldVersion=ratchetVersion }
             next.append(SereinPeerKey(id: target.id, name: target.name, fingerprint: fingerprint, previousFingerprint: firstSeen ? "" : old,
                 ratchetVersion: ratchetVersion, previousRatchetVersion: oldVersion, publicJWK: jwk, layer2PublicJWK: layer2JWK,
-                trusted: sameFingerprint && capabilityAccepted, key: key, layer2Key: layer2Key))
+                trusted: trustedBundle, key: key, layer2Key: layer2Key))
         }
         activeDevices = latestDevices
         peerKeys = next
         status = peerStatus
     }
 
+    func refreshHistorySync() async {
+        do { let directory=try await api.ownDeviceKeyDirectory();mainDeviceID=directory["main_device_id"] as? String;mainDevicePlatform=directory["main_device_platform"] as? String;mainDeviceOnline=directory["main_device_online"] as? Bool ?? false;currentDevicePlatform=directory["current_device_platform"] as? String;preferredMobileDeviceID=directory["preferred_mobile_device_id"] as? String;historySyncRequests=try await api.historySyncRequests() }
+        catch { status="History sync unavailable: \(error.localizedDescription)" }
+    }
+    func requestHistorySync() async throws { _=try await api.createHistorySyncRequest();await refreshHistorySync() }
+    func promoteCurrentDeviceToMain() async throws { try await api.promoteCurrentDeviceToMain();await refreshHistorySync() }
+    private func pinOwnSyncDevice(_ entry:[String:Any])throws->[String:Any] {
+        guard let user=api.user,let deviceID=entry["device_id"] as? String,let layer1=entry["public_key"] as? [String:Any],let layer2=entry["layer2_public_key"] as? [String:Any] else{throw ChatError.keyDirectoryMismatch}
+        let fingerprint=try SereinDeviceCrypto.fingerprintBundle(layer1:layer1,layer2:layer2);guard fingerprint==entry["fingerprint"] as? String else{throw ChatError.keyDirectoryMismatch}
+        let pin=local?.previousFingerprint(userID:user.id,deviceID:deviceID) ?? "",signing=entry["signing_public_key"] as? [String:Any],pinnedSigner=local?.previousSigningPublicKey(userID:user.id,deviceID:deviceID),epoch=entry["key_epoch"] as? Int ?? 1,pinnedEpoch=local?.previousKeyEpoch(userID:user.id,deviceID:deviceID) ?? 0,first=pin.isEmpty,same=pin==fingerprint
+        let signerMatches:Bool={guard let signing else{return pinnedSigner==nil};guard let pinnedSigner else{return true};return signing["x"] as? String==pinnedSigner["x"] as? String && signing["y"] as? String==pinnedSigner["y"] as? String}()
+        let bootstrap:Bool={guard !first,same,pinnedSigner==nil,let signing,let proof=entry["rotation_proof"] as? String else{return true};return SereinDeviceCrypto.verifyDeviceKeyRotation(signingJWK:signing,userID:user.id,deviceID:deviceID,oldFingerprint:"",newFingerprint:fingerprint,timestamp:entry["rotation_timestamp"] as? Int ?? 0,epoch:1,proof:proof)}()
+        var accepted=first||(same&&signerMatches&&bootstrap)
+        if !first && !same && signerMatches,let pinnedSigner,pinnedEpoch>0 {var expected=pin,expectedEpoch=pinnedEpoch;for step in (entry["rotation_chain"] as? [[String:Any]] ?? []).sorted(by:{($0["key_epoch"] as? Int ?? 0)<($1["key_epoch"] as? Int ?? 0)}) where ($0["key_epoch"] as? Int ?? 0)>pinnedEpoch {guard let next=step["key_epoch"] as? Int,next==expectedEpoch+1,let old=step["old_fingerprint"] as? String,old==expected,let new=step["new_fingerprint"] as? String,let proof=step["proof"] as? String,SereinDeviceCrypto.verifyDeviceKeyRotation(signingJWK:pinnedSigner,userID:user.id,deviceID:deviceID,oldFingerprint:old,newFingerprint:new,timestamp:step["timestamp"] as? Int ?? 0,epoch:next,proof:proof) else{accepted=false;break};expected=new;expectedEpoch=next;accepted=expected==fingerprint&&expectedEpoch==epoch}}
+        guard accepted else{throw ChatError.keyDirectoryMismatch};let version=entry["ratchet_version"] as? Int ?? 2;if version < (local?.previousRatchetVersion(userID:user.id,deviceID:deviceID) ?? 2){throw ChatError.keyDirectoryMismatch};try local?.trust(userID:user.id,deviceID:deviceID,fingerprint:fingerprint,ratchetVersion:version,keyEpoch:epoch,signingPublicJWK:pinnedSigner ?? signing);return entry
+    }
+    private func normalizedHistoryMessages()throws->[[String:Any]] {
+        guard let local else{throw ChatError.deviceUnavailable};let rows=local.allMessages();guard rows.count<=100_000 else{throw ChatError.historyUnavailable};var result=[[String:Any]]();result.reserveCapacity(rows.count);for var row in rows {guard let id=row["id"] as? String,!id.isEmpty,id.utf8.count<=128,let conversation=row["conversation_id"] as? String,UUID(uuidString:conversation) != nil,let created=row["created_at"] as? String,SereinLocalStore.validHistoryTimestamp(created),let status=row["status"] as? String,["pending","accepted","sent","delivered","read","received","expired"].contains(status) else{throw ChatError.historyUnavailable};for key in ["id","conversation_id","created_at","status","envelopes","receipt","recipient_count","delivered_count","read_count"]{row.removeValue(forKey:key)};result.append(["id":id,"conversation_id":conversation,"created_at":created,"status":status,"payload":row])};return result
+    }
+    func sendHistorySync(_ request:[String:Any]) async throws {
+        guard let user=api.user,let device=api.currentDevice,let crypto else{throw ChatError.deviceUnavailable};let requestID=request["id"] as? String ?? "",childID=request["child_device_id"] as? String ?? "",directory=try await api.ownDeviceKeyDirectory();guard directory["main_device_id"] as? String==device.id else{throw ChatError.keyDirectoryMismatch};guard let child=(directory["devices"] as? [[String:Any]])?.first(where:{$0["device_id"] as? String==childID}) else{throw ChatError.deviceListChanged};_ = try pinOwnSyncDevice(child)
+        let records=try normalizedHistoryMessages();var batches=[[ [String:Any] ]](),current=[[String:Any]]();for row in records {current.append(row);let size=(try JSONSerialization.data(withJSONObject:current)).count;if size>300*1024{current.removeLast();if current.isEmpty{throw ChatError.historyUnavailable};batches.append(current);current=[row]}};if !current.isEmpty||batches.isEmpty{batches.append(current)};guard batches.count<=128 else{throw ChatError.historyUnavailable};let count=batches.count
+        for (index,rows) in batches.enumerated(){let payload:[String:Any]=["schema_version":1,"account_id":user.id,"main_device_id":device.id,"child_device_id":childID,"request_id":requestID,"batch_index":index,"batch_count":count,"messages":rows],clear=try JSONSerialization.data(withJSONObject:payload),key=try crypto.deriveHistorySyncKey(accountID:user.id,localDeviceID:device.id,peerDeviceID:childID,peerJWK:child["public_key"] as? [String:Any] ?? [:],mainDeviceID:device.id,childDeviceID:childID,requestID:requestID,index:index,count:count);let envelope=try crypto.encryptHistorySyncBatch(clear,key:key,accountID:user.id,mainDeviceID:device.id,childDeviceID:childID,requestID:requestID,index:index,count:count),canonical=try JSONSerialization.data(withJSONObject:envelope,options:[.sortedKeys]),ciphertext=String(data:canonical,encoding:.utf8) ?? "",digest=try SereinDeviceCrypto.historySyncDigest(envelope);try await api.putHistorySyncBatch(requestID,values:["batch_index":index,"batch_count":count,"ciphertext_json":ciphertext,"digest":digest])}
+        await refreshHistorySync()
+    }
+    func receiveHistorySync(_ request:[String:Any]) async throws -> Int {
+        guard let user=api.user,let device=api.currentDevice,let crypto,let local else{throw ChatError.deviceUnavailable};let requestID=request["id"] as? String ?? "",mainID=request["main_device_id"] as? String ?? "",directory=try await api.ownDeviceKeyDirectory();guard directory["main_device_id"] as? String==mainID,let main=(directory["devices"] as? [[String:Any]])?.first(where:{$0["device_id"] as? String==mainID}) else{throw ChatError.keyDirectoryMismatch};_ = try pinOwnSyncDevice(main);let response=try await api.historySyncBatches(requestID);guard response["status"] as? String=="ready",let count=response["batch_count"] as? Int,(1...128).contains(count),let batches=response["batches"] as? [[String:Any]],batches.count==count else{throw ChatError.historyUnavailable};var records=[[String:Any]]()
+        for (index,batch) in batches.enumerated(){guard batch["batch_index"] as? Int==index,batch["batch_count"] as? Int==count,let envelope=batch["ciphertext"] as? [String:Any],try SereinDeviceCrypto.historySyncDigest(envelope)==batch["digest"] as? String else{throw ChatError.keyDirectoryMismatch};let key=try crypto.deriveHistorySyncKey(accountID:user.id,localDeviceID:device.id,peerDeviceID:mainID,peerJWK:main["public_key"] as? [String:Any] ?? [:],mainDeviceID:mainID,childDeviceID:device.id,requestID:requestID,index:index,count:count),clear=try crypto.decryptHistorySyncBatch(envelope,key:key,accountID:user.id,mainDeviceID:mainID,childDeviceID:device.id,requestID:requestID,index:index,count:count),payload=try JSONSerialization.jsonObject(with:clear) as? [String:Any];guard payload?["schema_version"] as? Int==1,payload?["account_id"] as? String==user.id,payload?["main_device_id"] as? String==mainID,payload?["child_device_id"] as? String==device.id,payload?["request_id"] as? String==requestID,payload?["batch_index"] as? Int==index,payload?["batch_count"] as? Int==count,let items=payload?["messages"] as? [[String:Any]] else{throw ChatError.keyDirectoryMismatch};records.append(contentsOf:items)}
+        let added=try local.mergeHistorySyncMessages(records);try await api.acknowledgeHistorySync(requestID);await refreshHistorySync();loadMessages();return added
+    }
+    func cancelHistorySync(_ request:[String:Any]) async throws {guard let id=request["id"] as? String else{throw ChatError.historyUnavailable};try await api.cancelHistorySync(id);await refreshHistorySync()}
     private func refreshPeerKeysForSend() async throws {
         do { try await refreshPeerKeys() }
         catch ChatError.deviceListChanged { try await refreshPeerKeys() }
@@ -284,8 +360,11 @@ final class SereinChatEngine: ObservableObject {
         return result
     }
 
-    private func retryPending() async {
-        guard !archived, let local else { return }
+    func retryPendingIfNeeded(force: Bool = false) async {
+        guard !archived, let local, !pendingRetryRunning, force || Date() >= nextPendingRetryAt else { return }
+        pendingRetryRunning = true
+        nextPendingRetryAt = Date().addingTimeInterval(pendingRetryInterval)
+        defer { pendingRetryRunning = false }
         for var row in local.messages(for: contact.user_id) where row["mine"] as? Bool == true && row["status"] as? String == "pending" {
             guard let id = row["id"] as? String, let envelopes = row["envelopes"] as? [[String: String]] else { continue }
             do {
@@ -375,7 +454,34 @@ final class SereinChatEngine: ObservableObject {
                 if !ids.isEmpty { try await api.markMessagesRead(Array(ids)); readMarkedIDs.formUnion(ids) }
             }
             if Date().timeIntervalSince(lastReceiptRefresh)>=12 { await refreshOutgoingReceipts(); lastReceiptRefresh=Date() }
+            if Date().timeIntervalSince(lastExpiryRefresh)>=30 { await refreshExpiredNotices(); lastExpiryRefresh=Date() }
         } catch { status = "Secure message sync paused; it will retry." }
+    }
+
+    private func refreshExpiredNotices() async {
+        guard let local else { return }
+        do {
+            let data=try await api.expiredMessages(contactID:contact.user_id,afterCreatedAt:expiryCursorTime,afterID:expiryCursorID)
+            guard let payload=try JSONSerialization.jsonObject(with:data) as? [String:Any],let rows=payload["items"] as? [[String:Any]] else { return }
+            for item in rows {
+                guard let messageID=item["id"] as? String,let expiredAt=item["expired_at"] as? String else { continue }
+                let noticeID="expired-notice:\(messageID)"
+                if !local.contains(messageID:noticeID) {
+                    let sender=item["display_name"] as? String ?? item["username"] as? String ?? "a contact"
+                    let notice:[String:Any] = ["id":noticeID,"conversation_id":contact.user_id,"created_at":expiredAt,"text":"A message from \(sender) was removed because this device was inactive beyond the delivery window.","sender":sender,"mine":false,"status":"received","system":true,"expiry_notice":true,"expired_message_id":messageID]
+                    try local.save(notice)
+                }
+                expiryCursorTime=expiredAt;expiryCursorID=messageID
+                try local.setMetadata(["after_created_at":expiredAt,"after_id":messageID],for:"expiryCursor:\(contact.user_id)")
+            }
+            if !rows.isEmpty { loadMessages() }
+        } catch { /* Retry the same cursor next foreground poll; never advance before local save. */ }
+    }
+    func retryExpiredMessage(_ messageID: String) async {
+        guard let local else { status="Local history is unavailable.";return }
+        guard let row=local.messages(for:contact.user_id).first(where:{$0["id"] as? String==messageID}),row["mine"] as? Bool==true,row["status"] as? String=="expired" else { status="Expired message is unavailable for retry.";return }
+        if row["attachment"] != nil { status="Select the original attachment again; its server copy may have expired.";return }
+        await sendText(row["text"] as? String ?? "")
     }
 
     private func refreshOutgoingReceipts() async {
@@ -392,9 +498,10 @@ final class SereinChatEngine: ObservableObject {
                 let recipients=(receipt["recipient_count"] as? NSNumber)?.intValue ?? 0
                 let delivered=(receipt["delivered_count"] as? NSNumber)?.intValue ?? 0
                 let read=(receipt["read_count"] as? NSNumber)?.intValue ?? 0
-                let status=read>0 ? "read" : (delivered>0 ? "delivered" : "accepted")
-                if (row["status"] as? String) != status || (row["delivered_count"] as? Int ?? -1) != delivered || (row["read_count"] as? Int ?? -1) != read {
-                    row["status"]=status;row["recipient_count"]=recipients;row["delivered_count"]=delivered;row["read_count"]=read
+                let expired=(receipt["expired_count"] as? NSNumber)?.intValue ?? 0
+                let status=read>0 ? "read" : (delivered>0 ? "delivered" : (expired>0 ? "expired" : "accepted"))
+                if (row["status"] as? String) != status || (row["delivered_count"] as? Int ?? -1) != delivered || (row["read_count"] as? Int ?? -1) != read || (row["expired_count"] as? Int ?? -1) != expired {
+                    row["status"]=status;row["recipient_count"]=recipients;row["delivered_count"]=delivered;row["read_count"]=read;row["expired_count"]=expired;row["expired_at"]=receipt["expired_at"]
                     try local.save(row);changed=true
                 }
             }
@@ -566,7 +673,7 @@ final class SereinChatEngine: ObservableObject {
             return SereinChatMessage(id: id, conversationID: conversation, createdAt: created, text: text,
                 mine: row["mine"] as? Bool ?? false, sender: row["sender"] as? String ?? contact.display_name,
                 status: row["status"] as? String ?? "received", recipientCount: row["recipient_count"] as? Int ?? 0,
-                deliveredCount: row["delivered_count"] as? Int ?? 0, readCount: row["read_count"] as? Int ?? 0, attachment: attachment)
+                deliveredCount: row["delivered_count"] as? Int ?? 0, readCount: row["read_count"] as? Int ?? 0, attachment: attachment, isSystem: row["system"] as? Bool ?? false)
         }.sorted { $0.createdAt < $1.createdAt }
     }
 
@@ -582,7 +689,7 @@ final class SereinChatEngine: ObservableObject {
     }
 
     enum ChatError: LocalizedError {
-        case deviceUnavailable, contactUnavailable, keyDirectoryMismatch, deviceListChanged, noRecipientDevices
+        case deviceUnavailable, contactUnavailable, keyDirectoryMismatch, deviceListChanged, noRecipientDevices, historyUnavailable
         case fingerprintRequired, fileUnavailable, fileTooLarge, fileChanged, transferUnavailable, routeMismatch
         case manifestMismatch, chunkChecksum, invalidAttachment
         var errorDescription: String? {
@@ -592,6 +699,7 @@ final class SereinChatEngine: ObservableObject {
             case .keyDirectoryMismatch: return "The authenticated device-key directory did not match this contact."
             case .deviceListChanged: return "The signed-in device list is still changing. Retry shortly; changed pinned keys remain blocked."
             case .noRecipientDevices: return "No active recipient devices are available."
+            case .historyUnavailable: return "The encrypted history-sync transfer is unavailable or exceeds its safe bounds."
             case .fingerprintRequired: return "A recipient-device key changed or is not locally pinned; sending is blocked."
             case .fileUnavailable: return "The selected file is unavailable."
             case .fileTooLarge: return "This file exceeds the encrypted-transfer size limit."

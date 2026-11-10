@@ -16,19 +16,28 @@ test('CI invokes repository shell scripts through bash regardless of executable-
   assert.match(ci, /android-instrumented-\*\.log/);
 });
 
+test('Android instrumentation can compile the app BuildConfig version assertion under AGP 8', () => {
+  const gradle = read('apps/android/app/build.gradle');
+  const androidTest = read('apps/android/app/src/androidTest/java/io/serein/chat/SereinCoreLinkTest.java');
+  assert.match(gradle, /buildFeatures\s*\{\s*buildConfig\s+true\s*\}/);
+  assert.match(androidTest, /BuildConfig\.VERSION_NAME/);
+});
+
 test('RustSec audit is explicitly manual-only', () => {
   const audit = read('.github/workflows/security-audit.yml');
   assert.match(audit, /\bon:\s*\n\s+workflow_dispatch:\s*\n/);
   assert.doesNotMatch(audit, /^\s+(?:push|pull_request|schedule):/m);
 });
 
-test('iOS simulator build uses installed SDK and does not block compilation on Xcode platform downloads', () => {
+test('iOS simulator CI installs the selected Xcode-matched runtime when it is missing', () => {
   const ci = read('.github/workflows/ci.yml');
-  assert.match(ci, /Check preinstalled iOS simulator runtime/);
+  assert.match(ci, /Ensure the selected Xcode simulator runtime is installed/);
   assert.match(ci, /generic\/platform=iOS Simulator/);
   assert.match(ci, /grep -Fxq 'Xcode 16\.3'/);
   assert.match(ci, /IOS_SIM_RUNTIME_AVAILABLE/);
-  assert.doesNotMatch(ci, /xcodebuild\s+-downloadPlatform/);
+  assert.match(ci, /xcodebuild -downloadPlatform iOS -exportPath/);
+  assert.match(ci, /xcodebuild -importPlatform/);
+  assert.match(ci, /--show-sdk-version/);
   const adhoc = read('.github/workflows/ios-adhoc-test.yml');
   assert.match(adhoc, /Verify installed iOS SDK/);
   assert.doesNotMatch(adhoc, /xcodebuild\s+-downloadPlatform/);

@@ -52,7 +52,7 @@ test('all platforms use the same v3 backup-key salt, payload HKDF info, AAD doma
   const iosProduct = fs.readFileSync(path.join(root, 'apps/ios/SereinChat/SereinProductView.swift'), 'utf8');
   assert.match(iosProduct, /beginBackgroundTask\(withName: "SereinEncryptedBackup"/);
   assert.match(iosProduct, /postBackupNotification\(/);
-  assert.match(cargo, /p256 = .*features = \["ecdh"\]/);
+  assert.match(cargo, /p256\s*=\s*\{[^}]*features\s*=\s*\[[^\]]*"ecdh"[^\]]*\][^}]*\}/s);
   assert.match(cargo, /aes-gcm/);
   assert.match(webApp, /serein-backup-key-envelope-kdf-v2/);
   assert.match(android, /serein-backup-key-envelope-kdf-v2/);

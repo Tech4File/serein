@@ -34,7 +34,36 @@ final class SereinDeviceCrypto {
     static func deleteAccountKeys(userID: String) throws {
         try SereinKeychain.delete(accountsWithPrefix: "device-key-v1:\(userID):")
         try SereinKeychain.delete(accountsWithPrefix: "device-layer2-key-v1:\(userID):")
+        try SereinKeychain.delete(accountsWithPrefix: "device-signing-key-v1:\(userID):")
+        try SereinKeychain.delete(accountsWithPrefix: "device-retired-key-v1:\(userID):")
     }
+    static func loadOrCreateSigning(userID: String, deviceID: String) throws -> P256.Signing.PrivateKey {
+        let account="device-signing-key-v1:\(userID):\(deviceID)"
+        if let bytes=try SereinKeychain.read(account:account) { return try P256.Signing.PrivateKey(rawRepresentation:bytes) }
+        let key=P256.Signing.PrivateKey();try SereinKeychain.write(key.rawRepresentation,account:account);return key
+    }
+    static func signingPublicJWK(_ key:P256.Signing.PrivateKey)->[String:String] {
+        let point=key.publicKey.x963Representation
+        return ["kty":"EC","crv":"P-256","x":base64URL(point.subdata(in:1..<33)),"y":base64URL(point.subdata(in:33..<65))]
+    }
+    static func signDeviceKeyRotation(_ key:P256.Signing.PrivateKey,userID:String,deviceID:String,oldFingerprint:String,newFingerprint:String,timestamp:Int,epoch:Int)throws->String {
+        let statement=try rotationStatement(userID:userID,deviceID:deviceID,oldFingerprint:oldFingerprint,newFingerprint:newFingerprint,timestamp:timestamp,epoch:epoch)
+        return base64URL(try key.signature(for:statement).derRepresentation)
+    }
+    static func verifyDeviceKeyRotation(signingJWK:[String:Any],userID:String,deviceID:String,oldFingerprint:String,newFingerprint:String,timestamp:Int,epoch:Int,proof:String)->Bool {
+        do { guard let x=signingJWK["x"] as? String,let y=signingJWK["y"] as? String,let xb=base64URLDecode(x),let yb=base64URLDecode(y),xb.count==32,yb.count==32,let signatureData=base64URLDecode(proof) else{return false};let publicKey=try P256.Signing.PublicKey(x963Representation:Data([4])+xb+yb);let signature=try P256.Signing.ECDSASignature(derRepresentation:signatureData);let statement=try rotationStatement(userID:userID,deviceID:deviceID,oldFingerprint:oldFingerprint,newFingerprint:newFingerprint,timestamp:timestamp,epoch:epoch);return publicKey.isValidSignature(signature,for:statement) } catch { return false }
+    }
+    private static func rotationStatement(userID:String,deviceID:String,oldFingerprint:String,newFingerprint:String,timestamp:Int,epoch:Int)throws->Data {
+        guard timestamp>=1,epoch>=1,UUID(uuidString:userID) != nil,UUID(uuidString:deviceID) != nil,newFingerprint.range(of:#"^[0-9a-f]{64}$"#,options:.regularExpression) != nil,(oldFingerprint.isEmpty||oldFingerprint.range(of:#"^[0-9a-f]{64}$"#,options:.regularExpression) != nil) else{throw CryptoError.invalidPublicKey}
+        return Data("SEREIN-DEVICE-KEY-ROTATION-V1\n\(userID.lowercased())\n\(deviceID.lowercased())\n\(oldFingerprint)\n\(newFingerprint)\n\(timestamp)\n\(epoch)\n".utf8)
+    }
+    static func stageRotatedKey(userID:String,deviceID:String,layer2:Bool,epoch:Int)throws->(SereinDeviceCrypto,Data?) {
+        let purpose=layer2 ? "device-layer2-key-v1" : "device-key-v1",account="\(purpose):\(userID):\(deviceID)",old=try SereinKeychain.read(account:account)
+        if let old { let retiredPrefix="device-retired-key-v1:\(userID):\(deviceID):\(layer2 ? "layer2" : "layer1"):";try SereinKeychain.write(old,account:retiredPrefix+String(epoch));try SereinKeychain.retainLatest(accountsWithPrefix:retiredPrefix,maximum:8) }
+        let created:PrivateMaterial;if SecureEnclave.isAvailable,let secure=try? SecureEnclave.P256.KeyAgreement.PrivateKey(){created = .secure(secure)}else{created = .software(P256.KeyAgreement.PrivateKey())}
+        try SereinKeychain.write(created.persistedRepresentation,account:account);return(SereinDeviceCrypto(created),old)
+    }
+    static func restoreKeyMaterial(_ data:Data?,userID:String,deviceID:String,layer2:Bool)throws {let purpose=layer2 ? "device-layer2-key-v1" : "device-key-v1",account="\(purpose):\(userID):\(deviceID)";if let data{try SereinKeychain.write(data,account:account)}else{try SereinKeychain.delete(account:account)}}
     static func loadOrCreate(userID: String, deviceID: String) throws -> SereinDeviceCrypto { try loadOrCreate(userID: userID, deviceID: deviceID, layer2: false) }
     static func loadOrCreateLayer2(userID: String, deviceID: String) throws -> SereinDeviceCrypto { try loadOrCreate(userID: userID, deviceID: deviceID, layer2: true) }
     private static func loadOrCreate(userID: String, deviceID: String, layer2: Bool) throws -> SereinDeviceCrypto {
@@ -92,6 +121,21 @@ final class SereinDeviceCrypto {
                                peerDeviceID: String, peerJWK: [String: Any]) throws -> SymmetricKey {
         try deriveDevicePairKey(localUserID: localUserID, localDeviceID: localDeviceID, peerUserID: peerUserID, peerDeviceID: peerDeviceID, peerJWK: peerJWK, layer2: true)
     }
+    func deriveHistorySyncKey(accountID:String,localDeviceID:String,peerDeviceID:String,peerJWK:[String:Any],mainDeviceID:String,childDeviceID:String,requestID:String,index:Int,count:Int)throws->SymmetricKey {
+        guard (localDeviceID==mainDeviceID||localDeviceID==childDeviceID),(peerDeviceID==mainDeviceID||peerDeviceID==childDeviceID),localDeviceID != peerDeviceID,index>=0,count>0,index<count,count<=128,let xText=peerJWK["x"] as? String,let yText=peerJWK["y"] as? String,let x=Self.base64URLDecode(xText),let y=Self.base64URLDecode(yText),x.count==32,y.count==32 else{throw CryptoError.invalidPublicKey}
+        let peer=try P256.KeyAgreement.PublicKey(x963Representation:Data([4])+x+y),secret=try privateMaterial.sharedSecret(with:peer),devices=[mainDeviceID.lowercased(),childDeviceID.lowercased()].sorted(),scope="\(accountID.lowercased())|\(devices[0])|\(devices[1])",salt=Data(SHA256.hash(data:Data("serein-history-sync-salt-v1|\(scope)".utf8))),info=Data("serein-history-sync-key-v1|\(scope)|\(requestID.lowercased())|\(index)|\(count)".utf8)
+        return secret.hkdfDerivedSymmetricKey(using:SHA256.self,salt:salt,sharedInfo:info,outputByteCount:32)
+    }
+    func encryptHistorySyncBatch(_ clear:Data,key:SymmetricKey,accountID:String,mainDeviceID:String,childDeviceID:String,requestID:String,index:Int,count:Int)throws->[String:Any] {
+        guard clear.count<=480*1024 else{throw CryptoError.invalidEnvelope};let aad=try Self.historySyncAad(accountID,mainDeviceID,childDeviceID,requestID,index,count);let box=try AES.GCM.seal(clear,using:key,authenticating:aad);return ["version":1,"algorithm":"AES-256-GCM","iv":Self.base64URL(box.nonce.withUnsafeBytes{Data($0)}),"ciphertext":Self.base64URL(box.ciphertext+box.tag)]
+    }
+    func decryptHistorySyncBatch(_ envelope:[String:Any],key:SymmetricKey,accountID:String,mainDeviceID:String,childDeviceID:String,requestID:String,index:Int,count:Int)throws->Data {
+        guard envelope["version"] as? Int==1,envelope["algorithm"] as? String=="AES-256-GCM",let ivText=envelope["iv"] as? String,let ciphertextText=envelope["ciphertext"] as? String,let iv=Self.base64URLDecode(ivText),let combined=Self.base64URLDecode(ciphertextText),iv.count==12,combined.count>=16,combined.count<=512*1024 else{throw CryptoError.invalidEnvelope}
+        let box=try AES.GCM.SealedBox(nonce:AES.GCM.Nonce(data:iv),ciphertext:combined.dropLast(16),tag:combined.suffix(16));return try AES.GCM.open(box,using:key,authenticating:Self.historySyncAad(accountID,mainDeviceID,childDeviceID,requestID,index,count))
+    }
+    static func historySyncDigest(_ envelope:[String:Any])throws->String {let data=try JSONSerialization.data(withJSONObject:envelope,options:[.sortedKeys]);return SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()}
+    private static func historySyncAad(_ accountID:String,_ mainDeviceID:String,_ childDeviceID:String,_ requestID:String,_ index:Int,_ count:Int)throws->Data {guard UUID(uuidString:accountID) != nil,UUID(uuidString:mainDeviceID) != nil,UUID(uuidString:childDeviceID) != nil,UUID(uuidString:requestID) != nil,mainDeviceID.lowercased() != childDeviceID.lowercased(),index>=0,count>0,index<count,count<=128 else{throw CryptoError.invalidEnvelope};/* Protocol: compact UTF-8 JSON array; fixed ASCII UUIDs and base-10 integers; field order is normative. */return try JSONSerialization.data(withJSONObject:["serein-history-sync-batch-v1",accountID.lowercased(),mainDeviceID.lowercased(),childDeviceID.lowercased(),requestID.lowercased(),index,count,1],options:[.fragmentsAllowed])}
+
     func ratchetBootstrapSecret(localUserID: String, localDeviceID: String, peerUserID: String,
                                 peerDeviceID: String, peerJWK: [String: Any], purpose: String) throws -> Data {
         guard purpose == "layer1" || purpose == "layer2",
@@ -322,6 +366,9 @@ enum SereinKeychain {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "io.serein.chat.device-keys", kSecAttrAccount as String: account]
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw NSError(domain: "SereinKeychain", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Account keys could not be fully removed from Keychain."]) }
+    }
+    static func retainLatest(accountsWithPrefix prefix:String,maximum:Int)throws {
+        guard maximum>0 else{return};let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:"io.serein.chat.device-keys",kSecReturnAttributes as String:true,kSecMatchLimit as String:kSecMatchLimitAll];var result:CFTypeRef?;let status=SecItemCopyMatching(query as CFDictionary,&result);if status==errSecItemNotFound{return};guard status==errSecSuccess,let rows=result as? [[String:Any]] else{throw NSError(domain:"SereinKeychain",code:Int(status),userInfo:[NSLocalizedDescriptionKey:"Retired key retention limit could not be enforced."])};let names=rows.compactMap{$0[kSecAttrAccount as String] as? String}.filter{$0.hasPrefix(prefix)}.sorted{lhs,rhs in let l=Int(lhs.dropFirst(prefix.count)) ?? 0,r=Int(rhs.dropFirst(prefix.count)) ?? 0;return l<r};for name in names.prefix(max(0,names.count-maximum)){try delete(account:name)}
     }
     static func delete(accountsWithPrefix prefix: String) throws {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "io.serein.chat.device-keys", kSecReturnAttributes as String: true, kSecMatchLimit as String: kSecMatchLimitAll]

@@ -15,7 +15,7 @@ test('missing recipient keys are reported against the specific recipient device,
 test('fingerprint trust remains local and scoped to the exact contact-device pair', () => {
   assert.match(app, /trusted-peer:\$\{contact\.id\}:\$\{device\.id\}/);
   assert.match(app, /localMetaKey\(name\).*state\.device\.id/);
-  assert.match(app, /const storedVersion=trust\?\.ratchetVersion==null\?2:Number\(trust\.ratchetVersion\)/);
+  assert.match(app, /storedVersion=trust\?\.ratchetVersion==null\?2:Number\(trust\.ratchetVersion\)/);
   assert.match(app, /const ratchetVersion=entry\.ratchet_version==null\?2:Number\(entry\.ratchet_version\)/);
   assert.match(app, /source:'app-first-use'/);
   assert.match(app, /deriveLayer2ConversationKey\(state\.deviceKeyPair\.layer2PrivateKey,state\.user\.id,state\.device\.id,contact\.id,device\.id,entry\.layer2_public_key\)/);

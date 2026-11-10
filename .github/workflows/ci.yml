@@ -201,24 +201,57 @@ jobs:
           xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.log"
           grep -Fxq 'Xcode 16.3' "$RUNNER_TEMP/xcode-version.log"
           xcodebuild -showsdks
-      - name: Check preinstalled iOS simulator runtime
+      - name: Ensure the selected Xcode simulator runtime is installed
         run: |
           set -euo pipefail
+          SDK_VERSION="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          IOS_PLATFORM_VERSION="$(python3 - "$SDK_VERSION" <<'PY'
+          import sys
+          parts=sys.argv[1].split('.')
+          print('.'.join(parts[:2]) if len(parts)>1 else parts[0])
+          PY
+          )"
+          echo "Selected iOS Simulator SDK: $SDK_VERSION; platform runtime: $IOS_PLATFORM_VERSION"
           xcodebuild -showsdks | tee "$RUNNER_TEMP/ios-sdks.log"
-          grep -Eiq 'iOS Simulator' "$RUNNER_TEMP/ios-sdks.log"
           xcrun simctl list runtimes --json > "$RUNNER_TEMP/ios-runtimes.json"
-          if python3 - "$RUNNER_TEMP/ios-runtimes.json" <<'PY'
+          if python3 - "$IOS_PLATFORM_VERSION" "$RUNNER_TEMP/ios-runtimes.json" <<'PY'
           import json, sys
-          data=json.load(open(sys.argv[1]))
-          available=any(runtime.get('isAvailable') and runtime.get('name','').startswith('iOS') for runtime in data.get('runtimes',[]))
+          wanted=sys.argv[1]
+          data=json.load(open(sys.argv[2]))
+          available=any(runtime.get('isAvailable') and runtime.get('version')==wanted
+                        for runtime in data.get('runtimes',[])
+                        if runtime.get('name','').startswith('iOS '))
           raise SystemExit(0 if available else 1)
           PY
           then
-            echo 'IOS_SIM_RUNTIME_AVAILABLE=true' >> "$GITHUB_ENV"
+            echo "Matching iOS $IOS_PLATFORM_VERSION simulator runtime is already installed."
           else
-            echo 'IOS_SIM_RUNTIME_AVAILABLE=false' >> "$GITHUB_ENV"
-            echo '::notice::No preinstalled iOS Simulator runtime; app compilation will still run, device launch smoke will be skipped.'
+            echo "Installing the iOS $IOS_PLATFORM_VERSION simulator runtime required by this Xcode."
+            RUNTIME_DIR="$RUNNER_TEMP/ios-platform"
+            mkdir -p "$RUNTIME_DIR"
+            xcodebuild -downloadPlatform iOS -exportPath "$RUNTIME_DIR" -buildVersion "$IOS_PLATFORM_VERSION"
+            RUNTIME_DMG="$(find "$RUNTIME_DIR" -type f -name '*.dmg' -print -quit)"
+            if [ -z "$RUNTIME_DMG" ]; then
+              find "$RUNTIME_DIR" -maxdepth 2 -type f -print
+              echo 'xcodebuild downloaded no simulator runtime DMG.' >&2
+              exit 1
+            fi
+            xcodebuild -runFirstLaunch
+            xcodebuild -importPlatform "$RUNTIME_DMG"
           fi
+          xcrun simctl list runtimes --json > "$RUNNER_TEMP/ios-runtimes.json"
+          python3 - "$IOS_PLATFORM_VERSION" "$RUNNER_TEMP/ios-runtimes.json" <<'PY'
+          import json, sys
+          wanted=sys.argv[1]
+          data=json.load(open(sys.argv[2]))
+          available=any(runtime.get('isAvailable') and runtime.get('version')==wanted
+                        for runtime in data.get('runtimes',[])
+                        if runtime.get('name','').startswith('iOS '))
+          if not available:
+              raise SystemExit(f'Required iOS {wanted} simulator runtime is still unavailable after installation.')
+          PY
+          echo 'IOS_SIM_RUNTIME_AVAILABLE=true' >> "$GITHUB_ENV"
+          echo "IOS_SIM_RUNTIME_VERSION=$IOS_PLATFORM_VERSION" >> "$GITHUB_ENV"
       - name: Build iOS Rust core XCFramework
         run: bash scripts/build_native_core.sh ios
       - name: Preflight Xcode project resolution
@@ -251,14 +284,19 @@ jobs:
             exit 0
           fi
           DEVICE_ID="$(python3 - <<'PY'
-          import json, subprocess
-          devices = json.loads(subprocess.check_output(['xcrun','simctl','list','devices','available','--json']))['devices']
+          import json, os, subprocess
+          wanted=os.environ['IOS_SIM_RUNTIME_VERSION']
+          runtimes=json.loads(subprocess.check_output(['xcrun','simctl','list','runtimes','--json']))['runtimes']
+          compatible={runtime['identifier'] for runtime in runtimes
+                      if runtime.get('isAvailable') and runtime.get('version')==wanted
+                      and runtime.get('name','').startswith('iOS ')}
+          devices=json.loads(subprocess.check_output(['xcrun','simctl','list','devices','available','--json']))['devices']
           for runtime, entries in devices.items():
-              if runtime.startswith('com.apple.CoreSimulator.SimRuntime.iOS'):
+              if runtime in compatible:
                   for device in entries:
                       if device.get('name','').startswith('iPhone'):
                           print(device['udid']); raise SystemExit(0)
-          raise SystemExit('No available iOS simulator device found')
+          raise SystemExit(f'No available iPhone simulator for the selected Xcode runtime iOS {wanted}')
           PY
           )"
           xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true

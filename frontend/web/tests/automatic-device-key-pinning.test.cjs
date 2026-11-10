@@ -13,23 +13,26 @@ test('all three clients check both key layers and automatically pin a first-seen
   assert.match(web, /const firstSeen=!trust/);
   assert.match(web, /source:'app-first-use'/);
   assert.match(android, /fingerprintBundle\(jwk,layer2Jwk\)/);
-  assert.match(android, /boolean firstSeen=trustedFingerprint\.isEmpty\(\);if\(firstSeen\)\{local\.trustFingerprint\(contactId,id,fingerprint,ratchetVersion\)/);
+  assert.match(android, /boolean firstSeen=trustedFingerprint\.isEmpty\(\);[\s\S]*?if\(firstSeen\)\{local\.trustDeviceIdentity\(contactId,id,fingerprint,ratchetVersion,keyEpoch,signingJwk\)/);
   assert.match(ios, /fingerprintBundle\(layer1: jwk, layer2: layer2JWK\)/);
   assert.match(ios, /let firstSeen = old\.isEmpty/);
-  assert.match(ios, /local\?\.trust\(userID: contact\.user_id, deviceID: target\.id, fingerprint: fingerprint/);
+  assert.match(ios, /try local\?\.trust\(userID:contact\.user_id,deviceID:target\.id,fingerprint:fingerprint/);
 });
 
 test('fingerprint changes and capability downgrades block send/decrypt, while same-key upgrades are adopted automatically', () => {
   const web = read('frontend/web/app.js');
   const android = read('apps/android/app/src/main/java/io/serein/chat/SereinChatEngine.java');
   const ios = read('apps/ios/SereinChat/SereinChatEngine.swift');
-  assert.match(web, /previousFingerprint===fingerprint&&\[2,3\]\.includes\(previousRatchetVersion\)&&ratchetVersion>=previousRatchetVersion/);
-  assert.match(web, /else if\(trusted&&ratchetVersion>previousRatchetVersion\)/);
+  assert.match(web, /const capabilityAccepted=\[2,3\]\.includes\(previousRatchetVersion\)&&ratchetVersion>=previousRatchetVersion/);
+  assert.match(web, /previousFingerprint===fingerprint&&capabilityAccepted/);
+  assert.match(web, /else if\(trusted\)\{trust=\{\.\.\.trust,fingerprint,ratchetVersion/);
   assert.match(web, /Changed key · sending blocked/);
   assert.match(android, /boolean capabilityAccepted=\(pinnedVersion==2\|\|pinnedVersion==3\)&&ratchetVersion>=pinnedVersion/);
-  assert.match(android, /sameFingerprint&&capabilityAccepted&&ratchetVersion>pinnedVersion/);
-  assert.match(ios, /let capabilityAccepted = \(2\.\.\.3\)\.contains\(oldVersion\) && ratchetVersion >= oldVersion/);
-  assert.match(ios, /if sameFingerprint && capabilityAccepted && ratchetVersion > oldVersion/);
+  assert.match(android, /sameFingerprint&&capabilityAccepted&&signerMatches&&legacyBootstrapAccepted/);
+  assert.match(android, /else if\(trustedBundle\)\{local\.trustDeviceIdentity\(contactId,id,fingerprint,ratchetVersion/);
+  assert.match(ios, /capabilityAccepted=\(2\.\.\.3\)\.contains\(oldVersion\)&&ratchetVersion>=oldVersion/);
+  assert.match(ios, /let trustedBundle=firstSeen\|\|\(sameFingerprint&&capabilityAccepted/);
+  assert.match(ios, /else if trustedBundle/);
 });
 
 test('clients and server reject unsupported key algorithms, ratchet capabilities, and invalid P-256 points', () => {

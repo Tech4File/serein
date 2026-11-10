@@ -50,6 +50,7 @@ public final class MainActivity extends Activity {
     private String pendingBackupOwnerId="";
     private boolean restorePromptInProgress;
     private boolean startupSessionResolved, startupContactsResolved, startupPreferencesResolved;
+    private boolean sessionRestorePending, sessionRestoreInProgress;
     private Dialog startupCurtain;
     private Dialog startupCurtainClosing;
     private AnimatorSet startupCurtainOpening;
@@ -66,27 +67,34 @@ public final class MainActivity extends Activity {
         api = new SereinApi(this);
         renderAuth();
         if(!api.hasSavedSession())return;
-        showStartupCurtain();
-        api.me((result, error) -> {
-            startupSessionResolved=true;
-            if (error == null && result instanceof JSONObject) {
-                JSONObject me = (JSONObject) result;
-                account = new JSONObject();
-                try { account.put("user", me.optJSONObject("user")); account.put("device", me.optJSONObject("device")); }
-                catch (Exception ignored) { }
+        showStartupCurtain();restoreSavedSession(0);
+    }
+    private void restoreSavedSession(int attempt){
+        if(sessionRestoreInProgress)return;sessionRestoreInProgress=true;
+        api.me((result,error)->{
+            if(error!=null&&api.hasSavedSession()&&attempt<3){new android.os.Handler(getMainLooper()).postDelayed(()->{sessionRestoreInProgress=false;restoreSavedSession(attempt+1);},250L<<attempt);return;}
+            sessionRestoreInProgress=false;startupSessionResolved=true;
+            if(error==null&&result instanceof JSONObject){
+                sessionRestorePending=false;JSONObject me=(JSONObject)result;account=new JSONObject();
+                try{account.put("user",me.optJSONObject("user"));account.put("device",me.optJSONObject("device"));}catch(Exception ignored){}
                 prepareSignedInDevice(()->{renderMain("Chats");syncAccountPreferences();finishStartupIfReady();});
-            } else { startupContactsResolved=true;startupPreferencesResolved=true;finishStartupIfReady(); }
+            }else{
+                sessionRestorePending=api.hasSavedSession();startupContactsResolved=true;startupPreferencesResolved=true;
+                if(sessionRestorePending){renderAuth();message("The server is unavailable. This device’s saved session is preserved; retry when the connection returns.");}
+                finishStartupIfReady();
+            }
         });
     }
+    private void retrySavedSession(){if(sessionRestoreInProgress||!api.hasSavedSession())return;sessionRestorePending=false;startupSessionResolved=false;startupContactsResolved=false;startupPreferencesResolved=false;showStartupCurtain();restoreSavedSession(0);}
     private void finishStartupIfReady(){if(!startupSessionResolved)return;if(account==null||startupContactsResolved&&startupPreferencesResolved)dismissStartupCurtain();}
     private void prepareSignedInDevice(Runnable completed){
         JSONObject user=account==null?null:account.optJSONObject("user"),device=account==null?null:account.optJSONObject("device");
         if(user==null||device==null){completed.run();return;}
         String userId=user.optString("id"),deviceId=device.optString("id");
         java.util.concurrent.CompletableFuture.supplyAsync(()->{
-            try{java.security.KeyPair layer1=SereinDeviceCrypto.loadOrCreate(this,userId,deviceId),layer2=SereinDeviceCrypto.loadOrCreateLayer2(this,userId,deviceId);return new JSONObject().put("public_key",SereinDeviceCrypto.publicJwk(layer1)).put("layer2_public_key",SereinDeviceCrypto.publicJwk(layer2)).put("fingerprint",SereinDeviceCrypto.fingerprintBundle(SereinDeviceCrypto.publicJwk(layer1),SereinDeviceCrypto.publicJwk(layer2)));}
+            try{java.security.KeyPair layer1=SereinDeviceCrypto.loadOrCreate(this,userId,deviceId),layer2=SereinDeviceCrypto.loadOrCreateLayer2(this,userId,deviceId),signing=SereinDeviceCrypto.loadOrCreateSigning(this,userId,deviceId);String fingerprint=SereinDeviceCrypto.fingerprintBundle(SereinDeviceCrypto.publicJwk(layer1),SereinDeviceCrypto.publicJwk(layer2));long timestamp=System.currentTimeMillis()/1000L;return new JSONObject().put("public_key",SereinDeviceCrypto.publicJwk(layer1)).put("layer2_public_key",SereinDeviceCrypto.publicJwk(layer2)).put("signing_public_key",SereinDeviceCrypto.publicJwk(signing)).put("fingerprint",fingerprint).put("rotation_timestamp",timestamp).put("rotation_proof",SereinDeviceCrypto.signDeviceKeyRotation(signing,userId,deviceId,"",fingerprint,timestamp,1));}
             catch(Exception error){throw new java.util.concurrent.CompletionException(error);}
-        }).thenCompose(bundle->api.enrollDeviceKey(bundle.optJSONObject("public_key"),bundle.optJSONObject("layer2_public_key"),SereinCoreNative.isLoaded()?3:2).thenApply(reply->{if(!bundle.optString("fingerprint").equals(reply.optString("fingerprint")))throw new java.util.concurrent.CompletionException(new IllegalStateException("The server key-bundle fingerprint did not match this device."));return null;})).whenComplete((ignored,error)->runOnUiThread(()->{if(error!=null)message("Device key setup is incomplete; encrypted messaging may wait until this device can register its keys.");completed.run();}));
+        }).thenCompose(bundle->api.enrollDeviceKey(bundle.optJSONObject("public_key"),bundle.optJSONObject("layer2_public_key"),bundle.optJSONObject("signing_public_key"),bundle.optString("rotation_proof"),bundle.optLong("rotation_timestamp"),1,SereinCoreNative.isLoaded()?3:2).thenApply(reply->{if(!bundle.optString("fingerprint").equals(reply.optString("fingerprint")))throw new java.util.concurrent.CompletionException(new IllegalStateException("The server key-bundle fingerprint did not match this device."));return null;})).whenComplete((ignored,error)->runOnUiThread(()->{if(error!=null)message("Device key setup is incomplete; encrypted messaging may wait until this device can register its keys.");completed.run();}));
     }
     private void showStartupCurtain(){
         if(isFinishing()||startupCurtain!=null)return;int width=getResources().getDisplayMetrics().widthPixels;
@@ -157,6 +165,7 @@ public final class MainActivity extends Activity {
         base(registerMode ? "Create account" : "Sign in");
         root.addView(paragraph("Account access and device management"),SereinUi.margin(this,-1,-2,0,0,0,12));
         LinearLayout connectionRow=SereinUi.row(this);connectionRow.setGravity(Gravity.CENTER);Button connection=SereinUi.chip(this,"↗  Server connection",true);connection.setContentDescription("Open server connection settings. Current status: "+connectionStatus);connection.setOnClickListener(v->showConnectionSettings());connectionRow.addView(connection);root.addView(connectionRow,SereinUi.margin(this,-1,42,0,0,0,12));
+        if(sessionRestorePending&&api.hasSavedSession()){root.addView(paragraph("The server could not be reached. This device’s saved session is preserved; it has not signed you out."),SereinUi.margin(this,-1,-2,0,0,0,6));Button retry=SereinUi.button(this,sessionRestoreInProgress?"Restoring saved session…":"Retry saved session",true);retry.setEnabled(!sessionRestoreInProgress);retry.setOnClickListener(v->retrySavedSession());root.addView(retry,SereinUi.margin(this,-1,44,0,0,0,10));}
         LinearLayout tabs=SereinUi.row(this);Button signin=SereinUi.button(this,"Sign in",!registerMode);Button create=SereinUi.button(this,"Create account",registerMode);
         tabs.addView(signin,new LinearLayout.LayoutParams(0,pad(42),1));tabs.addView(create,new LinearLayout.LayoutParams(0,pad(42),1));root.addView(tabs);
         signin.setOnClickListener(v->{registerMode=false;renderAuth();});create.setOnClickListener(v->{registerMode=true;renderAuth();});

@@ -16,7 +16,7 @@ test('device enrollment waits for the shared ratchet core and never publishes a 
   assert.match(enroll, /if\(!coreReady\|\|!window\.SereinCore\.wasmActive\)throw/);
   assert.match(enroll, /ratchet_version:3/);
   assert.match(enroll, /Number\(reply\.ratchet_version\)!==3/);
-  assert.match(backend, /device_public_keys\.ratchet_version<=EXCLUDED\.ratchet_version/);
+  assert.match(backend, /old_ratchet>ratchet_version as i16/);
   assert.match(backend, /ratchet capability downgrade rejected/);
 });
 

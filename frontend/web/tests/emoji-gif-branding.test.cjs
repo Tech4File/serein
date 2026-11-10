@@ -32,16 +32,20 @@ test('keyboard, paste, and drag-in images route through encrypted attachment tra
   assert.match(ios, /engine\.sendFile\(url: url, filename: filename, contentType: mime\)/);
 });
 
-test('Serein app icons use shared assets on web and iOS, matching Android theme color', () => {
+test('Serein app icons use shared web/iOS assets and a valid Android adaptive-icon background', () => {
   const html = read('frontend/web/index.html');
   const manifest = JSON.parse(read('frontend/web/manifest.webmanifest'));
   const project = read('apps/ios/SereinChat.xcodeproj/project.pbxproj');
   const icon = JSON.parse(read('apps/ios/SereinChat/Assets.xcassets/AppIcon.appiconset/Contents.json'));
   const colors = read('apps/android/app/src/main/res/values/colors.xml');
+  const webIcon = read('frontend/web/icons/app-icon.svg');
   assert.match(html, /rel="icon"[^>]+app-icon\.svg/);
   assert.equal(manifest.icons.some((entry) => entry.sizes === '512x512'), true);
   assert.equal(icon.images[0].filename, 'SereinAppIcon.png');
   assert.match(project, /ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon/);
   assert.match(project, /Assets\.xcassets in Resources/);
-  assert.match(colors, /#A8DFC6/i);
+  const launcherBackground = colors.match(/<color name="ic_launcher_background">\s*(#[0-9a-f]{6})\s*<\/color>/i);
+  assert.ok(launcherBackground, 'Android launcher must declare a valid six-digit background color');
+  assert.match(manifest.theme_color, /^#[0-9a-f]{6}$/i);
+  assert.match(webIcon, new RegExp(`fill="${manifest.theme_color}"`, 'i'));
 });

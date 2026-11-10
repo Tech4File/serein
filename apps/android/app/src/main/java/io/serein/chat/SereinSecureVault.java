@@ -50,6 +50,7 @@ final class SereinSecureVault {
     // Delete key material synchronously so account cleanup does not report success before it is durable.
     @SuppressLint("ApplySharedPref")
     static synchronized boolean removePrefix(Context context, String prefix) { SharedPreferences values=prefs(context);SharedPreferences.Editor editor=values.edit();for(String key:values.getAll().keySet())if(key.startsWith(prefix))editor.remove(key);return editor.commit(); }
+    static synchronized void retainLatest(Context context,String prefix,int maximum){if(maximum<1)return;SharedPreferences values=prefs(context);java.util.ArrayList<String> names=new java.util.ArrayList<>();for(String name:values.getAll().keySet())if(name.startsWith(prefix))names.add(name);names.sort((a,b)->{try{return Long.compare(Long.parseLong(a.substring(prefix.length())),Long.parseLong(b.substring(prefix.length())));}catch(Exception ignored){return a.compareTo(b);}});SharedPreferences.Editor editor=values.edit();for(int i=0;i<names.size()-maximum;i++)editor.remove(names.get(i));editor.commit();}
     private static SharedPreferences prefs(Context context) { return context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
     private static SecretKey key() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);

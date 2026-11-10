@@ -72,11 +72,11 @@ final class SereinApi {
     }
     void verifyEmail(String email, String code, Callback cb) {
         request("POST", "/api/v1/auth/verify-email", json("email", email, "code", code,
-                "device_name", "Serein Android", "device_id", stableDeviceId()), cb);
+                "device_name", "Serein Android", "device_platform", "android", "device_id", stableDeviceId()), cb);
     }
     void verifyLogin(String identity, String password, String code, Callback cb) {
         request("POST", "/api/v1/auth/verify-login", json("identity", identity, "password", password,
-                "code", code, "device_name", "Serein Android", "device_id", stableDeviceId()), cb);
+                "code", code, "device_name", "Serein Android", "device_platform", "android", "device_id", stableDeviceId()), cb);
     }
     void resendVerification(String identity, Callback cb) {
         request("POST", "/api/v1/auth/resend-verification", json("identity", identity), cb);
@@ -111,16 +111,29 @@ final class SereinApi {
     CompletableFuture<JSONObject> deviceKeyDirectory(String contactId) {
         return future("GET", "/api/v1/contacts/" + contactId + "/device-keys", null).thenApply(value -> (JSONObject) value);
     }
-    CompletableFuture<JSONObject> enrollDeviceKey(JSONObject publicKey, JSONObject layer2PublicKey, int ratchetVersion) {
+    CompletableFuture<JSONObject> enrollDeviceKey(JSONObject publicKey, JSONObject layer2PublicKey, JSONObject signingPublicKey, String rotationProof, long rotationTimestamp, long keyEpoch, int ratchetVersion) {
         if (ratchetVersion != 2 && ratchetVersion != 3) throw new IllegalArgumentException("Unsupported ratchet capability.");
         JSONObject body = json("algorithm", "ECDH-P256");
-        try { body.put("public_key", publicKey); body.put("layer2_public_key", layer2PublicKey); body.put("ratchet_version", ratchetVersion); } catch (Exception ignored) { }
+        try { body.put("public_key", publicKey); body.put("layer2_public_key", layer2PublicKey); body.put("ratchet_version", ratchetVersion); body.put("signing_public_key", signingPublicKey); body.put("key_epoch",keyEpoch); body.put("rotation_proof",rotationProof); body.put("rotation_timestamp",rotationTimestamp); } catch (Exception ignored) { }
         return future("PUT", "/api/v1/device-key", body).thenApply(value -> (JSONObject) value);
     }
+    CompletableFuture<JSONObject> ownDeviceKeyDirectory(){return future("GET","/api/v1/device-keys",null).thenApply(value->(JSONObject)value);}
+    CompletableFuture<JSONObject> requestHistorySync(){return future("POST","/api/v1/history-sync/requests",new JSONObject()).thenApply(value->(JSONObject)value);}
+    CompletableFuture<JSONArray> historySyncRequests(){return future("GET","/api/v1/history-sync/requests",null).thenApply(value->(JSONArray)value);}
+    CompletableFuture<JSONObject> historySyncBatch(String requestId,JSONObject batch){return future("POST","/api/v1/history-sync/requests/"+requestId+"/batches",batch).thenApply(value->(JSONObject)value);}
+    CompletableFuture<JSONObject> historySyncBatches(String requestId){return future("GET","/api/v1/history-sync/requests/"+requestId+"/batches",null).thenApply(value->(JSONObject)value);}
+    CompletableFuture<Object> acknowledgeHistorySync(String requestId){return future("POST","/api/v1/history-sync/requests/"+requestId+"/ack",new JSONObject());}
+    CompletableFuture<Object> cancelHistorySync(String requestId){return future("DELETE","/api/v1/history-sync/requests/"+requestId,null);}
+    CompletableFuture<JSONObject> promoteMainDevice(){return future("POST","/api/v1/devices/main",new JSONObject()).thenApply(value->(JSONObject)value);}
     CompletableFuture<Object> historyPage(String afterCreatedAt, String afterId) {
         String path="/api/v1/messages?limit=100";
         if(afterCreatedAt!=null&&afterId!=null)try{path+="&after_created_at="+java.net.URLEncoder.encode(afterCreatedAt,"UTF-8")+"&after_id="+java.net.URLEncoder.encode(afterId,"UTF-8");}catch(Exception ignored){}
         return future("GET", path, null);
+    }
+    CompletableFuture<Object> expiredMessagesPage(String contactId,String afterCreatedAt,String afterId) {
+        String path="/api/v1/messages/expiries?limit=100&contact_id="+java.net.URLEncoder.encode(contactId,java.nio.charset.StandardCharsets.UTF_8);
+        if(afterCreatedAt!=null&&afterId!=null)path+="&after_created_at="+java.net.URLEncoder.encode(afterCreatedAt,java.nio.charset.StandardCharsets.UTF_8)+"&after_id="+java.net.URLEncoder.encode(afterId,java.nio.charset.StandardCharsets.UTF_8);
+        return future("GET",path,null);
     }
     CompletableFuture<Object> sendEnvelopeFuture(String id, String deviceId, String iv, String ciphertext, int cryptoVersion) {
         JSONObject body = json("id", id, "to", deviceId, "iv", iv, "ciphertext", ciphertext);

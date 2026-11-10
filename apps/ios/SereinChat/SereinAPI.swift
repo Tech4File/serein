@@ -90,6 +90,8 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
     @Published var startupReady = false
     @Published var errorMessage: String?
     @Published var statusMessage: String?
+    @Published var sessionRestoreAvailable = false
+    @Published var sessionRestoreInProgress = false
     @Published var connectionStatus = "Not checked"
     @Published var connectionDetails = ""
     @Published var connectionTestedOrigin = ""
@@ -113,6 +115,7 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
             HTTPCookieStorage.shared.cookies(for: origin)?.contains(where: { $0.name == "serein_session" })
         } ?? false
         startupReady = !hasSavedSession
+        sessionRestoreAvailable = hasSavedSession
         if defaults.string(forKey: "serein.device-id") == nil {
             defaults.set(UUID().uuidString.lowercased(), forKey: "serein.device-id")
         }
@@ -203,8 +206,8 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
             let loginOtp = verificationPurpose == "login"
             let path = loginOtp ? "/api/v1/auth/verify-login" : "/api/v1/auth/verify-email"
             let values: [String: Any] = loginOtp
-                ? ["identity": pendingLoginIdentity, "password": pendingLoginPassword, "code": code, "device_name": "Serein iOS", "device_id": deviceID]
-                : ["email": email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), "code": code, "device_name": "Serein iOS", "device_id": deviceID]
+                ? ["identity": pendingLoginIdentity, "password": pendingLoginPassword, "code": code, "device_name": "Serein iOS", "device_platform": "ios", "device_id": deviceID]
+                : ["email": email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), "code": code, "device_name": "Serein iOS", "device_platform": "ios", "device_id": deviceID]
             let data = try await request(path, method: "POST", values: values)
             let reply = try JSONDecoder().decode(SereinAuthReply.self, from: data)
             user = reply.account.user; currentDevice = reply.account.device
@@ -238,10 +241,13 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         do {
             let layer1 = try SereinDeviceCrypto.loadOrCreate(userID: user.id, deviceID: device.id)
             let layer2 = try SereinDeviceCrypto.loadOrCreateLayer2(userID: user.id, deviceID: device.id)
-            let publicKey = layer1.publicJWK(), layer2PublicKey = layer2.publicJWK()
+            let signing = try SereinDeviceCrypto.loadOrCreateSigning(userID:user.id,deviceID:device.id)
+            let publicKey = layer1.publicJWK(), layer2PublicKey = layer2.publicJWK(), signingPublicKey = SereinDeviceCrypto.signingPublicJWK(signing)
             let fingerprint = try SereinDeviceCrypto.fingerprintBundle(layer1: publicKey, layer2: layer2PublicKey)
             let capability = SereinCoreBridge.version == "unavailable" ? 2 : 3
-            let response = try await registerDeviceKey(publicKey, layer2PublicJWK: layer2PublicKey, ratchetVersion: capability)
+            let rotationTimestamp=Int(Date().timeIntervalSince1970)
+            let initialProof=try SereinDeviceCrypto.signDeviceKeyRotation(signing,userID:user.id,deviceID:device.id,oldFingerprint:"",newFingerprint:fingerprint,timestamp:rotationTimestamp,epoch:1)
+            let response = try await registerDeviceKey(publicKey, layer2PublicJWK: layer2PublicKey, signingPublicJWK:signingPublicKey, rotationProof:initialProof, rotationTimestamp:rotationTimestamp, keyEpoch:1, ratchetVersion: capability)
             guard response["fingerprint"] as? String == fingerprint else { throw SereinDeviceCrypto.CryptoError.invalidPublicKey }
             statusMessage = nil
         } catch {
@@ -272,17 +278,39 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         }
     }
     func restoreSession() async {
-        defer { startupReady = true }
-        guard let root = URL(string: apiBase),
-              HTTPCookieStorage.shared.cookies(for: root)?.contains(where: { $0.name == "serein_session" }) == true else { return }
-        do {
-            let data = try await request("/api/v1/me")
-            let reply = try JSONDecoder().decode(SereinAccountReply.self, from: data)
-            user = reply.user; currentDevice = reply.device
-            defaults.set(reply.device.id, forKey: "serein.device-id")
-            await ensureDeviceKeyEnrollment()
-            await refreshAccountData()
-        } catch { /* No stored API session: show sign-in. */ }
+        guard !sessionRestoreInProgress,
+              let root = URL(string: apiBase),
+              HTTPCookieStorage.shared.cookies(for: root)?.contains(where: { $0.name == "serein_session" }) == true else {
+            if URL(string: apiBase).flatMap({ origin in HTTPCookieStorage.shared.cookies(for: origin)?.contains(where: { $0.name == "serein_session" }) }) != true { sessionRestoreAvailable = false; startupReady = true }
+            return
+        }
+        sessionRestoreInProgress = true; sessionRestoreAvailable = true; startupReady = false
+        defer { sessionRestoreInProgress = false; startupReady = true }
+        for attempt in 0..<3 {
+            do {
+                let data = try await request("/api/v1/me")
+                let reply = try JSONDecoder().decode(SereinAccountReply.self, from: data)
+                user = reply.user; currentDevice = reply.device
+                defaults.set(reply.device.id, forKey: "serein.device-id")
+                sessionRestoreAvailable = false; statusMessage = nil
+                await ensureDeviceKeyEnrollment()
+                await refreshAccountData()
+                return
+            } catch {
+                let ns = error as NSError
+                if ns.domain == "SereinAPI" && ns.code == 401 {
+                    sessionRestoreAvailable = false; statusMessage = "This saved session has expired. Sign in again to continue."; return
+                }
+                if attempt < 2 {
+                    statusMessage = "The server could not be reached. Retrying your saved session…"
+                    try? await Task.sleep(nanoseconds: UInt64(250_000_000 * (1 << attempt)))
+                    continue
+                }
+                sessionRestoreAvailable = HTTPCookieStorage.shared.cookies(for: root)?.contains(where: { $0.name == "serein_session" }) == true
+                statusMessage = sessionRestoreAvailable ? "Connection is unavailable. Your saved session is still stored; retry when the server is reachable." : "Sign in again to continue."
+                return
+            }
+        }
     }
     func refreshAccountData() async {
         async let contactsData = request("/api/v1/contacts")
@@ -357,15 +385,23 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         let standard = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         return Data(base64Encoded: standard + String(repeating: "=", count: (4 - standard.count % 4) % 4))
     }
-    func registerDeviceKey(_ publicJWK: [String: String], layer2PublicJWK: [String: String], ratchetVersion: Int) async throws -> [String: Any] {
+    func registerDeviceKey(_ publicJWK: [String: String], layer2PublicJWK: [String: String], signingPublicJWK:[String:String], rotationProof:String, rotationTimestamp:Int, keyEpoch:Int, ratchetVersion: Int) async throws -> [String: Any] {
         guard ratchetVersion == 2 || ratchetVersion == 3 else { throw APIError.invalidResponse }
-        let data = try await request("/api/v1/device-key", method: "PUT", values: ["algorithm": "ECDH-P256", "public_key": publicJWK, "layer2_public_key": layer2PublicJWK, "ratchet_version": ratchetVersion])
+        let data = try await request("/api/v1/device-key", method: "PUT", values: ["algorithm": "ECDH-P256", "public_key": publicJWK, "layer2_public_key": layer2PublicJWK, "ratchet_version": ratchetVersion, "signing_public_key":signingPublicJWK, "key_epoch":keyEpoch, "rotation_proof":rotationProof, "rotation_timestamp":rotationTimestamp])
         return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
     }
     func contactDeviceKeys(_ contactID: String) async throws -> [String: Any] {
         let data = try await request("/api/v1/contacts/\(contactID)/device-keys")
         return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
     }
+    func ownDeviceKeyDirectory() async throws -> [String:Any] { let data=try await request("/api/v1/device-keys");return try JSONSerialization.jsonObject(with:data) as? [String:Any] ?? [:] }
+    func createHistorySyncRequest() async throws -> [String:Any] { let data=try await request("/api/v1/history-sync/requests",method:"POST",values:[:]);return try JSONSerialization.jsonObject(with:data) as? [String:Any] ?? [:] }
+    func historySyncRequests() async throws -> [[String:Any]] { let data=try await request("/api/v1/history-sync/requests");return try JSONSerialization.jsonObject(with:data) as? [[String:Any]] ?? [] }
+    func putHistorySyncBatch(_ requestID:String,values:[String:Any]) async throws -> [String:Any] {let data=try await request("/api/v1/history-sync/requests/\(requestID)/batches",method:"POST",values:values);return try JSONSerialization.jsonObject(with:data) as? [String:Any] ?? [:]}
+    func historySyncBatches(_ requestID:String) async throws -> [String:Any] {let data=try await request("/api/v1/history-sync/requests/\(requestID)/batches");return try JSONSerialization.jsonObject(with:data) as? [String:Any] ?? [:]}
+    func acknowledgeHistorySync(_ requestID:String) async throws {_ = try await request("/api/v1/history-sync/requests/\(requestID)/ack",method:"POST",values:[:])}
+    func cancelHistorySync(_ requestID:String) async throws {_ = try await request("/api/v1/history-sync/requests/\(requestID)",method:"DELETE")}
+    func promoteCurrentDeviceToMain() async throws {_ = try await request("/api/v1/devices/main",method:"POST",values:[:])}
     func messageHistory(afterCreatedAt: String? = nil, afterID: String? = nil) async throws -> Data {
         var components = URLComponents(); components.path = "/api/v1/messages"
         var items = [URLQueryItem(name: "limit", value: "100")]
@@ -377,6 +413,11 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
     func markMessageRead(_ id: String) async throws { _ = try await request("/api/v1/messages/\(id)/read", method: "POST", values: [:]) }
     func markMessagesRead(_ ids: [String]) async throws { guard !ids.isEmpty else { return }; _ = try await request("/api/v1/messages/read", method: "POST", values: ["ids": ids]) }
     func messageReceipts(ids: [String]) async throws -> Data { try await request("/api/v1/messages/receipts", method: "POST", values: ["ids": ids]) }
+    func expiredMessages(contactID: String, afterCreatedAt: String?, afterID: String?) async throws -> Data {
+        var components=URLComponents();components.path="/api/v1/messages/expiries";var items=[URLQueryItem(name:"contact_id",value:contactID),URLQueryItem(name:"limit",value:"100")]
+        if let afterCreatedAt,let afterID { items.append(URLQueryItem(name:"after_created_at",value:afterCreatedAt));items.append(URLQueryItem(name:"after_id",value:afterID)) }
+        components.queryItems=items;guard let path=components.string else { throw URLError(.badURL) };return try await request(path)
+    }
     func sendEncryptedEnvelope(id: String, to deviceID: String, iv: String, ciphertext: String, cryptoVersion: Int) async throws {
         _ = try await request("/api/v1/messages", method: "POST", values: ["id": id, "to": deviceID, "crypto_version": cryptoVersion, "iv": iv, "ciphertext": ciphertext])
     }

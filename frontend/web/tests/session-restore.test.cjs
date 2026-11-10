@@ -59,6 +59,7 @@ test('web session restore exposes connection failure and retry rather than silen
   const androidMain = fs.readFileSync(path.resolve(root, '../../apps/android/app/src/main/java/io/serein/chat/MainActivity.java'), 'utf8');
   const androidApi = fs.readFileSync(path.resolve(root, '../../apps/android/app/src/main/java/io/serein/chat/SereinApi.java'), 'utf8');
   const iosApi = fs.readFileSync(path.resolve(root, '../../apps/ios/SereinChat/SereinAPI.swift'), 'utf8');
+  const iosProduct = fs.readFileSync(path.resolve(root, '../../apps/ios/SereinChat/SereinProductView.swift'), 'utf8');
   assert.match(html, /id="restoreSessionRetry"/);
   assert.match(html, /id="sessionCurtain" class="session-curtain hidden"[^>]*aria-hidden="true"/);
   assert.match(app, /state\.sessionRestoreInProgress=true;sessionCurtain\.show\(\)/);
@@ -69,6 +70,11 @@ test('web session restore exposes connection failure and retry rather than silen
   assert.match(app, /SereinSessionRestore\.fetchAccount\(\(\)=>api\('\/api\/v1\/me',\{cache:'no-store'\}\)/);
   assert.match(app, /Your session has not been cleared/);
   assert.match(androidApi, /boolean hasSavedSession\(\)[\s\S]*?sessionVault\.load/);
-  assert.match(androidMain, /if\(!api\.hasSavedSession\(\)\)return;[\s\S]*?api\.me\(/);
-  assert.match(iosApi, /func restoreSession\(\) async[\s\S]*?cookies\(for: root\)\?\.contains\(where: \{ \$0\.name == "serein_session" \}\) == true else \{ return \}/);
+  assert.match(androidMain, /if\(!api\.hasSavedSession\(\)\)return;[\s\S]*?restoreSavedSession\(0\)/);
+  assert.match(androidMain, /error!=null&&api\.hasSavedSession\(\)&&attempt<3/);
+  assert.match(androidMain, /sessionRestorePending&&api\.hasSavedSession\(\)[\s\S]*?retrySavedSession\(\)/);
+  assert.match(iosApi, /func restoreSession\(\) async[\s\S]*?for attempt in 0..<3/);
+  assert.match(iosApi, /sessionRestoreAvailable = HTTPCookieStorage[\s\S]*?saved session is still stored/);
+  assert.match(iosProduct, /if api\.sessionRestoreAvailable[\s\S]*?await api\.restoreSession\(\)/);
+  assert.match(iosProduct, /Text\(api\.sessionRestoreInProgress \? "Restoring saved session…" : "Retry saved session"\)/);
 });

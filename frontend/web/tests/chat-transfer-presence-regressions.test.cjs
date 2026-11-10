@@ -29,7 +29,7 @@ test('GIFs, pasted files and chat-wide drops stage one attachment for preview be
   assert.match(app, /URL\.createObjectURL\(file\)/);
   assert.match(app, /Only one attachment can be staged at a time/);
   assert.match(app, /\$\('conversation'\)\.addEventListener\('drop',handleComposerDrop\)/);
-  assert.match(app, /if\(!attachment&&state\.pendingAttachment\)[\s\S]*?encryptAndUploadAttachment\(file\)/);
+  assert.match(app, /if\(!retry&&!attachment&&state\.pendingAttachment\)[\s\S]*?await encryptAndUploadAttachment\(file\)/);
   assert.match(app, /window\.addEventListener\('serein:gif-selected',[\s\S]*?sendComposerFile\(event\.detail\.file\)/);
   assert.match(app, /if\(type\.startsWith\('image\/'\)\|\|isImageFile\(file\)\)/);
   assert.match(app, /type\.startsWith\('video\/'\)/);
@@ -56,7 +56,7 @@ test('presence metadata returns latest last-seen only when the contact permits p
   assert.match(backend, /contact\.last_seen_at\.as_ref\(\)\.is_none_or/);
   assert.match(app, /presenceVisible:c\.presence_visible!==false/);
   assert.match(app, /if\(hidden\)\{node\.hidden=true;node\.textContent='';/);
-  assert.match(app, /hidePresence=!contact\.deleted&&\(contact\.presenceVisible===false\|\|contact\.historyOnly\)/);
+  assert.match(app, /function renderSelectedContactProfilePresence\(contact=state\.selected\)[\s\S]*?const hidden=!contact\.deleted&&\(contact\.presenceVisible===false\|\|contact\.historyOnly\)/);
   assert.match(app, /lastSeenAt:c\.last_seen_at\|\|''/);
   assert.match(html, /id="chatPresence" class="chat-presence"/);
   assert.match(app, /Last seen \$\{lastSeen\}/);

@@ -185,6 +185,11 @@ private struct SereinNativeAuthView: View {
                                     }.font(.system(size: 11, relativeTo: .body))
                                 }.onAppear { focusedOtp = 0 }
                             } else {
+                                if api.sessionRestoreAvailable {
+                                    Button { Task { await api.restoreSession() } } label: {
+                                        HStack { if api.sessionRestoreInProgress { ProgressView() }; Text(api.sessionRestoreInProgress ? "Restoring saved session…" : "Retry saved session"); Spacer(); Image(systemName: "arrow.clockwise") }
+                                    }.buttonStyle(SereinPrimaryButtonStyle()).disabled(api.sessionRestoreInProgress)
+                                }
                                 Button { showConnectionSettings = true } label: { HStack { Image(systemName: "network"); VStack(alignment: .leading) { Text("Server connection").font(.system(size: 11, weight: .semibold, relativeTo: .body)); Text(api.connectionStatus).font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary) }; Spacer(); Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold, relativeTo: .body)) }.foregroundStyle(SereinPalette.green).padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 11)).overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.secondary.opacity(0.22), lineWidth: 1)) }.buttonStyle(.plain).accessibilityLabel("Server connection settings")
                                 HStack(spacing: 6) { modeButton("Sign in", active: !registering) { withAnimation(.easeInOut(duration: 0.2)) { registering = false } }; modeButton("Create account", active: registering) { withAnimation(.easeInOut(duration: 0.2)) { registering = true } } }
                                 if registering {
@@ -749,6 +754,11 @@ private struct SereinNativeConversation: View {
     @State private var showGIFPicker = false
     @State private var draft = ""
     @State private var showKeys = false
+    @State private var showHistorySync = false
+    @State private var historySyncError: String?
+    @State private var historySyncPendingRequest: [String:Any]?
+    @State private var confirmKeyRotation = false
+    @State private var keyRotationError: String?
     @State private var showFilePicker = false
     @State private var showEmojiPicker = false
         @State private var fileToOpen: OpenAttachment?
@@ -815,6 +825,12 @@ private struct SereinNativeConversation: View {
                                     }
                                     Text(message.mine ? deliverySummary(message) : "\(message.sender) · \(formatMessageTime(message.createdAt))").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
                                         .frame(maxWidth: .infinity, alignment: .trailing)
+                                    if message.mine && message.status == "expired" {
+                                        Button(message.attachment == nil ? "Retry message" : "Select file to retry") {
+                                            if message.attachment != nil { showFilePicker = true }
+                                            else { Task { await engine.retryExpiredMessage(message.id) } }
+                                        }.buttonStyle(.bordered).font(.system(size: 11, weight: .semibold, relativeTo: .body))
+                                    }
                                 }
                                 .padding(.horizontal, 12).padding(.vertical, 9)
                                 .frame(maxWidth: UIScreen.main.bounds.width * 0.82, alignment: .leading)
@@ -867,8 +883,43 @@ private struct SereinNativeConversation: View {
                 }.accessibilityElement(children: .combine)
             }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Button { Task { await engine.refreshHistorySync();showHistorySync = true } } label: { Image(systemName: "arrow.triangle.2.circlepath") }.buttonStyle(SereinIconButtonStyle()).accessibilityLabel("Main-device history sync")
                 Button { showProfile = true } label: { Image(systemName: "info.circle") }.buttonStyle(SereinIconButtonStyle()).accessibilityLabel("Contact profile and shared media")
             }
+        }
+        .sheet(isPresented:$showHistorySync) {
+            NavigationView {
+                List {
+                    Section("Main-device-only policy") { Text("Current authority: \(engine.mainDevicePlatform == "android" ? "Android mobile" : engine.mainDevicePlatform == "ios" ? "iOS mobile" : engine.mainDevicePlatform == "web" ? "web browser" : "not designated"). iOS and Android devices take priority over browser devices. \(engine.mainDeviceID == nil ? "No main is designated" : engine.mainDeviceOnline ? "The designated main is online" : "The designated main is offline or not connected"). History is transferred only between this account’s designated main and one requesting child while both are online. The main explicitly sends; the child imports explicitly. Batches are encrypted for the child, expire after 24 hours, exclude ratchets/settings/keys and attachment bytes, and are not a server archive.").font(.system(size:11,relativeTo:.body)).foregroundStyle(.secondary) }
+                    if engine.mainDeviceID == api.currentDevice?.id {
+                        Section("Child requests") {
+                            let pending=engine.historySyncRequests.filter { ($0["caller_is_main"] as? Bool == true) && (["pending","transferring","ready"].contains($0["status"] as? String ?? "")) }
+                            if pending.isEmpty { Text("No active child sync requests.").foregroundStyle(.secondary) }
+                            ForEach(Array(pending.enumerated()),id:\.offset) { _, request in
+                                if request["status"] as? String == "ready" { Text("Encrypted batches are ready; waiting for the child to import.").font(.system(size:11,relativeTo:.body)).foregroundStyle(.secondary) }
+                                else { Button { historySyncPendingRequest=request } label: { VStack(alignment:.leading,spacing:4) { Text("Sync everything to \(request["child_device_name"] as? String ?? "child device")").font(.system(size:13,weight:.semibold,relativeTo:.body));Text("You choose when to send. Local decrypted timeline only.").font(.system(size:10,relativeTo:.body)).foregroundStyle(.secondary) } } }
+                                Button("Cancel sync request",role:.destructive) { Task { do { try await engine.cancelHistorySync(request) } catch { historySyncError=error.localizedDescription } } }
+                            }
+                        }
+                    } else {
+                        Section("Child device") {
+                            if engine.mainDeviceID != nil { Button("Request ‘Sync everything’ from main") { Task { do { try await engine.requestHistorySync() } catch { historySyncError=error.localizedDescription } } } } else { Text("No main device is designated. Promote the preferred mobile device first.").font(.system(size:11,relativeTo:.body)).foregroundStyle(.secondary) }
+                            let own=engine.historySyncRequests.filter { ($0["caller_is_main"] as? Bool != true) }
+                            ForEach(Array(own.enumerated()),id:\.offset) { _, request in
+                                if request["status"] as? String == "ready" {
+                                    Button("Import ready history") { Task { do { let count=try await engine.receiveHistorySync(request);historySyncError="Imported \(count) missing history records. Ratchet snapshots were not modified." } catch { historySyncError=error.localizedDescription } } }
+                                } else { Text("Request status: \(request["status"] as? String ?? "pending") · waiting for main").font(.system(size:11,relativeTo:.body)).foregroundStyle(.secondary) }
+                                Button("Cancel request",role:.destructive) { Task { do { try await engine.cancelHistorySync(request) } catch { historySyncError=error.localizedDescription } } }
+                            }
+                        }
+                    }
+                    if engine.mainDeviceID == nil && (engine.preferredMobileDeviceID == nil || engine.preferredMobileDeviceID == api.currentDevice?.id) { Section("No main device") { Button(engine.preferredMobileDeviceID == nil ? "Promote this device for future sync" : "Promote preferred mobile for future sync") { Task { do { try await engine.promoteCurrentDeviceToMain() } catch { historySyncError=error.localizedDescription } } };Text("This does not restore history from a former main device.").font(.system(size:10,relativeTo:.body)).foregroundStyle(.secondary) } }
+                    Section("Device keys") { Text("Open Security to inspect locally pinned device keys or explicitly start a signed key rotation.").font(.system(size:10,relativeTo:.body)).foregroundStyle(.secondary) }
+                }.listStyle(.insetGrouped).navigationTitle("History & devices").toolbar { ToolbarItem(placement:.navigationBarLeading){Button { Task { await engine.refreshHistorySync() } } label: { Image(systemName:"arrow.clockwise") }.accessibilityLabel("Refresh history requests") };ToolbarItem(placement:.confirmationAction){Button("Done"){showHistorySync=false}} }
+            }
+            .task { await engine.refreshHistorySync() }
+            .confirmationDialog("Send local history to this child?",isPresented:Binding(get:{historySyncPendingRequest != nil},set:{if !$0{historySyncPendingRequest=nil}}),titleVisibility:.visible){Button("Sync history"){guard let request=historySyncPendingRequest else{return};historySyncPendingRequest=nil;Task{do{try await engine.sendHistorySync(request)}catch{historySyncError=error.localizedDescription}}};Button("Cancel",role:.cancel){historySyncPendingRequest=nil}} message:{Text("Only this device’s locally decrypted timeline is sent. Ratchets, settings, keys and attachment bytes are excluded. The encrypted server relay expires after 24 hours.")}
+            .alert("History or key operation",isPresented:Binding(get:{historySyncError != nil},set:{if !$0{historySyncError=nil}})){Button("OK",role:.cancel){historySyncError=nil}} message:{Text(historySyncError ?? "Operation did not complete.")}
         }
         .fullScreenCover(isPresented: $showProfile) { SereinContactProfile(api: api, engine: engine, contact: contact, messages: engine.messages) }
         .sheet(isPresented: $showGIFPicker) { SereinNativeGIFPicker { url in Task { defer { try? FileManager.default.removeItem(at: url) }; await engine.sendFile(url: url, filename: url.lastPathComponent, contentType: "image/gif") } } }
@@ -879,7 +930,7 @@ private struct SereinNativeConversation: View {
             while !Task.isCancelled && !engine.archived {
                 await engine.poll(); cycles += 1
                 if cycles % 12 == 0 { try? await engine.refreshPeerKeys() }
-                if cycles % 6 == 0 { await api.refreshContactPresence() }
+                if cycles % 6 == 0 { await engine.retryPendingIfNeeded(); await api.refreshContactPresence() }
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
@@ -887,6 +938,10 @@ private struct SereinNativeConversation: View {
             NavigationView {
                 List {
                     Section { Text("The app checks both ECDH key layers against their combined fingerprint and pins first-seen keys on this device. A previously pinned key change or capability downgrade is blocked; supported capability upgrades with the same key are adopted. First-use pinning detects later changes but cannot independently authenticate a first-seen key if the directory is compromised.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
+                    Section("This device") {
+                        Text("Rotate only with a signed continuity proof. Rotation waits while old-key ciphertext is queued or a history sync is active; local history and old fingerprint-namespaced ratchet snapshots remain on this device.").font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary)
+                        Button("Rotate this device’s encryption keys", role: .destructive) { confirmKeyRotation = true }
+                    }
                     Section("Signed-in recipient devices") {
                         if engine.peerKeys.isEmpty { Text(engine.status).font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary) }
                         ForEach(engine.peerKeys) { peer in
@@ -905,6 +960,11 @@ private struct SereinNativeConversation: View {
                 }.listStyle(.insetGrouped).navigationTitle("Encryption status")
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showKeys = false } } }
             }
+            .confirmationDialog("Rotate this device’s encryption keys?", isPresented: $confirmKeyRotation, titleVisibility: .visible) {
+                Button("Rotate keys", role: .destructive) { Task { do { try await engine.rotateDeviceKeys() } catch { keyRotationError = error.localizedDescription } } }
+                Button("Cancel", role: .cancel) { }
+            } message: { Text("The server must confirm the old-key queue is clear. A proof signed by this device’s separate signing identity is required; failed rotation does not update peer pins.") }
+            .alert("Key rotation did not complete", isPresented: Binding(get: { keyRotationError != nil }, set: { if !$0 { keyRotationError = nil } })) { Button("OK", role: .cancel) { keyRotationError = nil } } message: { Text(keyRotationError ?? "The device key was not changed.") }
         }
         .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
             guard case .success(let urls) = result, let url = urls.first else { return }
@@ -925,7 +985,7 @@ private struct SereinNativeConversation: View {
     }
 
     private var timeline: [SereinConversationTimelineItem] {
-        var items=engine.messages.map { SereinConversationTimelineItem(id:$0.id,createdAt:$0.createdAt,message:$0,eventText:nil) }
+        var items=engine.messages.map { $0.isSystem ? SereinConversationTimelineItem(id:$0.id,createdAt:$0.createdAt,message:nil,eventText:$0.text) : SereinConversationTimelineItem(id:$0.id,createdAt:$0.createdAt,message:$0,eventText:nil) }
         let name=engine.peerDisplayName.replacingOccurrences(of:" (Deleted User)",with:"")
         if let connected=contact.connected_at { items.append(SereinConversationTimelineItem(id:"connection-event",createdAt:connected,message:nil,eventText:"You and \(name) are now friends.")) }
         if (contact.isDeleted || engine.archived),let deleted=engine.deletedAt ?? contact.deleted_at { items.append(SereinConversationTimelineItem(id:"deleted-event",createdAt:deleted,message:nil,eventText:"\(name) deleted his account. No new messages are allowed.")) }
@@ -935,7 +995,7 @@ private struct SereinNativeConversation: View {
         }
     }
     private func deliverySummary(_ message: SereinChatMessage) -> String {
-        let label = message.readCount > 0 ? "Read" : (message.deliveredCount > 0 ? "Delivered" : (message.status == "pending" ? "Queued" : "Sent"))
+        let label = message.status == "expired" ? "Not delivered · expired" : (message.readCount > 0 ? "Read" : (message.deliveredCount > 0 ? "Delivered" : (message.status == "pending" ? "Queued" : "Sent")))
         let counted = message.readCount > 0 ? message.readCount : message.deliveredCount
         let devices = message.recipientCount > 0 ? " · \(counted)/\(message.recipientCount) devices" : ""
         return "\(label)\(devices) · \(formatMessageTime(message.createdAt))"

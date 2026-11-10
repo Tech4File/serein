@@ -1,7 +1,7 @@
 use aes_gcm::{aead::{Aead, KeyInit, Payload}, Aes256Gcm, Nonce};
 use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
 use hkdf::Hkdf;
-use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, PublicKey, SecretKey};
+use p256::{ecdh::diffie_hellman, ecdsa::{signature::Verifier, Signature as P256Signature, VerifyingKey}, elliptic_curve::sec1::ToEncodedPoint, PublicKey, SecretKey};
 use axum::{body::{Body, Bytes}, extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Path, Query, Request, State}, http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{delete, get, post, put}, Json, Router};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use dashmap::DashMap;
@@ -27,6 +27,10 @@ const OTP_RESEND_COOLDOWN_SECONDS: u64 = 60;
 const MAX_CIPHERTEXT_CHARS: usize = serein_core::MAX_CIPHERTEXT_CHARS;
 const MAX_LIVE_CONNECTIONS: usize = 20_000;
 const MAX_QUEUED_PER_DEVICE: i64 = 5_000;
+const EXPIRY_TOMBSTONE_TTL_DAYS: i64 = 90;
+const MAX_HISTORY_SYNC_BATCH_BYTES: usize = 512 * 1024;
+const MAX_HISTORY_SYNC_BATCHES: i16 = 128;
+const MAX_HISTORY_SYNC_ACCOUNT_BYTES: i64 = 256 * 1024 * 1024;
 const MAX_TRANSFER_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_TRANSFER_CHUNKS: i32 = 512;
 const MAX_TRANSFER_BYTES: i64 = 64 * 1024 * 1024;
@@ -46,13 +50,14 @@ type PeerMap = DashMap<Uuid, Peer>;
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct BackupKeyEnvelopeRequest { client_public_key: P256PublicJwk, #[serde(default)] envelope_version: Option<u8> }
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct DeleteAccountInput { password: String }
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct LoginInput { identity: String, password: String }
-#[derive(Deserialize)] struct VerifyEmailInput { email: String, code: String, device_name: Option<String>, device_id: Option<Uuid> }
-#[derive(Deserialize)] struct VerifyLoginInput { identity: String, password: String, code: String, device_name: Option<String>, device_id: Option<Uuid> }
+#[derive(Deserialize)] struct VerifyEmailInput { email: String, code: String, device_name: Option<String>, device_id: Option<Uuid>, device_platform: Option<String> }
+#[derive(Deserialize)] struct VerifyLoginInput { identity: String, password: String, code: String, device_name: Option<String>, device_id: Option<Uuid>, device_platform: Option<String> }
 #[derive(Deserialize)] struct ResendVerificationInput { identity: String }
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct AddContactInput { identity: Option<String>, username: Option<String>, email: Option<String> }
 #[derive(Deserialize,Serialize,Default)] #[serde(deny_unknown_fields)] struct SettingsPatch { #[serde(skip_serializing_if="Option::is_none")] theme: Option<String>, #[serde(skip_serializing_if="Option::is_none")] font_scale: Option<String>, #[serde(skip_serializing_if="Option::is_none")] reduce_motion: Option<bool>, #[serde(skip_serializing_if="Option::is_none")] notifications: Option<bool>, #[serde(skip_serializing_if="Option::is_none")] presence_visibility: Option<String>, #[serde(skip_serializing_if="Option::is_none")] allow_contact_requests: Option<bool>, #[serde(skip_serializing_if="Option::is_none")] discoverable_by_email: Option<bool> }
 #[derive(Serialize)] struct ErrorBody { error: String }
-#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct DevicePublicKeyInput { algorithm: String, public_key: P256PublicJwk, layer2_public_key: P256PublicJwk, #[serde(default)] ratchet_version: Option<u8> }
+#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct HistorySyncBatchInput { batch_index: i16, batch_count: i16, ciphertext_json: String, digest: String }
+#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct DevicePublicKeyInput { algorithm: String, public_key: P256PublicJwk, layer2_public_key: P256PublicJwk, #[serde(default)] ratchet_version: Option<u8>, #[serde(default)] signing_public_key: Option<P256PublicJwk>, #[serde(default)] key_epoch: Option<i64>, #[serde(default)] rotation_proof: Option<String>, #[serde(default)] rotation_timestamp: Option<i64> }
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)] #[serde(deny_unknown_fields)] struct P256PublicJwk { kty: String, crv: String, x: String, y: String }
 #[derive(Serialize)] struct ContactRequestReply { id: Uuid, username: String, display_name: String, created_at: String, direction: String }
 #[derive(Serialize)] struct BlockReply { user_id: Uuid, username: String, display_name: String, created_at: String }
@@ -60,9 +65,10 @@ type PeerMap = DashMap<Uuid, Peer>;
 #[derive(Serialize)] struct UserReply { id: Uuid, username: String, email: String, display_name: String, email_verified: bool }
 #[derive(Serialize, Clone)] struct DeviceReply { id: Uuid, name: String }
 #[derive(Serialize, Clone)] struct ContactReply { user_id: Uuid, username: String, display_name: String, email_verified: bool, online: bool, presence_visible: bool, last_seen_at: Option<String>, devices: Vec<DeviceReply>, connected_at: String, deleted: bool, deleted_at: Option<String> }
-#[derive(Serialize)] struct DeviceSessionReply { id: Uuid, name: String, created_at: String, last_seen_at: String, current: bool, online: bool }
+#[derive(Serialize)] struct DeviceSessionReply { id: Uuid, name: String, platform: String, created_at: String, last_seen_at: String, current: bool, online: bool, main: bool }
 #[derive(Deserialize)] #[serde(tag = "type", rename_all = "snake_case")] enum ClientFrame { Message { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }, Ack { id: Uuid }, Heartbeat }
 #[derive(Deserialize)] struct HistoryQuery { after_created_at: Option<String>, after_id: Option<Uuid>, limit: Option<i64> }
+#[derive(Deserialize)] struct ExpiredMessagesQuery { after_created_at: Option<String>, after_id: Option<Uuid>, limit: Option<i64>, contact_id: Option<Uuid> }
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct MessageReceiptsQuery { ids: Vec<Uuid> }
 #[derive(Deserialize)] struct SendEnvelopeInput { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }
 #[derive(Deserialize)] struct CreateTransferInput { id: Uuid, recipient_user_id: Uuid, chunk_count: i32, total_ciphertext_bytes: i64, #[serde(default = "legacy_transfer_crypto_version")] chunk_crypto_version: u8, device_envelopes: Vec<TransferDeviceEnvelope> }
@@ -96,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut interval=tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
+            match sqlx::query("DELETE FROM history_sync_requests WHERE id IN (SELECT id FROM history_sync_requests WHERE expires_at<=now() ORDER BY expires_at LIMIT 50)").execute(&cleanup_db).await { Ok(result) if result.rows_affected()>0=>info!(deleted=result.rows_affected(),"expired history-sync relay requests purged"), Ok(_)=>{}, Err(_)=>warn!("history-sync relay cleanup failed"), }
             match sqlx::query("DELETE FROM encrypted_transfers WHERE id IN (SELECT id FROM encrypted_transfers WHERE expires_at<=now() ORDER BY expires_at LIMIT 1)").execute(&cleanup_db).await {
                 Ok(result) if result.rows_affected()>0=>info!(deleted=result.rows_affected(),"expired encrypted transfer purged"),
                 Ok(_)=>{},
@@ -111,10 +118,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(_)=>{},
                 Err(_)=>warn!("acknowledged ciphertext cleanup failed"),
             }
-            match sqlx::query("DELETE FROM queued_ciphertexts WHERE (recipient_device_id,id) IN (SELECT recipient_device_id,id FROM queued_ciphertexts WHERE delivered_at IS NULL AND created_at<=now()-interval '30 days' ORDER BY created_at,recipient_device_id,id LIMIT 500)").execute(&cleanup_db).await {
-                Ok(result) if result.rows_affected()>0=>info!(deleted=result.rows_affected(),"expired ciphertext packets purged"),
+            match sqlx::query_scalar::<_,i64>("WITH candidates AS MATERIALIZED (SELECT q.recipient_device_id,q.id FROM queued_ciphertexts q JOIN message_receipts r ON r.message_id=q.id AND r.recipient_device_id=q.recipient_device_id WHERE q.delivered_at IS NULL AND r.delivered_at IS NULL AND r.expired_at IS NULL AND q.created_at<=now()-interval '30 days' ORDER BY q.created_at,q.recipient_device_id,q.id LIMIT 500 FOR UPDATE OF q,r SKIP LOCKED), marked AS (UPDATE message_receipts r SET expired_at=now() FROM candidates c WHERE r.message_id=c.id AND r.recipient_device_id=c.recipient_device_id AND r.delivered_at IS NULL AND r.expired_at IS NULL RETURNING r.message_id,r.recipient_device_id), deleted AS (DELETE FROM queued_ciphertexts q USING marked m WHERE q.id=m.message_id AND q.recipient_device_id=m.recipient_device_id RETURNING 1) SELECT COUNT(*)::bigint FROM deleted").fetch_one(&cleanup_db).await {
+                Ok(deleted) if deleted>0=>info!(deleted,"expired ciphertext packets purged with tombstones"),
                 Ok(_)=>{},
-                Err(_)=>warn!("expired ciphertext cleanup failed"),
+                Err(_)=>warn!("expired ciphertext cleanup failed; queue rows retained"),
+            }
+            match sqlx::query("DELETE FROM message_receipts WHERE expired_at<=now()-make_interval(days => $1)").bind(EXPIRY_TOMBSTONE_TTL_DAYS as i32).execute(&cleanup_db).await {
+                Ok(result) if result.rows_affected()>0=>info!(deleted=result.rows_affected(),"expired-message tombstones purged"),
+                Ok(_)=>{},
+                Err(_)=>warn!("expired-message tombstone cleanup failed"),
             }
         }
     });
@@ -123,11 +135,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/healthz", get(healthz)).route("/api/v1/security/capabilities", get(security_capabilities)).route("/status", get(|| async { axum::response::Html(include_str!("../../frontend/web/status.html")) }))
         .route("/api/v1/auth/register", post(register)).route("/api/v1/auth/verify-email", post(verify_email)).route("/api/v1/auth/resend-verification", post(resend_verification)).route("/api/v1/auth/login", post(login)).route("/api/v1/auth/verify-login", post(verify_login)).route("/api/v1/auth/logout", post(logout))
-        .route("/api/v1/me", get(me).delete(delete_account)).route("/api/v1/backups/key-envelope", post(get_backup_key_envelope)).route("/api/v1/device-key", put(register_device_public_key)).route("/api/v1/contacts/:contact_id/device-keys", get(list_contact_device_public_keys)).route("/api/v1/messages", get(list_messages).post(send_message_api)).route("/api/v1/messages/receipts", post(list_message_receipts)).route("/api/v1/messages/read", post(mark_messages_read_api)).route("/api/v1/messages/:id/ack", post(ack_message_api)).route("/api/v1/messages/:id/read", post(mark_message_read_api)).route("/api/v1/settings", get(get_settings).put(put_settings)).route("/api/v1/contacts", get(list_contacts).post(create_contact_request))
+        .route("/api/v1/me", get(me).delete(delete_account)).route("/api/v1/backups/key-envelope", post(get_backup_key_envelope)).route("/api/v1/device-key", put(register_device_public_key)).route("/api/v1/device-keys", get(list_own_device_keys)).route("/api/v1/contacts/:contact_id/device-keys", get(list_contact_device_public_keys)).route("/api/v1/messages", get(list_messages).post(send_message_api)).route("/api/v1/messages/expiries", get(list_expired_messages)).route("/api/v1/messages/receipts", post(list_message_receipts)).route("/api/v1/messages/read", post(mark_messages_read_api)).route("/api/v1/messages/:id/ack", post(ack_message_api)).route("/api/v1/messages/:id/read", post(mark_message_read_api)).route("/api/v1/settings", get(get_settings).put(put_settings)).route("/api/v1/contacts", get(list_contacts).post(create_contact_request))
         .route("/api/v1/contact-requests", get(list_contact_requests).post(create_contact_request)).route("/api/v1/contact-requests/:request_id/accept", post(accept_contact_request)).route("/api/v1/contact-requests/:request_id", delete(delete_contact_request))
         .route("/api/v1/blocks", get(list_blocks)).route("/api/v1/blocks/:user_id", put(block_user).delete(unblock_user))
         .route("/api/v1/contacts/:contact_id", delete(remove_contact)).route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/:device_id", delete(revoke_device)).route("/api/v1/devices/revoke-others", post(revoke_other_devices))
+        .route("/api/v1/devices/main", post(promote_current_device_to_main)).route("/api/v1/history-sync/requests", post(create_history_sync_request).get(list_history_sync_requests)).route("/api/v1/history-sync/requests/:request_id/batches", post(put_history_sync_batch).get(get_history_sync_batches)).route("/api/v1/history-sync/requests/:request_id/ack", post(ack_history_sync_request)).route("/api/v1/history-sync/requests/:request_id", delete(cancel_history_sync_request))
         .route("/api/v1/transfers", get(list_encrypted_transfers).post(create_encrypted_transfer))
         .route("/api/v1/transfers/:transfer_id/chunks/:index", put(upload_transfer_chunk).get(download_transfer_chunk))
         .route("/api/v1/transfers/:transfer_id/ack", post(ack_encrypted_transfer)).route("/api/v1/transfers/:transfer_id", delete(abort_encrypted_transfer))
@@ -201,16 +214,39 @@ async fn security_capabilities() -> Json<Value> {
 async fn initialize_schema(db: &PgPool) -> Result<(), sqlx::Error> {
     let statements = [
         "CREATE TABLE IF NOT EXISTS accounts (id UUID PRIMARY KEY, username TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, email_verified BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
-        "CREATE TABLE IF NOT EXISTS devices (id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, label TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ NULL)",
+        "CREATE TABLE IF NOT EXISTS devices (id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, label TEXT NOT NULL, platform TEXT NOT NULL DEFAULT 'web' CHECK(platform IN ('web','android','ios')), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ NULL)",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT 'web' CHECK(platform IN ('web','android','ios'))",
+        "UPDATE devices SET platform=CASE WHEN label ILIKE '%android%' THEN 'android' WHEN label ILIKE '%ios%' OR label ILIKE '%iphone%' OR label ILIKE '%ipad%' THEN 'ios' ELSE platform END WHERE platform='web'",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS main_device_id UUID NULL REFERENCES devices(id) ON DELETE SET NULL",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS main_device_designated BOOLEAN NOT NULL DEFAULT FALSE",
+        "UPDATE accounts a SET main_device_id=(SELECT d.id FROM devices d WHERE d.user_id=a.id AND d.revoked_at IS NULL ORDER BY CASE WHEN d.platform IN ('android','ios') THEN 0 ELSE 1 END,d.created_at ASC,d.id ASC LIMIT 1),main_device_designated=TRUE WHERE NOT a.main_device_designated AND EXISTS(SELECT 1 FROM devices d WHERE d.user_id=a.id AND d.revoked_at IS NULL)",
+        "UPDATE accounts a SET main_device_id=(SELECT m.id FROM devices m WHERE m.user_id=a.id AND m.revoked_at IS NULL AND m.platform IN ('android','ios') ORDER BY m.created_at ASC,m.id ASC LIMIT 1) WHERE a.main_device_designated AND a.main_device_id IS NOT NULL AND EXISTS(SELECT 1 FROM devices m WHERE m.user_id=a.id AND m.revoked_at IS NULL AND m.platform IN ('android','ios'))",
+        "CREATE TABLE IF NOT EXISTS history_sync_requests (id UUID PRIMARY KEY,user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,main_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,child_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','transferring','ready','complete','cancelled','expired')),batch_count SMALLINT NULL CHECK(batch_count BETWEEN 1 AND 128),created_at TIMESTAMPTZ NOT NULL DEFAULT now(),expires_at TIMESTAMPTZ NOT NULL DEFAULT now()+interval '24 hours',completed_at TIMESTAMPTZ NULL,CHECK(main_device_id<>child_device_id))",
+        "CREATE INDEX IF NOT EXISTS history_sync_requests_main_pending ON history_sync_requests(main_device_id,status,created_at)",
+        "CREATE INDEX IF NOT EXISTS history_sync_requests_child ON history_sync_requests(child_device_id,created_at DESC)",
+        "CREATE TABLE IF NOT EXISTS history_sync_batches (request_id UUID NOT NULL REFERENCES history_sync_requests(id) ON DELETE CASCADE,batch_index SMALLINT NOT NULL CHECK(batch_index BETWEEN 0 AND 127),batch_count SMALLINT NOT NULL CHECK(batch_count BETWEEN 1 AND 128),ciphertext JSONB NOT NULL,digest TEXT NOT NULL CHECK(digest ~ '^[0-9a-f]{64}$'),ciphertext_bytes INTEGER NOT NULL CHECK(ciphertext_bytes BETWEEN 1 AND 524288),created_at TIMESTAMPTZ NOT NULL DEFAULT now(),expires_at TIMESTAMPTZ NOT NULL DEFAULT now()+interval '24 hours',PRIMARY KEY(request_id,batch_index),CHECK(batch_index<batch_count))",
+        "UPDATE history_sync_requests r SET status='cancelled' FROM accounts a WHERE a.id=r.user_id AND r.status IN ('pending','transferring','ready') AND (r.main_device_id IS DISTINCT FROM a.main_device_id OR EXISTS(SELECT 1 FROM devices d WHERE d.id IN (r.main_device_id,r.child_device_id) AND d.revoked_at IS NOT NULL))",
+        "DELETE FROM history_sync_batches b USING history_sync_requests r WHERE b.request_id=r.id AND r.status='cancelled'",
+        "CREATE INDEX IF NOT EXISTS history_sync_batches_expiry ON history_sync_batches(expires_at)",
         "CREATE INDEX IF NOT EXISTS devices_by_user ON devices(user_id, created_at DESC)",
-        "CREATE TABLE IF NOT EXISTS device_public_keys (device_id UUID PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL CHECK(algorithm='ECDH-P256'), public_key JSONB NOT NULL, layer2_public_key JSONB, fingerprint TEXT NOT NULL, key_version INTEGER NOT NULL DEFAULT 1 CHECK(key_version IN (1,2)), ratchet_version SMALLINT NOT NULL DEFAULT 2 CHECK(ratchet_version IN (2,3)), registered_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        "CREATE TABLE IF NOT EXISTS device_public_keys (device_id UUID PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, algorithm TEXT NOT NULL CHECK(algorithm='ECDH-P256'), public_key JSONB NOT NULL, layer2_public_key JSONB, fingerprint TEXT NOT NULL, key_version INTEGER NOT NULL DEFAULT 1 CHECK(key_version IN (1,2)), ratchet_version SMALLINT NOT NULL DEFAULT 2 CHECK(ratchet_version IN (2,3)), signing_public_key JSONB NULL, key_epoch BIGINT NOT NULL DEFAULT 1 CHECK(key_epoch>=1), previous_fingerprint TEXT NULL, rotation_proof TEXT NULL, rotation_timestamp BIGINT NULL, rotated_at TIMESTAMPTZ NULL, registered_at TIMESTAMPTZ NOT NULL DEFAULT now())",
         "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS layer2_public_key JSONB",
         "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS ratchet_version SMALLINT NOT NULL DEFAULT 2",
+        "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS signing_public_key JSONB NULL",
+        "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS key_epoch BIGINT NOT NULL DEFAULT 1",
+        "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS previous_fingerprint TEXT NULL",
+        "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS rotation_proof TEXT NULL",
+        "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS rotation_timestamp BIGINT NULL",
+        "ALTER TABLE device_public_keys ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ NULL",
+        "ALTER TABLE device_public_keys DROP CONSTRAINT IF EXISTS device_public_keys_key_epoch_check",
+        "ALTER TABLE device_public_keys ADD CONSTRAINT device_public_keys_key_epoch_check CHECK(key_epoch>=1)",
         "ALTER TABLE device_public_keys DROP CONSTRAINT IF EXISTS device_public_keys_ratchet_version_check",
         "ALTER TABLE device_public_keys ADD CONSTRAINT device_public_keys_ratchet_version_check CHECK(ratchet_version IN (2,3))",
         "ALTER TABLE device_public_keys DROP CONSTRAINT IF EXISTS device_public_keys_key_version_check",
         "ALTER TABLE device_public_keys ADD CONSTRAINT device_public_keys_key_version_check CHECK(key_version IN (1,2))",
         "CREATE INDEX IF NOT EXISTS device_public_keys_by_user ON device_public_keys(user_id,registered_at)",
+        "CREATE TABLE IF NOT EXISTS device_key_rotation_history (device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, key_epoch BIGINT NOT NULL CHECK(key_epoch>1), old_fingerprint TEXT NOT NULL, new_fingerprint TEXT NOT NULL, proof TEXT NOT NULL, rotation_timestamp BIGINT NOT NULL CHECK(rotation_timestamp>0), rotated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(device_id,key_epoch), CHECK(old_fingerprint<>new_fingerprint))",
+        "CREATE INDEX IF NOT EXISTS device_key_rotation_history_lookup ON device_key_rotation_history(device_id,key_epoch DESC)",
         "CREATE TABLE IF NOT EXISTS auth_sessions (token_hash BYTEA PRIMARY KEY, user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL)",
         "CREATE TABLE IF NOT EXISTS account_backup_keys (user_id UUID PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, key_version SMALLINT NOT NULL DEFAULT 1 CHECK(key_version=1), at_rest_version SMALLINT NOT NULL DEFAULT 2 CHECK(at_rest_version IN (1,2)), key_material BYTEA NULL CHECK(key_material IS NULL OR octet_length(key_material)=32), nonce BYTEA NULL CHECK(nonce IS NULL OR octet_length(nonce)=12), ciphertext BYTEA NULL CHECK(ciphertext IS NULL OR octet_length(ciphertext)=48), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
         "ALTER TABLE account_backup_keys ADD COLUMN IF NOT EXISTS key_material BYTEA NULL",
@@ -245,7 +281,12 @@ async fn initialize_schema(db: &PgPool) -> Result<(), sqlx::Error> {
         "CREATE INDEX IF NOT EXISTS queued_ciphertexts_delivery ON queued_ciphertexts(recipient_device_id, delivered_at, created_at, id)",
         "CREATE INDEX IF NOT EXISTS queued_ciphertexts_created_at ON queued_ciphertexts(created_at)",
         "CREATE INDEX IF NOT EXISTS queued_ciphertexts_delivered_cleanup ON queued_ciphertexts(delivered_at,recipient_device_id,id) WHERE delivered_at IS NOT NULL",
-        "CREATE TABLE IF NOT EXISTS message_receipts (message_id UUID NOT NULL, sender_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, sender_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, recipient_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, recipient_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(), delivered_at TIMESTAMPTZ NULL, read_at TIMESTAMPTZ NULL, PRIMARY KEY(message_id,recipient_device_id), CHECK(read_at IS NULL OR delivered_at IS NOT NULL))",
+        "CREATE TABLE IF NOT EXISTS message_receipts (message_id UUID NOT NULL, sender_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, sender_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, recipient_user_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, recipient_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE, accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(), delivered_at TIMESTAMPTZ NULL, read_at TIMESTAMPTZ NULL, expired_at TIMESTAMPTZ NULL, PRIMARY KEY(message_id,recipient_device_id), CHECK(read_at IS NULL OR delivered_at IS NOT NULL), CHECK(expired_at IS NULL OR delivered_at IS NULL))",
+        "ALTER TABLE message_receipts ADD COLUMN IF NOT EXISTS expired_at TIMESTAMPTZ NULL",
+        "ALTER TABLE message_receipts DROP CONSTRAINT IF EXISTS message_receipts_terminal_state_check",
+        "ALTER TABLE message_receipts ADD CONSTRAINT message_receipts_terminal_state_check CHECK(expired_at IS NULL OR delivered_at IS NULL)",
+        "CREATE INDEX IF NOT EXISTS message_receipts_expired_recipient_cursor ON message_receipts(recipient_user_id,recipient_device_id,expired_at,message_id) WHERE expired_at IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS message_receipts_expired_cleanup ON message_receipts(expired_at) WHERE expired_at IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS message_receipts_sender_message ON message_receipts(sender_user_id,message_id)",
         "CREATE INDEX IF NOT EXISTS message_receipts_recipient_message ON message_receipts(recipient_user_id,message_id)",
         "INSERT INTO message_receipts(message_id,sender_user_id,sender_device_id,recipient_user_id,recipient_device_id,accepted_at,delivered_at) SELECT q.id,sd.user_id,q.sender_device_id,rd.user_id,q.recipient_device_id,q.created_at,q.delivered_at FROM queued_ciphertexts q JOIN devices sd ON sd.id=q.sender_device_id JOIN devices rd ON rd.id=q.recipient_device_id ON CONFLICT(message_id,recipient_device_id) DO NOTHING",
@@ -333,6 +374,10 @@ fn account_unique_conflict(constraint: Option<&str>) -> Option<&'static str> {
     }
 }
 fn normalise_username(value: &str) -> String { serein_core::normalize_username(value) }
+fn normalize_device_platform(value:Option<&str>,label:&str)->Option<&'static str>{
+    if let Some(platform)=value{match platform.trim().to_ascii_lowercase().as_str(){"web"=>Some("web"),"android"=>Some("android"),"ios"=>Some("ios"),_=>None}}
+    else{let label=label.to_ascii_lowercase();if label.contains("android"){Some("android")}else if label.contains("ios")||label.contains("iphone")||label.contains("ipad"){Some("ios")}else{Some("web")}}
+}
 fn history_page_limit(requested: Option<i64>) -> i64 { serein_core::history_page_limit(requested) }
 fn valid_ciphertext_parts(iv:&str,ciphertext:&str)->bool{serein_core::valid_ciphertext_parts(iv,ciphertext)}
 fn valid_theme(value:&str)->bool{serein_core::valid_theme(value)}
@@ -352,15 +397,19 @@ async fn authenticate(db:&PgPool,headers:&HeaderMap)->Result<Option<AuthContext>
     Ok(row.map(|(user_id,username,email,display_name,email_verified,device_id,device_name,session_hash)|AuthContext{user_id,username,email,display_name,email_verified,device_id,device_name,session_hash}))
 }
 fn auth_reply(ctx:&AuthContext)->AuthReply{AuthReply{user:UserReply{id:ctx.user_id,username:ctx.username.clone(),email:ctx.email.clone(),display_name:ctx.display_name.clone(),email_verified:ctx.email_verified},device:DeviceReply{id:ctx.device_id,name:ctx.device_name.clone()}}}
-async fn create_device_session(db:&PgPool,user_id:Uuid,device_name:&str,requested_device_id:Option<Uuid>)->Result<(Uuid,String),sqlx::Error>{
+async fn create_device_session(db:&PgPool,user_id:Uuid,device_name:&str,platform:&str,requested_device_id:Option<Uuid>)->Result<(Uuid,String),sqlx::Error>{
     let mut tx=db.begin().await?;
+    sqlx::query_scalar::<_,Uuid>("SELECT id FROM accounts WHERE id=$1 FOR UPDATE").bind(user_id).fetch_one(&mut *tx).await?;
     let mut device_id=requested_device_id.unwrap_or_else(Uuid::new_v4);
     let existing=sqlx::query_as::<_,(Uuid,bool)>("SELECT user_id,revoked_at IS NOT NULL FROM devices WHERE id=$1 FOR UPDATE").bind(device_id).fetch_optional(&mut *tx).await?;
     match existing {
-        Some((owner,false)) if owner==user_id=>{sqlx::query("UPDATE devices SET label=$2,last_seen_at=now() WHERE id=$1").bind(device_id).bind(device_name).execute(&mut *tx).await?;},
-        Some(_)=>{device_id=Uuid::new_v4();sqlx::query("INSERT INTO devices(id,user_id,label) VALUES($1,$2,$3)").bind(device_id).bind(user_id).bind(device_name).execute(&mut *tx).await?;},
-        None=>{sqlx::query("INSERT INTO devices(id,user_id,label) VALUES($1,$2,$3)").bind(device_id).bind(user_id).bind(device_name).execute(&mut *tx).await?;}
+        Some((owner,false)) if owner==user_id=>{sqlx::query("UPDATE devices SET label=$2,platform=$3,last_seen_at=now() WHERE id=$1").bind(device_id).bind(device_name).bind(platform).execute(&mut *tx).await?;},
+        Some(_)=>{device_id=Uuid::new_v4();sqlx::query("INSERT INTO devices(id,user_id,label,platform) VALUES($1,$2,$3,$4)").bind(device_id).bind(user_id).bind(device_name).bind(platform).execute(&mut *tx).await?;},
+        None=>{sqlx::query("INSERT INTO devices(id,user_id,label,platform) VALUES($1,$2,$3,$4)").bind(device_id).bind(user_id).bind(device_name).bind(platform).execute(&mut *tx).await?;}
     }
+    sqlx::query("UPDATE accounts a SET main_device_id=(SELECT d.id FROM devices d WHERE d.user_id=a.id AND d.revoked_at IS NULL ORDER BY CASE WHEN d.platform IN ('android','ios') THEN 0 ELSE 1 END,d.created_at ASC,d.id ASC LIMIT 1),main_device_designated=TRUE WHERE a.id=$1 AND NOT a.main_device_designated AND EXISTS(SELECT 1 FROM devices d WHERE d.user_id=a.id AND d.revoked_at IS NULL)").bind(user_id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE accounts a SET main_device_id=(SELECT m.id FROM devices m WHERE m.user_id=a.id AND m.revoked_at IS NULL AND m.platform IN ('android','ios') ORDER BY m.created_at ASC,m.id ASC LIMIT 1) WHERE a.id=$1 AND a.main_device_designated AND a.main_device_id IS NOT NULL AND EXISTS(SELECT 1 FROM devices m WHERE m.user_id=a.id AND m.revoked_at IS NULL AND m.platform IN ('android','ios'))").bind(user_id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE history_sync_requests SET status='cancelled' WHERE user_id=$1 AND status IN ('pending','transferring','ready') AND main_device_id<>(SELECT main_device_id FROM accounts WHERE id=$1)").bind(user_id).execute(&mut *tx).await?;sqlx::query("DELETE FROM history_sync_batches b USING history_sync_requests r WHERE b.request_id=r.id AND r.user_id=$1 AND r.status='cancelled'").bind(user_id).execute(&mut *tx).await?;
     let token=new_token();let hash=token_hash(&token);sqlx::query("INSERT INTO auth_sessions(token_hash,user_id,device_id,expires_at) VALUES($1,$2,$3,now()+make_interval(secs => $4::double precision))").bind(&hash).bind(user_id).bind(device_id).bind(SESSION_SECONDS as f64).execute(&mut *tx).await?;tx.commit().await?;Ok((device_id,token))
 }
 async fn register(State(state):State<AppState>,Json(input):Json<RegisterInput>)->Response{
@@ -450,8 +499,8 @@ async fn verify_email(State(state):State<AppState>,Json(input):Json<VerifyEmailI
     if updated!=1{let _=tx.rollback().await;return api_error(StatusCode::BAD_REQUEST,"verification code is invalid or expired");}
     if sqlx::query("DELETE FROM email_verification_challenges WHERE user_id=$1").bind(user_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"verification service unavailable");}
     if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"verification service unavailable");}
-    let device_name=input.device_name.as_deref().unwrap_or("Web browser").trim();let device_name=if device_name.is_empty(){"Web browser"}else{device_name};
-    let(device_id,token)=match create_device_session(&state.db,user_id,device_name,input.device_id).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"email verified; sign in to create a session")};
+    let device_name=input.device_name.as_deref().unwrap_or("Web browser").trim();let device_name=if device_name.is_empty(){"Web browser"}else{device_name};let Some(platform)=normalize_device_platform(input.device_platform.as_deref(),device_name)else{return api_error(StatusCode::BAD_REQUEST,"device_platform must be web, android, or ios")};
+    let(device_id,token)=match create_device_session(&state.db,user_id,device_name,platform,input.device_id).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"email verified; sign in to create a session")};
     let ctx=match sqlx::query_as::<_,(String,String,String)>("SELECT username,email,display_name FROM accounts WHERE id=$1").bind(user_id).fetch_one(&state.db).await{Ok((username,email,display_name))=>AuthContext{user_id,username,email,display_name,email_verified:true,device_id,device_name:device_name.into(),session_hash:token_hash(&token)},Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"email verified; sign in to continue")};
     let mut response=Json(serde_json::json!({"account":auth_reply(&ctx),"verification":{"required":false,"verified":true}})).into_response();attach_session_cookie(&mut response,&token,state.cookie_secure);response
 }
@@ -561,7 +610,7 @@ async fn verify_login(State(state):State<AppState>,Json(input):Json<VerifyLoginI
     }
     if sqlx::query("UPDATE email_verification_challenges SET expires_at=now(),resend_after=now(),attempt_count=5 WHERE user_id=$1").bind(user_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"sign-in service unavailable");}
     if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"sign-in service unavailable");}
-    let label=input.device_name.as_deref().unwrap_or("Web browser").trim();let label=if label.is_empty(){"Web browser"}else{label};let(device_id,token)=match create_device_session(&state.db,user_id,label,input.device_id).await{Ok(value)=>value,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not create session")};
+    let label=input.device_name.as_deref().unwrap_or("Web browser").trim();let label=if label.is_empty(){"Web browser"}else{label};let Some(platform)=normalize_device_platform(input.device_platform.as_deref(),label)else{return api_error(StatusCode::BAD_REQUEST,"device_platform must be web, android, or ios")};let(device_id,token)=match create_device_session(&state.db,user_id,label,platform,input.device_id).await{Ok(value)=>value,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not create session")};
     let ctx=AuthContext{user_id,username,email,display_name,email_verified:true,device_id,device_name:label.into(),session_hash:token_hash(&token)};
     let mut response=Json(serde_json::json!({"account":auth_reply(&ctx),"verification":{"required":false,"verified":true}})).into_response();attach_session_cookie(&mut response,&token,state.cookie_secure);response
 }
@@ -569,10 +618,11 @@ async fn logout(State(state):State<AppState>,headers:HeaderMap)->Response{
     let token=match cookie_value(&headers){Some(value)=>value,None=>return api_error(StatusCode::UNAUTHORIZED,"sign in required")};
     let hash=token_hash(&token);
     let mut tx=match state.db.begin().await{Ok(value)=>value,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not end session")};
-    let device_id=match sqlx::query_scalar::<_,Uuid>("SELECT device_id FROM auth_sessions WHERE token_hash=$1").bind(&hash).fetch_optional(&mut *tx).await{Ok(Some(value))=>value,Ok(None)=>{let _=tx.rollback().await;return api_error(StatusCode::UNAUTHORIZED,"sign in required");},Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not end session");}};
+    let (user_id,device_id)=match sqlx::query_as::<_,(Uuid,Uuid)>("SELECT user_id,device_id FROM auth_sessions WHERE token_hash=$1").bind(&hash).fetch_optional(&mut *tx).await{Ok(Some(value))=>value,Ok(None)=>{let _=tx.rollback().await;return api_error(StatusCode::UNAUTHORIZED,"sign in required");},Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not end session");}};
+    if !matches!(sqlx::query_scalar::<_,Uuid>("SELECT id FROM accounts WHERE id=$1 FOR UPDATE").bind(user_id).fetch_optional(&mut *tx).await,Ok(Some(_))){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not lock signed-in account");}
     if !matches!(sqlx::query_scalar::<_,Uuid>("SELECT id FROM devices WHERE id=$1 FOR UPDATE").bind(device_id).fetch_optional(&mut *tx).await,Ok(Some(_))){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not lock signed-in device");}
     if sqlx::query("DELETE FROM auth_sessions WHERE device_id=$1").bind(device_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not end device sessions");}
-    if sqlx::query("UPDATE devices SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1").bind(device_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM device_public_keys WHERE device_id=$1").bind(device_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not revoke signed-out device");}
+    if sqlx::query("UPDATE devices SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1").bind(device_id).execute(&mut *tx).await.is_err()||sqlx::query("UPDATE accounts SET main_device_id=NULL WHERE main_device_id=$1").bind(device_id).execute(&mut *tx).await.is_err()||sqlx::query("UPDATE history_sync_requests SET status='cancelled' WHERE (main_device_id=$1 OR child_device_id=$1) AND status IN ('pending','transferring','ready')").bind(device_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM history_sync_batches b USING history_sync_requests r WHERE b.request_id=r.id AND r.status='cancelled' AND (r.main_device_id=$1 OR r.child_device_id=$1)").bind(device_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM device_public_keys WHERE device_id=$1").bind(device_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not revoke signed-out device");}
     if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not end session");}
     state.peers.remove(&device_id);
     let mut response=Json(serde_json::json!({"ok":true,"device_revoked":true})).into_response();clear_session_cookie(&mut response,state.cookie_secure);response
@@ -662,25 +712,89 @@ async fn get_backup_key_envelope(State(state):State<AppState>,headers:HeaderMap,
     Json(serde_json::json!({"key_version":envelope_version,"server_public_key":server_public_jwk,"salt":salt_text,"nonce":nonce_text,"ciphertext":URL_SAFE_NO_PAD.encode(ciphertext)})).into_response()
 }
 
+fn device_key_rotation_statement(user_id:Uuid,device_id:Uuid,old_fingerprint:&str,new_fingerprint:&str,timestamp:i64,epoch:i64)->Vec<u8>{
+    format!("SEREIN-DEVICE-KEY-ROTATION-V1\n{user_id}\n{device_id}\n{old_fingerprint}\n{new_fingerprint}\n{timestamp}\n{epoch}\n").into_bytes()
+}
+fn verify_device_key_rotation_signature(signing_key:&P256PublicJwk,statement:&[u8],proof:&str)->bool{
+    if proof.len()>256{return false;}
+    let Some(public)=parse_p256_public_jwk(signing_key)else{return false};
+    let encoded=public.to_encoded_point(false);
+    let Ok(verifying)=VerifyingKey::from_sec1_bytes(encoded.as_bytes())else{return false};
+    let Ok(signature_bytes)=URL_SAFE_NO_PAD.decode(proof)else{return false};
+    let Ok(signature)=P256Signature::from_der(&signature_bytes)else{return false};
+    verifying.verify(statement,&signature).is_ok()
+}
+
 async fn register_device_public_key(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<DevicePublicKeyInput>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     if input.algorithm!="ECDH-P256"{return api_error(StatusCode::BAD_REQUEST,"unsupported device key algorithm");}
     let ratchet_version=input.ratchet_version.unwrap_or(2);if !matches!(ratchet_version,2..=3){return api_error(StatusCode::BAD_REQUEST,"unsupported device ratchet version");}
     let Some(fingerprint)=p256_key_bundle_fingerprint(&input.public_key,&input.layer2_public_key)else{return api_error(StatusCode::BAD_REQUEST,"invalid public device key bundle");};
+    if input.signing_public_key.as_ref().is_some_and(|key|parse_p256_public_jwk(key).is_none()){return api_error(StatusCode::BAD_REQUEST,"invalid device signing key");}
+    if input.rotation_proof.as_ref().is_some_and(|proof|proof.is_empty()||proof.len()>256){return api_error(StatusCode::BAD_REQUEST,"invalid key continuity proof");}
     let public_key=match serde_json::to_value(&input.public_key){Ok(v)=>v,Err(_)=>return api_error(StatusCode::BAD_REQUEST,"invalid public device key")};
     let layer2_public_key=match serde_json::to_value(&input.layer2_public_key){Ok(v)=>v,Err(_)=>return api_error(StatusCode::BAD_REQUEST,"invalid layer-2 public device key")};
-    let inserted=sqlx::query("INSERT INTO device_public_keys(device_id,user_id,algorithm,public_key,layer2_public_key,fingerprint,key_version,ratchet_version) SELECT d.id,d.user_id,'ECDH-P256',$3,$4,$5,2,$6 FROM devices d WHERE d.id=$1 AND d.user_id=$2 AND d.revoked_at IS NULL ON CONFLICT(device_id) DO UPDATE SET layer2_public_key=EXCLUDED.layer2_public_key,fingerprint=EXCLUDED.fingerprint,key_version=2,ratchet_version=EXCLUDED.ratchet_version WHERE device_public_keys.user_id=EXCLUDED.user_id AND device_public_keys.public_key=EXCLUDED.public_key AND (device_public_keys.layer2_public_key IS NULL OR device_public_keys.layer2_public_key=EXCLUDED.layer2_public_key) AND device_public_keys.ratchet_version<=EXCLUDED.ratchet_version")
-        .bind(ctx.device_id).bind(ctx.user_id).bind(public_key).bind(layer2_public_key).bind(&fingerprint).bind(ratchet_version as i16).execute(&state.db).await;
-    if inserted.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key could not be registered");}
-    let stored=sqlx::query_as::<_,(Value,Option<Value>,String,i32,i16)>("SELECT public_key,layer2_public_key,fingerprint,key_version,ratchet_version FROM device_public_keys WHERE device_id=$1 AND user_id=$2")
-        .bind(ctx.device_id).bind(ctx.user_id).fetch_optional(&state.db).await;
-    match stored{
-        Ok(Some((stored_key,Some(stored_layer2),stored_fingerprint,2,stored_ratchet_version))) if stored_key==serde_json::to_value(&input.public_key).unwrap_or(Value::Null)&&stored_layer2==serde_json::to_value(&input.layer2_public_key).unwrap_or(Value::Null)&&stored_fingerprint==fingerprint&&stored_ratchet_version==ratchet_version as i16=>Json(serde_json::json!({"registered":true,"algorithm":"ECDH-P256","fingerprint":fingerprint,"key_version":2,"ratchet_version":ratchet_version})).into_response(),
-        Ok(Some((stored_key,Some(stored_layer2),stored_fingerprint,2,stored_ratchet_version))) if stored_key==serde_json::to_value(&input.public_key).unwrap_or(Value::Null)&&stored_layer2==serde_json::to_value(&input.layer2_public_key).unwrap_or(Value::Null)&&stored_fingerprint==fingerprint&&stored_ratchet_version>ratchet_version as i16=>api_error(StatusCode::CONFLICT,"ratchet capability downgrade rejected; the higher published capability is preserved"),
-        Ok(Some(_))=>api_error(StatusCode::CONFLICT,"a different key is already registered for this device; key rotation requires verification"),
-        Ok(None)=>api_error(StatusCode::FORBIDDEN,"active device session required"),
-        Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"device key status unavailable"),
-    }
+    let signing_value=match input.signing_public_key.as_ref().map(serde_json::to_value).transpose(){Ok(v)=>v,Err(_)=>return api_error(StatusCode::BAD_REQUEST,"invalid device signing key")};
+    let mut tx=match state.db.begin().await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key service unavailable")};
+    let existing=sqlx::query_as::<_,(Value,Option<Value>,String,i16,Option<Value>,i64,Option<String>,Option<String>)>("SELECT k.public_key,k.layer2_public_key,k.fingerprint,k.ratchet_version,k.signing_public_key,k.key_epoch,k.previous_fingerprint,k.rotation_proof FROM device_public_keys k JOIN devices d ON d.id=k.device_id AND d.user_id=k.user_id WHERE k.device_id=$1 AND k.user_id=$2 AND d.revoked_at IS NULL FOR UPDATE OF k").bind(ctx.device_id).bind(ctx.user_id).fetch_optional(&mut *tx).await;
+    let (previous_fingerprint,key_epoch,rotation_proof)=match existing{
+        Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key status unavailable");}
+        Ok(None)=>{
+            if let Some(signing_key)=input.signing_public_key.as_ref(){let epoch=input.key_epoch.unwrap_or(1);let statement=device_key_rotation_statement(ctx.user_id,ctx.device_id,"",&fingerprint,input.rotation_timestamp.unwrap_or(0),epoch);if epoch!=1||input.rotation_timestamp.unwrap_or(0)<1||!input.rotation_proof.as_deref().is_some_and(|proof|verify_device_key_rotation_signature(signing_key,&statement,proof)){let _=tx.rollback().await;return api_error(StatusCode::BAD_REQUEST,"initial device signing-key proof is invalid");}}
+            let result=sqlx::query("INSERT INTO device_public_keys(device_id,user_id,algorithm,public_key,layer2_public_key,fingerprint,key_version,ratchet_version,signing_public_key,key_epoch,rotation_timestamp,rotation_proof) SELECT d.id,d.user_id,'ECDH-P256',$3,$4,$5,2,$6,$7,1,$8,$9 FROM devices d WHERE d.id=$1 AND d.user_id=$2 AND d.revoked_at IS NULL ON CONFLICT(device_id) DO NOTHING").bind(ctx.device_id).bind(ctx.user_id).bind(&public_key).bind(&layer2_public_key).bind(&fingerprint).bind(ratchet_version as i16).bind(&signing_value).bind(input.rotation_timestamp).bind(&input.rotation_proof).execute(&mut *tx).await;
+            if !matches!(result,Ok(ref result) if result.rows_affected()==1){let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"active device key registration changed during update");}
+            (None,1,None)
+        }
+        Ok(Some((old_public,old_layer2,old_fingerprint,old_ratchet,old_signing,old_epoch,old_previous,old_proof)))=>{
+            if old_ratchet>ratchet_version as i16{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"ratchet capability downgrade rejected; the higher published capability is preserved");}
+            let same_bundle=old_fingerprint==fingerprint&&old_public==public_key&&old_layer2.as_ref()==Some(&layer2_public_key);
+            let old_signing_key=old_signing.as_ref().and_then(|value|serde_json::from_value::<P256PublicJwk>(value.clone()).ok());
+            if same_bundle{
+                if let (Some(old_key),Some(new_key))=(old_signing_key.as_ref(),input.signing_public_key.as_ref()){
+                    if old_key!=new_key{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"device signing-key identity or epoch cannot be replaced silently");}
+                }
+                let mut resulting_signing=old_signing.clone();let mut resulting_proof=old_proof.clone();
+                if old_signing.is_none(){
+                    if let (Some(new_key),Some(new_value))=(input.signing_public_key.as_ref(),signing_value.as_ref()){
+                        let epoch=input.key_epoch.unwrap_or(1);let statement=device_key_rotation_statement(ctx.user_id,ctx.device_id,"",&fingerprint,input.rotation_timestamp.unwrap_or(0),1);
+                        if epoch!=1||input.rotation_timestamp.unwrap_or(0)<1||!input.rotation_proof.as_deref().is_some_and(|proof|verify_device_key_rotation_signature(new_key,&statement,proof)){let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"legacy device signing-key bootstrap proof is invalid");}
+                        resulting_signing=Some(new_value.clone());resulting_proof=input.rotation_proof.clone();
+                    }
+                }
+                if sqlx::query("UPDATE device_public_keys SET ratchet_version=$3,signing_public_key=COALESCE(signing_public_key,$4),rotation_timestamp=COALESCE(rotation_timestamp,$6),rotation_proof=COALESCE(rotation_proof,$7) WHERE device_id=$1 AND user_id=$2 AND fingerprint=$5").bind(ctx.device_id).bind(ctx.user_id).bind(ratchet_version as i16).bind(resulting_signing).bind(&fingerprint).bind(input.rotation_timestamp).bind(&input.rotation_proof).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key capability could not be updated");}
+                (old_previous,old_epoch,resulting_proof)
+            }else{
+                let Some(old_signer)=old_signing_key else{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"legacy device key has no signing anchor; automatic rotation is blocked");};
+                let Some(new_signer)=input.signing_public_key.as_ref()else{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"changed device key requires cryptographic continuity proof");};
+                let epoch=input.key_epoch.unwrap_or(0);let Some(proof)=input.rotation_proof.as_deref()else{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"changed device key requires cryptographic continuity proof");};
+                let statement=device_key_rotation_statement(ctx.user_id,ctx.device_id,&old_fingerprint,&fingerprint,input.rotation_timestamp.unwrap_or(0),epoch);
+                if old_signer!=*new_signer||epoch!=old_epoch.saturating_add(1)||input.rotation_timestamp.unwrap_or(0)<1||!verify_device_key_rotation_signature(&old_signer,&statement,proof){let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"device key continuity proof is invalid or out of sequence");}
+                let queued=match sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM queued_ciphertexts WHERE recipient_device_id=$1)").bind(ctx.device_id).fetch_one(&mut *tx).await{Ok(v)=>v,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"pending message key-safety check unavailable");}};
+                if queued{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"device key rotation is waiting for all old-key queued messages to be acknowledged or expire");}
+                let active_sync=match sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM history_sync_requests WHERE (main_device_id=$1 OR child_device_id=$1) AND status IN ('pending','transferring','ready') AND expires_at>now())").bind(ctx.device_id).fetch_one(&mut *tx).await{Ok(value)=>value,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync key-safety check unavailable");}};if active_sync{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"finish or cancel active history sync before rotating this device key");}
+                let updated=sqlx::query("UPDATE device_public_keys SET public_key=$3,layer2_public_key=$4,fingerprint=$5,key_version=2,ratchet_version=$6,previous_fingerprint=$7,rotation_proof=$8,key_epoch=$9,rotation_timestamp=$10,rotated_at=now() WHERE device_id=$1 AND user_id=$2 AND fingerprint=$7").bind(ctx.device_id).bind(ctx.user_id).bind(&public_key).bind(&layer2_public_key).bind(&fingerprint).bind(ratchet_version as i16).bind(&old_fingerprint).bind(proof).bind(epoch).bind(input.rotation_timestamp).execute(&mut *tx).await;
+                if !matches!(updated,Ok(ref result) if result.rows_affected()==1){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"verified device key rotation could not be saved");}
+                if sqlx::query("INSERT INTO device_key_rotation_history(device_id,key_epoch,old_fingerprint,new_fingerprint,proof,rotation_timestamp) VALUES($1,$2,$3,$4,$5,$6)").bind(ctx.device_id).bind(epoch).bind(&old_fingerprint).bind(&fingerprint).bind(proof).bind(input.rotation_timestamp).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"key continuity proof history could not be saved");}
+                (Some(old_fingerprint),epoch,Some(proof.to_owned()))
+            }
+        }
+    };
+    let stored=sqlx::query_as::<_,(Value,Option<Value>,String,i32,i16,Option<Value>,i64,Option<i64>)>("SELECT public_key,layer2_public_key,fingerprint,key_version,ratchet_version,signing_public_key,key_epoch,rotation_timestamp FROM device_public_keys WHERE device_id=$1 AND user_id=$2").bind(ctx.device_id).bind(ctx.user_id).fetch_optional(&mut *tx).await;
+    let Ok(Some((stored_key,Some(stored_layer2),stored_fingerprint,2,stored_ratchet,stored_signing,stored_epoch,stored_timestamp)))=stored else{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key registration could not be verified");};
+    if stored_key!=public_key||stored_layer2!=layer2_public_key||stored_fingerprint!=fingerprint||stored_ratchet!=ratchet_version as i16{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"a different device key remains registered");}
+    if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key registration could not be committed");}
+    Json(serde_json::json!({"registered":true,"algorithm":"ECDH-P256","fingerprint":fingerprint,"key_version":2,"ratchet_version":ratchet_version,"signing_public_key":stored_signing,"key_epoch":stored_epoch,"previous_fingerprint":previous_fingerprint,"rotation_proof":rotation_proof,"rotation_timestamp":stored_timestamp})).into_response()
+}
+
+async fn list_own_device_keys(State(state):State<AppState>,headers:HeaderMap)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    let main_device_id=match sqlx::query_scalar::<_,Option<Uuid>>("SELECT main_device_id FROM accounts WHERE id=$1").bind(ctx.user_id).fetch_optional(&state.db).await{Ok(Some(value))=>value,Ok(None)=>None,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"main-device designation unavailable")};
+    let main_device_online=main_device_id.is_some_and(|id|state.peers.contains_key(&id));
+    let current_device_platform=match sqlx::query_scalar::<_,String>("SELECT platform FROM devices WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL").bind(ctx.device_id).bind(ctx.user_id).fetch_optional(&state.db).await{Ok(value)=>value,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"current-device platform unavailable")};
+    let preferred_mobile_device_id=match sqlx::query_scalar::<_,Uuid>("SELECT id FROM devices WHERE user_id=$1 AND revoked_at IS NULL AND platform IN ('android','ios') ORDER BY created_at ASC,id ASC LIMIT 1").bind(ctx.user_id).fetch_optional(&state.db).await{Ok(value)=>value,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"mobile main-device priority unavailable")};
+    let main_device_platform=if let Some(id)=main_device_id{match sqlx::query_scalar::<_,String>("SELECT platform FROM devices WHERE id=$1 AND revoked_at IS NULL").bind(id).fetch_optional(&state.db).await{Ok(value)=>value,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"main-device platform unavailable")}}else{None};
+    let rows=sqlx::query_as::<_,(Uuid,String,Value,Option<Value>,String,i32,i16,Option<Value>,i64,Option<String>,Option<String>,Option<i64>,Value)>("SELECT k.device_id,d.platform,k.public_key,k.layer2_public_key,k.fingerprint,k.key_version,k.ratchet_version,k.signing_public_key,k.key_epoch,k.previous_fingerprint,k.rotation_proof,k.rotation_timestamp,COALESCE((SELECT jsonb_agg(jsonb_build_object('key_epoch',h.key_epoch,'old_fingerprint',h.old_fingerprint,'new_fingerprint',h.new_fingerprint,'proof',h.proof,'timestamp',h.rotation_timestamp) ORDER BY h.key_epoch) FROM (SELECT key_epoch,old_fingerprint,new_fingerprint,proof,rotation_timestamp FROM device_key_rotation_history WHERE device_id=k.device_id ORDER BY key_epoch DESC LIMIT 32) h),'[]'::jsonb) FROM device_public_keys k JOIN devices d ON d.id=k.device_id AND d.user_id=k.user_id AND d.revoked_at IS NULL AND EXISTS(SELECT 1 FROM auth_sessions s WHERE s.device_id=d.id AND s.user_id=d.user_id AND s.expires_at>now()) WHERE k.user_id=$1 ORDER BY d.created_at ASC,d.id ASC").bind(ctx.user_id).fetch_all(&state.db).await;
+    match rows{Ok(devices)=>Json(serde_json::json!({"user_id":ctx.user_id,"current_device_id":ctx.device_id,"main_device_id":main_device_id,"main_device_platform":main_device_platform,"current_device_platform":current_device_platform,"preferred_mobile_device_id":preferred_mobile_device_id,"main_device_online":main_device_online,"devices":devices.into_iter().map(|(device_id,platform,public_key,layer2_public_key,fingerprint,key_version,ratchet_version,signing_public_key,key_epoch,previous_fingerprint,rotation_proof,rotation_timestamp,rotation_chain)|serde_json::json!({"device_id":device_id,"platform":platform,"public_key":public_key,"layer2_public_key":layer2_public_key,"fingerprint":fingerprint,"key_version":key_version,"ratchet_version":ratchet_version,"signing_public_key":signing_public_key,"key_epoch":key_epoch,"previous_fingerprint":previous_fingerprint,"rotation_proof":rotation_proof,"rotation_timestamp":rotation_timestamp,"rotation_chain":rotation_chain})).collect::<Vec<_>>() })).into_response(),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"own-device key directory unavailable")}
 }
 async fn list_contact_device_public_keys(State(state):State<AppState>,headers:HeaderMap,Path(contact_id):Path<Uuid>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
@@ -688,9 +802,9 @@ async fn list_contact_device_public_keys(State(state):State<AppState>,headers:He
         .bind(ctx.user_id).bind(contact_id).fetch_one(&state.db).await;
     if !matches!(allowed,Ok(true)){return api_error(StatusCode::NOT_FOUND,"contact key directory unavailable");}
     let username=match sqlx::query_scalar::<_,String>("SELECT username FROM accounts WHERE id=$1").bind(contact_id).fetch_optional(&state.db).await{Ok(Some(value))=>value,Ok(None)=>return api_error(StatusCode::NOT_FOUND,"contact key directory unavailable"),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"contact key directory unavailable")};
-    let rows=sqlx::query_as::<_,(Uuid,Value,Option<Value>,String,String,i32,i16)>("SELECT k.device_id,k.public_key,k.layer2_public_key,k.fingerprint,k.algorithm,k.key_version,k.ratchet_version FROM device_public_keys k JOIN devices d ON d.id=k.device_id AND d.revoked_at IS NULL AND EXISTS(SELECT 1 FROM auth_sessions s WHERE s.device_id=d.id AND s.user_id=d.user_id AND s.expires_at>now()) WHERE k.user_id=$1 ORDER BY d.created_at ASC,d.id ASC")
+    let rows=sqlx::query_as::<_,(Uuid,Value,Option<Value>,String,String,i32,i16,Option<Value>,i64,Option<String>,Option<String>,Option<i64>,Value)>("SELECT k.device_id,k.public_key,k.layer2_public_key,k.fingerprint,k.algorithm,k.key_version,k.ratchet_version,k.signing_public_key,k.key_epoch,k.previous_fingerprint,k.rotation_proof,k.rotation_timestamp,COALESCE((SELECT jsonb_agg(jsonb_build_object('key_epoch',h.key_epoch,'old_fingerprint',h.old_fingerprint,'new_fingerprint',h.new_fingerprint,'proof',h.proof,'timestamp',h.rotation_timestamp) ORDER BY h.key_epoch) FROM (SELECT key_epoch,old_fingerprint,new_fingerprint,proof,rotation_timestamp FROM device_key_rotation_history WHERE device_id=k.device_id ORDER BY key_epoch DESC LIMIT 32) h),'[]'::jsonb) FROM device_public_keys k JOIN devices d ON d.id=k.device_id AND d.revoked_at IS NULL AND EXISTS(SELECT 1 FROM auth_sessions s WHERE s.device_id=d.id AND s.user_id=d.user_id AND s.expires_at>now()) WHERE k.user_id=$1 ORDER BY d.created_at ASC,d.id ASC")
         .bind(contact_id).fetch_all(&state.db).await;
-    match rows{Ok(devices)=>Json(serde_json::json!({"user_id":contact_id,"username":username,"devices":devices.into_iter().map(|(device_id,public_key,layer2_public_key,fingerprint,algorithm,key_version,ratchet_version)|serde_json::json!({"device_id":device_id,"public_key":public_key,"layer2_public_key":layer2_public_key,"fingerprint":fingerprint,"algorithm":algorithm,"key_version":key_version,"ratchet_version":ratchet_version})).collect::<Vec<_>>()})).into_response(),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"contact key directory unavailable")}
+    match rows{Ok(devices)=>Json(serde_json::json!({"user_id":contact_id,"username":username,"devices":devices.into_iter().map(|(device_id,public_key,layer2_public_key,fingerprint,algorithm,key_version,ratchet_version,signing_public_key,key_epoch,previous_fingerprint,rotation_proof,rotation_timestamp,rotation_chain)|serde_json::json!({"device_id":device_id,"public_key":public_key,"layer2_public_key":layer2_public_key,"fingerprint":fingerprint,"algorithm":algorithm,"key_version":key_version,"ratchet_version":ratchet_version,"signing_public_key":signing_public_key,"key_epoch":key_epoch,"previous_fingerprint":previous_fingerprint,"rotation_proof":rotation_proof,"rotation_timestamp":rotation_timestamp,"rotation_chain":rotation_chain})).collect::<Vec<_>>()})).into_response(),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"contact key directory unavailable")}
 }
 async fn require_user(state:&AppState,headers:&HeaderMap)->Result<AuthContext,Response>{match authenticate(&state.db,headers).await{Ok(Some(ctx))=>Ok(ctx),Ok(None)=>Err(api_error(StatusCode::UNAUTHORIZED,"sign in required")),Err(_)=>{warn!("session validation failed");Err(api_error(StatusCode::SERVICE_UNAVAILABLE,"account service unavailable"))}}}
 async fn session_is_active(db:&PgPool,ctx:&AuthContext)->bool{sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM auth_sessions s JOIN devices d ON d.id=s.device_id JOIN accounts a ON a.id=s.user_id AND a.email_verified=TRUE WHERE s.token_hash=$1 AND s.device_id=$2 AND s.user_id=$3 AND s.expires_at>now() AND d.revoked_at IS NULL)").bind(&ctx.session_hash).bind(ctx.device_id).bind(ctx.user_id).fetch_one(db).await.unwrap_or(false)}
@@ -732,10 +846,20 @@ async fn list_messages(State(state):State<AppState>,headers:HeaderMap,Query(quer
     let mut items=Vec::with_capacity(rows.len());let mut next=None;for(id,payload,created_at)in rows{next=Some(serde_json::json!({"after_created_at":created_at,"after_id":id}));items.push(serde_json::json!({"id":id,"payload":payload,"created_at":created_at}));}
     Json(serde_json::json!({"items":items,"next":next,"has_more":has_more})).into_response()
 }
+async fn list_expired_messages(State(state):State<AppState>,headers:HeaderMap,Query(query):Query<ExpiredMessagesQuery>)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    let limit=history_page_limit(query.limit);let after_time=query.after_created_at.as_deref();let after_id=query.after_id;
+    if after_time.is_some()!=after_id.is_some(){return api_error(StatusCode::BAD_REQUEST,"expiry cursor requires both timestamp and message id");}
+    let rows=match sqlx::query_as::<_,(Uuid,Uuid,String,String,String,String)>("SELECT r.message_id,r.sender_user_id,a.username,a.display_name,to_char(r.accepted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),to_char(r.expired_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM message_receipts r JOIN accounts a ON a.id=r.sender_user_id WHERE r.recipient_user_id=$1 AND r.recipient_device_id=$2 AND ($3::uuid IS NULL OR r.sender_user_id=$3) AND r.expired_at IS NOT NULL AND ($4::timestamptz IS NULL OR (r.expired_at,r.message_id)>($4::timestamptz,$5::uuid)) ORDER BY r.expired_at,r.message_id LIMIT $6").bind(ctx.user_id).bind(ctx.device_id).bind(query.contact_id).bind(after_time).bind(after_id).bind(limit+1).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message expiry notices unavailable")};
+    let mut rows=rows;let has_more=rows.len() as i64>limit;if has_more{rows.pop();}
+    let mut items=Vec::with_capacity(rows.len());let mut next=None;for(id,sender_user_id,username,display_name,accepted_at,expired_at)in rows{next=Some(serde_json::json!({"after_created_at":expired_at,"after_id":id}));items.push(serde_json::json!({"id":id,"sender_user_id":sender_user_id,"username":username,"display_name":display_name,"accepted_at":accepted_at,"expired_at":expired_at}));}
+    Json(serde_json::json!({"items":items,"next":next,"has_more":has_more})).into_response()
+}
+
 async fn ack_message_api(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<Uuid>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     // Persist device delivery status before deleting this device's queued ciphertext copy.
-    if sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()) WHERE message_id=$1 AND recipient_user_id=$2 AND recipient_device_id=$3").bind(id).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"message delivery receipt unavailable");}
+    if sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()) WHERE message_id=$1 AND recipient_user_id=$2 AND recipient_device_id=$3 AND expired_at IS NULL").bind(id).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"message delivery receipt unavailable");}
     match sqlx::query("DELETE FROM queued_ciphertexts WHERE recipient_device_id=$1 AND id=$2").bind(ctx.device_id).bind(id).execute(&state.db).await{
         Ok(_)=>Json(serde_json::json!({"ok":true})).into_response(),
         Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"message acknowledgement unavailable")
@@ -745,22 +869,22 @@ async fn list_message_receipts(State(state):State<AppState>,headers:HeaderMap,Js
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     if query.ids.len()>200{return api_error(StatusCode::BAD_REQUEST,"at most 200 message IDs may be queried at once");}
     let mut ids=query.ids;ids.sort_unstable();ids.dedup();if ids.is_empty(){return Json(serde_json::json!({"items":[]})).into_response();}
-    let rows=match sqlx::query_as::<_,(Uuid,i64,i64,i64)>("SELECT message_id,COUNT(*)::bigint,COUNT(delivered_at)::bigint,COUNT(read_at)::bigint FROM message_receipts WHERE sender_user_id=$1 AND message_id=ANY($2) GROUP BY message_id").bind(ctx.user_id).bind(ids).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message receipt status unavailable")};
-    let items=rows.into_iter().map(|(id,recipients,delivered,read)|serde_json::json!({"id":id,"recipient_count":recipients,"delivered_count":delivered,"read_count":read})).collect::<Vec<_>>();
+    let rows=match sqlx::query_as::<_,(Uuid,i64,i64,i64,i64,Option<String>)>("SELECT message_id,COUNT(*)::bigint,COUNT(delivered_at)::bigint,COUNT(read_at)::bigint,COUNT(expired_at)::bigint,MAX(expired_at)::text FROM message_receipts WHERE sender_user_id=$1 AND message_id=ANY($2) GROUP BY message_id").bind(ctx.user_id).bind(ids).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"message receipt status unavailable")};
+    let items=rows.into_iter().map(|(id,recipients,delivered,read,expired,expired_at)|serde_json::json!({"id":id,"recipient_count":recipients,"delivered_count":delivered,"read_count":read,"expired_count":expired,"expired_at":expired_at})).collect::<Vec<_>>();
     Json(serde_json::json!({"items":items})).into_response()
 }
 async fn mark_messages_read_api(State(state):State<AppState>,headers:HeaderMap,Json(query):Json<MessageReceiptsQuery>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     if query.ids.len()>200{return api_error(StatusCode::BAD_REQUEST,"at most 200 message IDs may be marked read at once");}
     let mut ids=query.ids;ids.sort_unstable();ids.dedup();if ids.is_empty(){return Json(serde_json::json!({"ok":true,"updated":0})).into_response();}
-    match sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()),read_at=COALESCE(read_at,now()) WHERE message_id=ANY($1) AND recipient_user_id=$2 AND recipient_device_id=$3").bind(ids).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await{
+    match sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()),read_at=COALESCE(read_at,now()) WHERE message_id=ANY($1) AND recipient_user_id=$2 AND recipient_device_id=$3 AND expired_at IS NULL").bind(ids).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await{
         Ok(result)=>Json(serde_json::json!({"ok":true,"updated":result.rows_affected()})).into_response(),
         Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"read receipts could not be saved")
     }
 }
 async fn mark_message_read_api(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<Uuid>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
-    match sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()),read_at=COALESCE(read_at,now()) WHERE message_id=$1 AND recipient_user_id=$2 AND recipient_device_id=$3").bind(id).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await{
+    match sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()),read_at=COALESCE(read_at,now()) WHERE message_id=$1 AND recipient_user_id=$2 AND recipient_device_id=$3 AND expired_at IS NULL").bind(id).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await{
         Ok(_)=>Json(serde_json::json!({"ok":true})).into_response(),
         Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"read receipt could not be saved")
     }
@@ -1050,25 +1174,93 @@ async fn remove_contact(State(state):State<AppState>,headers:HeaderMap,Path(cont
     if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not remove contact");}
     Json(serde_json::json!({"ok":true,"history_retained":true})).into_response()
 }
+async fn promote_current_device_to_main(State(state):State<AppState>,headers:HeaderMap)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    let platform=match sqlx::query_scalar::<_,String>("SELECT platform FROM devices WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL").bind(ctx.device_id).bind(ctx.user_id).fetch_optional(&state.db).await{Ok(Some(value))=>value,Ok(None)=>return api_error(StatusCode::NOT_FOUND,"active device not found"),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"main-device designation unavailable")};
+    let mobile_choice=sqlx::query_scalar::<_,Uuid>("SELECT id FROM devices WHERE user_id=$1 AND revoked_at IS NULL AND platform IN ('android','ios') ORDER BY created_at ASC,id ASC LIMIT 1").bind(ctx.user_id).fetch_optional(&state.db).await;
+    let Ok(mobile_choice)=mobile_choice else{return api_error(StatusCode::SERVICE_UNAVAILABLE,"mobile main-device priority check unavailable")};
+    if platform=="web"&&mobile_choice.is_some(){return api_error(StatusCode::CONFLICT,"an active iOS or Android device has main-device priority");}
+    if platform!="web"&&matches!(mobile_choice,Some(id) if id!=ctx.device_id){return api_error(StatusCode::CONFLICT,"the oldest active iOS or Android device has main-device priority");}
+    let mut tx=match state.db.begin().await{Ok(tx)=>tx,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"main-device designation unavailable")};
+    let updated=sqlx::query("UPDATE accounts a SET main_device_id=$2,main_device_designated=TRUE WHERE a.id=$1 AND a.main_device_id IS NULL AND EXISTS(SELECT 1 FROM devices d WHERE d.id=$2 AND d.user_id=$1 AND d.revoked_at IS NULL)").bind(ctx.user_id).bind(ctx.device_id).execute(&mut *tx).await;
+    if !matches!(updated,Ok(ref result) if result.rows_affected()==1){let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"main device is already designated or this device cannot be promoted");}
+    if sqlx::query("UPDATE history_sync_requests SET status='cancelled' WHERE user_id=$1 AND status IN ('pending','transferring','ready') AND main_device_id<>$2").bind(ctx.user_id).bind(ctx.device_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM history_sync_batches b USING history_sync_requests r WHERE b.request_id=r.id AND r.user_id=$1 AND r.status='cancelled'").bind(ctx.user_id).execute(&mut *tx).await.is_err()||tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"main-device designation could not be committed");}
+    Json(serde_json::json!({"ok":true,"main_device_id":ctx.device_id,"history_scope":"future-sync-only","platform":platform})).into_response()
+}
+async fn create_history_sync_request(State(state):State<AppState>,headers:HeaderMap)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};if !state.peers.contains_key(&ctx.device_id){return api_error(StatusCode::CONFLICT,"requesting child device must be online for history sync");}let main_id=sqlx::query_scalar::<_,Option<Uuid>>("SELECT main_device_id FROM accounts WHERE id=$1").bind(ctx.user_id).fetch_optional(&state.db).await;let Ok(Some(Some(main_id)))=main_id else{return api_error(StatusCode::CONFLICT,"no main device is designated");};if !state.peers.contains_key(&main_id){return api_error(StatusCode::CONFLICT,"designated main device must be online for history sync");}let id=Uuid::new_v4();
+    let result=sqlx::query("INSERT INTO history_sync_requests(id,user_id,main_device_id,child_device_id) SELECT $1,a.id,a.main_device_id,$2 FROM accounts a JOIN devices child ON child.id=$2 AND child.user_id=a.id AND child.revoked_at IS NULL WHERE a.id=$3 AND a.main_device_id=$4 AND a.main_device_id IS NOT NULL AND a.main_device_id<>$2 AND EXISTS(SELECT 1 FROM devices m WHERE m.id=a.main_device_id AND m.user_id=a.id AND m.revoked_at IS NULL) AND EXISTS(SELECT 1 FROM auth_sessions s WHERE s.device_id=a.main_device_id AND s.user_id=a.id AND s.expires_at>now()) AND NOT EXISTS(SELECT 1 FROM history_sync_requests r WHERE r.child_device_id=$2 AND r.status IN ('pending','transferring','ready') AND r.expires_at>now()) AND (SELECT COUNT(*) FROM history_sync_requests r WHERE r.user_id=a.id AND r.created_at>now()-interval '30 days')<20").bind(id).bind(ctx.device_id).bind(ctx.user_id).bind(main_id).execute(&state.db).await;
+    match result{Ok(result) if result.rows_affected()==1=>Json(serde_json::json!({"id":id,"status":"pending","expires_in_seconds":86400,"policy":"main-device-only; no server history archive"})).into_response(),Ok(_)=>api_error(StatusCode::CONFLICT,"main device is unavailable, this device is already main, or a bounded sync request is already active"),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync request service unavailable")}
+}
+async fn list_history_sync_requests(State(state):State<AppState>,headers:HeaderMap)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    let rows=sqlx::query_as::<_,(Uuid,Uuid,Uuid,String,String,Option<i16>,String)>("SELECT r.id,r.main_device_id,r.child_device_id,d.label,r.status,r.batch_count,to_char(r.expires_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM history_sync_requests r JOIN accounts a ON a.id=r.user_id AND a.main_device_id=r.main_device_id JOIN devices d ON d.id=r.child_device_id WHERE (r.main_device_id=$1 OR r.child_device_id=$1) AND r.user_id=$2 AND r.expires_at>now() AND r.status IN ('pending','transferring','ready') ORDER BY r.created_at ASC LIMIT 20").bind(ctx.device_id).bind(ctx.user_id).fetch_all(&state.db).await;
+    match rows{Ok(rows)=>Json(rows.into_iter().map(|(id,main_device_id,child_device_id,child_device_name,status,batch_count,expires_at)|serde_json::json!({"id":id,"main_device_id":main_device_id,"child_device_id":child_device_id,"child_device_name":child_device_name,"status":status,"batch_count":batch_count,"expires_at":expires_at,"caller_is_main":ctx.device_id!=child_device_id})).collect::<Vec<_>>()).into_response(),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync request list unavailable")}
+}
+async fn put_history_sync_batch(State(state):State<AppState>,headers:HeaderMap,Path(request_id):Path<Uuid>,Json(input):Json<HistorySyncBatchInput>)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    if input.batch_count<1||input.batch_count>MAX_HISTORY_SYNC_BATCHES||input.batch_index<0||input.batch_index>=input.batch_count{return api_error(StatusCode::BAD_REQUEST,"invalid history-sync batch index or count");}
+    let payload=input.ciphertext_json.as_bytes();if payload.is_empty()||payload.len()>MAX_HISTORY_SYNC_BATCH_BYTES{return api_error(StatusCode::PAYLOAD_TOO_LARGE,"encrypted history batch exceeds the 512 KiB per-batch limit");}let ciphertext:Value=match serde_json::from_str(&input.ciphertext_json){Ok(value)=>value,Err(_)=>return api_error(StatusCode::BAD_REQUEST,"history-sync ciphertext is not valid JSON")};
+    let canonical=match serde_json::to_vec(&ciphertext){Ok(bytes)=>bytes,Err(_)=>return api_error(StatusCode::BAD_REQUEST,"history-sync ciphertext is invalid")};let digest=format!("{:x}",Sha256::digest(&canonical));if input.digest!=digest{return api_error(StatusCode::BAD_REQUEST,"history-sync ciphertext digest mismatch");}let byte_count=payload.len() as i32;
+    let mut tx=match state.db.begin().await{Ok(tx)=>tx,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync relay unavailable")};
+    let locked=sqlx::query_as::<_,(Uuid,Uuid,Option<i16>,String)>("SELECT r.user_id,r.child_device_id,r.batch_count,r.status FROM history_sync_requests r JOIN accounts a ON a.id=r.user_id AND a.main_device_id=r.main_device_id JOIN devices child ON child.id=r.child_device_id AND child.revoked_at IS NULL WHERE r.id=$1 AND r.main_device_id=$2 AND r.expires_at>now() FOR UPDATE OF r").bind(request_id).bind(ctx.device_id).fetch_optional(&mut *tx).await;
+    let Ok(Some((user_id,child_id,existing_count,status)))=locked else{let _=tx.rollback().await;return api_error(StatusCode::NOT_FOUND,"history-sync request unavailable to this main device");};
+    if user_id!=ctx.user_id||!matches!(status.as_str(),"pending"|"transferring")||existing_count.is_some_and(|count|count!=input.batch_count){let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"history-sync request is no longer accepting this batch");}
+    if !state.peers.contains_key(&ctx.device_id)||!state.peers.contains_key(&child_id){let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"main and requesting child must both be online during history sync");}
+    let stored_batch=sqlx::query("INSERT INTO history_sync_batches(request_id,batch_index,batch_count,ciphertext,digest,ciphertext_bytes) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(request_id,batch_index) DO UPDATE SET batch_count=EXCLUDED.batch_count,ciphertext=EXCLUDED.ciphertext,digest=EXCLUDED.digest,ciphertext_bytes=EXCLUDED.ciphertext_bytes,created_at=now(),expires_at=now()+interval '24 hours'").bind(request_id).bind(input.batch_index).bind(input.batch_count).bind(&ciphertext).bind(&input.digest).bind(byte_count).execute(&mut *tx).await;
+    if stored_batch.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync batch could not be stored or resumed");}
+    let stored=sqlx::query_scalar::<_,i64>("SELECT COALESCE(SUM(ciphertext_bytes),0)::bigint FROM history_sync_batches WHERE request_id=$1").bind(request_id).fetch_one(&mut *tx).await;
+    let Ok(total_bytes)=stored else{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync size check unavailable");};if total_bytes>64*1024*1024{let _=tx.rollback().await;return api_error(StatusCode::PAYLOAD_TOO_LARGE,"history-sync request exceeds the 64 MiB encrypted transfer limit");}
+    let account_total=sqlx::query_scalar::<_,i64>("SELECT COALESCE(SUM(b.ciphertext_bytes),0)::bigint FROM history_sync_batches b JOIN history_sync_requests r ON r.id=b.request_id WHERE r.user_id=$1 AND r.created_at>now()-interval '30 days'").bind(ctx.user_id).fetch_one(&mut *tx).await;let Ok(account_total)=account_total else{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync account quota unavailable");};if account_total>MAX_HISTORY_SYNC_ACCOUNT_BYTES{let _=tx.rollback().await;return api_error(StatusCode::PAYLOAD_TOO_LARGE,"account history-sync quota is limited to 256 MiB per 30 days");}
+    let count=sqlx::query_scalar::<_,i64>("SELECT COUNT(*)::bigint FROM history_sync_batches WHERE request_id=$1").bind(request_id).fetch_one(&mut *tx).await;
+    let Ok(count)=count else{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync batch check unavailable");};
+    let status=if count==input.batch_count as i64{"ready"}else{"transferring"};
+    if sqlx::query("UPDATE history_sync_requests SET status=$2,batch_count=$3 WHERE id=$1").bind(request_id).bind(status).bind(input.batch_count).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync request could not be updated");}
+    if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync batch could not be committed");}
+    Json(serde_json::json!({"ok":true,"request_id":request_id,"status":status,"batch_index":input.batch_index,"batch_count":input.batch_count,"child_device_id":child_id})).into_response()
+}
+async fn get_history_sync_batches(State(state):State<AppState>,headers:HeaderMap,Path(request_id):Path<Uuid>)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    let owner=sqlx::query_as::<_,(Uuid,Uuid,String,Option<i16>)>("SELECT r.main_device_id,r.child_device_id,r.status,r.batch_count FROM history_sync_requests r JOIN accounts a ON a.id=r.user_id AND a.main_device_id=r.main_device_id JOIN devices main ON main.id=r.main_device_id AND main.revoked_at IS NULL JOIN devices child ON child.id=r.child_device_id AND child.revoked_at IS NULL WHERE r.id=$1 AND r.user_id=$2 AND r.expires_at>now()").bind(request_id).bind(ctx.user_id).fetch_optional(&state.db).await;
+    let Ok(Some((main_id,child_id,status,batch_count)))=owner else{return api_error(StatusCode::NOT_FOUND,"history-sync request unavailable");};if child_id!=ctx.device_id{return api_error(StatusCode::FORBIDDEN,"only the requesting child device can download this history batch");}
+    if !state.peers.contains_key(&ctx.device_id)||!state.peers.contains_key(&main_id){return api_error(StatusCode::CONFLICT,"main and requesting child must both be online during history sync");}
+    if status!="ready"{return Json(serde_json::json!({"request_id":request_id,"status":status,"main_device_id":main_id,"batch_count":batch_count,"batches":[]})).into_response();}
+    let batches=sqlx::query_as::<_,(i16,i16,Value,String)>("SELECT batch_index,batch_count,ciphertext,digest FROM history_sync_batches WHERE request_id=$1 AND expires_at>now() ORDER BY batch_index LIMIT 128").bind(request_id).fetch_all(&state.db).await;
+    match batches{Ok(batches)=>Json(serde_json::json!({"request_id":request_id,"status":status,"main_device_id":main_id,"batch_count":batch_count,"batches":batches.into_iter().map(|(batch_index,batch_count,ciphertext,digest)|serde_json::json!({"batch_index":batch_index,"batch_count":batch_count,"ciphertext":ciphertext,"digest":digest})).collect::<Vec<_>>()})).into_response(),Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync batches unavailable")}
+}
+async fn ack_history_sync_request(State(state):State<AppState>,headers:HeaderMap,Path(request_id):Path<Uuid>)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};let mut tx=match state.db.begin().await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync acknowledgement unavailable")};
+    let updated=sqlx::query("UPDATE history_sync_requests SET status='complete',completed_at=now() WHERE id=$1 AND user_id=$2 AND child_device_id=$3 AND status='ready' AND expires_at>now() AND EXISTS(SELECT 1 FROM accounts a WHERE a.id=history_sync_requests.user_id AND a.main_device_id=history_sync_requests.main_device_id)").bind(request_id).bind(ctx.user_id).bind(ctx.device_id).execute(&mut *tx).await;
+    if !matches!(updated,Ok(ref result) if result.rows_affected()==1){let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"history-sync request is not ready for acknowledgement");}
+    if sqlx::query("DELETE FROM history_sync_batches WHERE request_id=$1").bind(request_id).execute(&mut *tx).await.is_err()||tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync acknowledgement could not be committed");}Json(serde_json::json!({"ok":true,"status":"complete"})).into_response()
+}
+async fn cancel_history_sync_request(State(state):State<AppState>,headers:HeaderMap,Path(request_id):Path<Uuid>)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};let mut tx=match state.db.begin().await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync cancellation unavailable")};
+    let updated=sqlx::query("UPDATE history_sync_requests SET status='cancelled' WHERE id=$1 AND user_id=$2 AND status IN ('pending','transferring','ready') AND (main_device_id=$3 OR child_device_id=$3)").bind(request_id).bind(ctx.user_id).bind(ctx.device_id).execute(&mut *tx).await;
+    if !matches!(updated,Ok(ref result) if result.rows_affected()==1){let _=tx.rollback().await;return api_error(StatusCode::NOT_FOUND,"history-sync request unavailable to this device");}
+    if sqlx::query("DELETE FROM history_sync_batches WHERE request_id=$1").bind(request_id).execute(&mut *tx).await.is_err()||tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"history-sync cancellation could not be committed");}Json(serde_json::json!({"ok":true,"status":"cancelled"})).into_response()
+}
 async fn list_devices(State(state):State<AppState>,headers:HeaderMap)->Response{
-    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};let rows=match sqlx::query_as::<_,(Uuid,String,String,String,bool,bool)>("SELECT d.id,d.label,to_char(d.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),to_char(d.last_seen_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),d.id=$2,(d.last_seen_at>now()-interval '90 seconds') FROM devices d WHERE d.user_id=$1 AND d.revoked_at IS NULL AND EXISTS(SELECT 1 FROM auth_sessions s WHERE s.device_id=d.id AND s.user_id=d.user_id AND s.expires_at>now()) ORDER BY d.last_seen_at DESC").bind(ctx.user_id).bind(ctx.device_id).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"device sessions unavailable")};Json(rows.into_iter().map(|(id,name,created_at,last_seen_at,current,recently_active)|DeviceSessionReply{id,name,created_at,last_seen_at,current,online:recently_active&&state.peers.contains_key(&id)}).collect::<Vec<_>>()).into_response()
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};let rows=match sqlx::query_as::<_,(Uuid,String,String,String,String,bool,bool,bool)>("SELECT d.id,d.label,d.platform,to_char(d.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),to_char(d.last_seen_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),d.id=$2,(d.last_seen_at>now()-interval '90 seconds'),d.id=a.main_device_id FROM devices d JOIN accounts a ON a.id=d.user_id WHERE d.user_id=$1 AND d.revoked_at IS NULL AND EXISTS(SELECT 1 FROM auth_sessions s WHERE s.device_id=d.id AND s.user_id=d.user_id AND s.expires_at>now()) ORDER BY d.last_seen_at DESC").bind(ctx.user_id).bind(ctx.device_id).fetch_all(&state.db).await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"device sessions unavailable")};Json(rows.into_iter().map(|(id,name,platform,created_at,last_seen_at,current,recently_active,main)|DeviceSessionReply{id,name,platform,created_at,last_seen_at,current,online:recently_active&&state.peers.contains_key(&id),main}).collect::<Vec<_>>()).into_response()
 }
 async fn revoke_device(State(state):State<AppState>,headers:HeaderMap,Path(device_id):Path<Uuid>)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     if device_id==ctx.device_id{return api_error(StatusCode::BAD_REQUEST,"use sign out to end this device session");}
     let mut tx=match state.db.begin().await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"device sessions unavailable")};
+    if !matches!(sqlx::query_scalar::<_,Uuid>("SELECT id FROM accounts WHERE id=$1 FOR UPDATE").bind(ctx.user_id).fetch_optional(&mut *tx).await,Ok(Some(_))){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not lock account device list");}
     let updated=match sqlx::query("UPDATE devices SET revoked_at=now() WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL").bind(device_id).bind(ctx.user_id).execute(&mut *tx).await{Ok(v)=>v.rows_affected(),Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not revoke device");}};
     if updated==0{let _=tx.rollback().await;return api_error(StatusCode::NOT_FOUND,"device session not found");}
-    if sqlx::query("DELETE FROM auth_sessions WHERE device_id=$1 AND user_id=$2").bind(device_id).bind(ctx.user_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM device_public_keys WHERE device_id=$1 AND user_id=$2").bind(device_id).bind(ctx.user_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not revoke device");}
+    if sqlx::query("UPDATE accounts SET main_device_id=NULL WHERE id=$1 AND main_device_id=$2").bind(ctx.user_id).bind(device_id).execute(&mut *tx).await.is_err()||sqlx::query("UPDATE history_sync_requests SET status='cancelled' WHERE user_id=$1 AND (main_device_id=$2 OR child_device_id=$2) AND status IN ('pending','transferring','ready')").bind(ctx.user_id).bind(device_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM auth_sessions WHERE device_id=$1 AND user_id=$2").bind(device_id).bind(ctx.user_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM history_sync_batches b USING history_sync_requests r WHERE b.request_id=r.id AND r.user_id=$1 AND r.status='cancelled'").bind(ctx.user_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM device_public_keys WHERE device_id=$1 AND user_id=$2").bind(device_id).bind(ctx.user_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not revoke device");}
     if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not revoke device");}
     state.peers.remove(&device_id);Json(serde_json::json!({"ok":true,"history_retained":true})).into_response()
 }
 async fn revoke_other_devices(State(state):State<AppState>,headers:HeaderMap)->Response{
     let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
     let mut tx=match state.db.begin().await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"device sessions unavailable")};
+    if !matches!(sqlx::query_scalar::<_,Uuid>("SELECT id FROM accounts WHERE id=$1 FOR UPDATE").bind(ctx.user_id).fetch_optional(&mut *tx).await,Ok(Some(_))){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not lock account device list");}
     let ids=match sqlx::query_scalar::<_,Uuid>("SELECT id FROM devices WHERE user_id=$1 AND id<>$2 AND revoked_at IS NULL").bind(ctx.user_id).bind(ctx.device_id).fetch_all(&mut *tx).await{Ok(v)=>v,Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not list devices");}};
     if sqlx::query("UPDATE devices SET revoked_at=now() WHERE user_id=$1 AND id<>$2 AND revoked_at IS NULL").bind(ctx.user_id).bind(ctx.device_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not revoke devices");}
-    if sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1 AND device_id<>$2").bind(ctx.user_id).bind(ctx.device_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM device_public_keys WHERE user_id=$1 AND device_id<>$2").bind(ctx.user_id).bind(ctx.device_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not revoke devices");}
+    if sqlx::query("UPDATE accounts SET main_device_id=NULL WHERE id=$1 AND main_device_id<>$2").bind(ctx.user_id).bind(ctx.device_id).execute(&mut *tx).await.is_err()||sqlx::query("UPDATE history_sync_requests SET status='cancelled' WHERE user_id=$1 AND status IN ('pending','transferring','ready')").bind(ctx.user_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM auth_sessions WHERE user_id=$1 AND device_id<>$2").bind(ctx.user_id).bind(ctx.device_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM history_sync_batches b USING history_sync_requests r WHERE b.request_id=r.id AND r.user_id=$1 AND r.status='cancelled'").bind(ctx.user_id).execute(&mut *tx).await.is_err()||sqlx::query("DELETE FROM device_public_keys WHERE user_id=$1 AND device_id<>$2").bind(ctx.user_id).bind(ctx.device_id).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not revoke devices");}
     if tx.commit().await.is_err(){return api_error(StatusCode::SERVICE_UNAVAILABLE,"could not revoke devices");}
     for id in ids{state.peers.remove(&id);}
     Json(serde_json::json!({"ok":true,"history_retained":true})).into_response()
@@ -1114,7 +1306,7 @@ async fn handle_socket(socket:WebSocket,state:AppState,ctx:AuthContext){
                 if !matches!(receipt,Ok(ref result) if result.rows_affected()==1){let _=tx.rollback().await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"message ID conflicts with an existing delivery record"}).to_string().into())).await;continue;}
                 if tx.commit().await.is_err(){let _=ws_tx.send(Message::Text(serde_json::json!({"type":"error","id":id,"to":to,"message":"message commit failed"}).to_string().into())).await;continue;}
                 if inserted{let peer_tx=state.peers.get(&to).map(|peer|peer.tx.clone());if let Some(tx)=peer_tx{let live_payload=payload.to_string();tokio::spawn(async move{let _=tx.send(live_payload).await;});}}let _=sqlx::query("UPDATE devices SET last_seen_at=now() WHERE id=$1").bind(ctx.device_id).execute(&state.db).await;let _=ws_tx.send(Message::Text(serde_json::json!({"type":"accepted","id":id,"to":to}).to_string().into())).await;
-            },ClientFrame::Ack{id}=>{let _=sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()) WHERE message_id=$1 AND recipient_user_id=$2 AND recipient_device_id=$3").bind(id).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await;let _=sqlx::query("UPDATE queued_ciphertexts SET delivered_at=COALESCE(delivered_at,now()) WHERE recipient_device_id=$1 AND id=$2").bind(ctx.device_id).bind(id).execute(&state.db).await;},ClientFrame::Heartbeat=>{let _=sqlx::query("UPDATE devices SET last_seen_at=now() WHERE id=$1 AND revoked_at IS NULL").bind(ctx.device_id).execute(&state.db).await;}}
+            },ClientFrame::Ack{id}=>{let _=sqlx::query("UPDATE message_receipts SET delivered_at=COALESCE(delivered_at,now()) WHERE message_id=$1 AND recipient_user_id=$2 AND recipient_device_id=$3 AND expired_at IS NULL").bind(id).bind(ctx.user_id).bind(ctx.device_id).execute(&state.db).await;let _=sqlx::query("UPDATE queued_ciphertexts SET delivered_at=COALESCE(delivered_at,now()) WHERE recipient_device_id=$1 AND id=$2").bind(ctx.device_id).bind(id).execute(&state.db).await;},ClientFrame::Heartbeat=>{let _=sqlx::query("UPDATE devices SET last_seen_at=now() WHERE id=$1 AND revoked_at IS NULL").bind(ctx.device_id).execute(&state.db).await;}}
         },Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}}
     }}if state.peers.get(&ctx.device_id).is_some_and(|p|p.connection_id==connection_id){state.peers.remove(&ctx.device_id);}
 }

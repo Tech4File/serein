@@ -120,7 +120,7 @@ test('opening the GIF tab discovers categories, shows featured GIFs, and dispatc
 test('the selected provider GIF reaches the normal encrypted attachment uploader', () => {
   assert.match(app, /window\.addEventListener\('serein:gif-selected',[\s\S]*?sendComposerFile\(event\.detail\.file\)/);
   assert.match(app, /function sendComposerFile\(file\)\{return stageComposerAttachment\(file\);\}/);
-  assert.match(app, /if\(!attachment&&state\.pendingAttachment\)[\s\S]*?await encryptAndUploadAttachment\(file\)/);
+  assert.match(app, /if\(!retry&&!attachment&&state\.pendingAttachment\)[\s\S]*?await encryptAndUploadAttachment\(file\)/);
 });
 
 test('typing searches dynamically after debounce; Enter and Search click use the same API route', async () => {

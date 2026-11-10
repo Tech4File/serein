@@ -17,7 +17,7 @@ test('web v3 messages use a canonical conversation AAD in both directions and at
   assert.doesNotMatch(enroll, /ratchet_version:window\.SereinCore\?\.wasmActive\?3:2/);
   assert.match(app, /peer\.ratchetVersion>=3/);
   assert.match(app, /crypto_version:3,iv:encrypted\.iv,ciphertext:encrypted\.ciphertext/);
-  assert.match(app, /await commitRatchetMessage\(contact\.id,id,\{text,sender:state\.name,mine:true,envelopes,attachment\},'pending',createdAt,states\)/);
+  assert.match(app, /await commitRatchetMessage\(contact\.id,id,\{text,sender:state\.name,mine:true,envelopes,attachment,retryOf:retry\?\.retryOf\|\|null\},'pending',createdAt,states\)/);
 });
 
 test('file payloads use a content-key layer and a separate per-device Layer 2 manifest envelope', () => {

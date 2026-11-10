@@ -47,8 +47,10 @@ final class SereinLocalStore {
             var migrated = decoded
             if migrated["ratchets"] == nil { migrated["ratchets"] = [String: String]() }
             else if !(migrated["ratchets"] is [String: String]) { throw StoreError.historyUnavailable }
+            if migrated["meta"] == nil { migrated["meta"] = [String: Any]() }
+            else if !(migrated["meta"] is [String: Any]) { throw StoreError.historyUnavailable }
             self.root = migrated
-        } else { self.root = ["version": 1, "messages": [[String: Any]](), "trust": [String: Any](), "ratchets": [String: String]() }
+        } else { self.root = ["version": 1, "messages": [[String: Any]](), "trust": [String: Any](), "ratchets": [String: String](), "meta": [String: Any]() }
     }
 
     static func delete(accountID: String) throws {
@@ -61,6 +63,18 @@ final class SereinLocalStore {
     func messages(for conversationID: String) -> [[String: Any]] {
         (root["messages"] as? [[String: Any]] ?? []).filter { $0["conversation_id"] as? String == conversationID }
     }
+    func allMessages() -> [[String:Any]] { root["messages"] as? [[String:Any]] ?? [] }
+    func mergeHistorySyncMessages(_ incoming:[[String:Any]]) throws -> Int {
+        guard incoming.count<=100_000 else{throw StoreError.invalidMessage};let previous=root;var byID:[String:[String:Any]]=[:];for row in allMessages(){if let id=row["id"] as? String{byID[id]=row}};var seen=Set<String>(),added=0
+        for record in incoming {guard let id=record["id"] as? String,(UUID(uuidString:id) != nil || (((record["payload"] as? [String:Any])?["system"] as? Bool == true) && id.range(of:#"^[A-Za-z0-9:._-]{1,128}$"#,options:.regularExpression) != nil)),let conversation=record["conversation_id"] as? String,UUID(uuidString:conversation) != nil,let created=record["created_at"] as? String,Self.validTimestamp(created),let status=record["status"] as? String,["pending","accepted","sent","delivered","read","received","expired"].contains(status),let payload=record["payload"] as? [String:Any],JSONSerialization.isValidJSONObject(payload) else{throw StoreError.invalidMessage};guard seen.insert(id).inserted else{throw StoreError.invalidMessage};if let old=byID[id]{if old["conversation_id"] as? String != conversation || old["created_at"] as? String != created || (old["text"] as? String ?? "") != (payload["text"] as? String ?? "") || (old["mine"] as? Bool ?? false) != (payload["mine"] as? Bool ?? false) || (old["sender"] as? String ?? "") != (payload["sender"] as? String ?? ""){throw StoreError.invalidMessage};continue};var row=payload;row["id"]=id;row["conversation_id"]=conversation;row["created_at"]=created;row["status"]=status;byID[id]=row;added+=1 }
+        root["messages"]=byID.values.sorted{let left=$0["created_at"] as? String ?? "",right=$1["created_at"] as? String ?? "";if left != right{return left<right};return ($0["id"] as? String ?? "")<($1["id"] as? String ?? "")};do{try flush()}catch{root=previous;throw error};return added
+    }
+    func metadata(_ name: String) -> [String: Any]? { (root["meta"] as? [String: Any] ?? [:])[name] as? [String: Any] }
+    func setMetadata(_ value: [String: Any], for name: String) throws {
+        guard !name.isEmpty,name.utf8.count<=256,JSONSerialization.isValidJSONObject(value),let data=try? JSONSerialization.data(withJSONObject:value),data.count<=4096 else { throw StoreError.invalidMessage }
+        let previous=root;var metadata=root["meta"] as? [String:Any] ?? [:];metadata[name]=value;root["meta"]=metadata
+        do { try flush() } catch { root=previous;throw error }
+    }
     func contains(messageID: String) -> Bool {
         (root["messages"] as? [[String: Any]] ?? []).contains { $0["id"] as? String == messageID }
     }
@@ -72,10 +86,14 @@ final class SereinLocalStore {
         let value = (root["trust"] as? [String: Any] ?? [:])["\(userID):\(deviceID)"]
         return (value as? [String: Any])?["ratchet_version"] as? Int ?? 2
     }
-    func trust(userID: String, deviceID: String, fingerprint: String, ratchetVersion: Int) throws {
-        guard ratchetVersion == 2 || ratchetVersion == 3 else { throw StoreError.invalidMessage }
+    func previousKeyEpoch(userID:String,deviceID:String)->Int { let value=(root["trust"] as? [String:Any] ?? [:])["\(userID):\(deviceID)"];return (value as? [String:Any])?["key_epoch"] as? Int ?? 0 }
+    func previousSigningPublicKey(userID:String,deviceID:String)->[String:Any]? { let value=(root["trust"] as? [String:Any] ?? [:])["\(userID):\(deviceID)"];return (value as? [String:Any])?["signing_public_key"] as? [String:Any] }
+    func trust(userID: String, deviceID: String, fingerprint: String, ratchetVersion: Int, keyEpoch:Int = 1, signingPublicJWK:[String:Any]? = nil) throws {
+        guard (ratchetVersion == 2 || ratchetVersion == 3),keyEpoch>=1 else { throw StoreError.invalidMessage }
         var values = root["trust"] as? [String: Any] ?? [:]
-        values["\(userID):\(deviceID)"] = ["fingerprint": fingerprint, "ratchet_version": ratchetVersion]
+        var pin:[String:Any] = ["fingerprint":fingerprint,"ratchet_version":ratchetVersion,"key_epoch":keyEpoch]
+        if let signingPublicJWK { pin["signing_public_key"]=signingPublicJWK }
+        values["\(userID):\(deviceID)"] = pin
         let previous = root; root["trust"] = values
         do { try flush() } catch { root = previous; throw error }
     }
@@ -130,6 +148,7 @@ final class SereinLocalStore {
         return added
     }
 
+    static func validHistoryTimestamp(_ value:String)->Bool { validTimestamp(value) }
     private static func validTimestamp(_ value: String) -> Bool {
         let formatter = ISO8601DateFormatter()
         if formatter.date(from: value) != nil { return true }

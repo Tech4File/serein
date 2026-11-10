@@ -5,15 +5,19 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '../../..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
-test('iOS CI verifies preinstalled SDK/runtime and does not block builds on platform downloads', () => {
+test('iOS CI verifies and installs the simulator runtime that matches the selected SDK', () => {
   const ci = read('.github/workflows/ci.yml');
   assert.match(ci, /runs-on: macos-15/);
   assert.match(ci, /test "\$\(uname -m\)" = "arm64"/);
   assert.match(ci, /xcodebuild -showsdks/);
-  assert.match(ci, /Check preinstalled iOS simulator runtime/);
+  assert.match(ci, /Ensure the selected Xcode simulator runtime is installed/);
   assert.match(ci, /generic\/platform=iOS Simulator/);
   assert.match(ci, /IOS_SIM_RUNTIME_AVAILABLE/);
-  assert.doesNotMatch(ci, /xcodebuild -downloadPlatform iOS/);
+  assert.match(ci, /xcodebuild -downloadPlatform iOS -exportPath/);
+  assert.match(ci, /xcodebuild -importPlatform/);
+  assert.match(ci, /runtime\.get\('version'\)==wanted/);
+  assert.match(ci, /IOS_SIM_RUNTIME_VERSION=\$IOS_PLATFORM_VERSION/);
+  assert.match(ci, /runtime in compatible/);
   assert.match(ci, /Preflight Xcode project resolution[\s\S]*?Build iOS simulator app/);
   assert.match(ci, /build_status=\$\{PIPESTATUS\[0\]\}/);
   const adhoc = read('.github/workflows/ios-adhoc-test.yml');

@@ -70,6 +70,34 @@
     if (pair.privateKey.extractable || publicJwk.d) throw new Error('WebCrypto returned an extractable device private key.');
     return { privateKey: pair.privateKey, publicJwk };
   }
+  async function generateSigningKeyPair() {
+    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
+    const publicJwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
+    if (pair.privateKey.extractable || publicJwk.d) throw new Error('WebCrypto returned an extractable device signing key.');
+    return { privateKey: pair.privateKey, publicJwk: { kty:'EC', crv:'P-256', x:publicJwk.x, y:publicJwk.y } };
+  }
+  function rotationStatement(userId, deviceId, oldFingerprint, newFingerprint, timestamp, epoch) {
+    if (!Number.isSafeInteger(timestamp) || timestamp < 1 || !Number.isSafeInteger(epoch) || epoch < 1 || !/^[0-9a-f-]{36}$/i.test(userId) || !/^[0-9a-f-]{36}$/i.test(deviceId) || !/^[0-9a-f]{64}$/.test(newFingerprint) || (oldFingerprint && !/^[0-9a-f]{64}$/.test(oldFingerprint))) throw new Error('Invalid key-continuity statement fields.');
+    return encoder.encode(`SEREIN-DEVICE-KEY-ROTATION-V1\n${userId.toLowerCase()}\n${deviceId.toLowerCase()}\n${oldFingerprint}\n${newFingerprint}\n${timestamp}\n${epoch}\n`);
+  }
+  function derEncodeP256Signature(raw) {
+    if (!(raw instanceof Uint8Array) || raw.length !== 64) throw new Error('Malformed ECDSA signature.');
+    const integer = bytes => { let start=0;while(start<bytes.length-1&&bytes[start]===0)start++;let body=bytes.slice(start);if(body[0]&0x80)body=Uint8Array.from([0,...body]);return Uint8Array.from([2,body.length,...body]); };
+    const r=integer(raw.slice(0,32)),s=integer(raw.slice(32)),body=Uint8Array.from([...r,...s]);return Uint8Array.from([0x30,body.length,...body]);
+  }
+  function derDecodeP256Signature(der) {
+    if (!(der instanceof Uint8Array) || der.length<8 || der.length>72 || der[0]!==0x30 || der[1]!==der.length-2 || der[2]!==2) throw new Error('Malformed ECDSA continuity proof.');
+    let at=3, lenR=der[at++];if(!lenR||at+lenR+2>der.length)throw new Error('Malformed ECDSA continuity proof.');let r=der.slice(at,at+lenR);at+=lenR;if(der[at++]!==2)throw new Error('Malformed ECDSA continuity proof.');let lenS=der[at++];if(!lenS||at+lenS!==der.length)throw new Error('Malformed ECDSA continuity proof.');let s=der.slice(at);
+    if(r.length>33||s.length>33||(r[0]===0&&r.length>1&&(r[1]&0x80)===0)||(s[0]===0&&s.length>1&&(s[1]&0x80)===0)||(r[0]&0x80)||(s[0]&0x80))throw new Error('Non-canonical ECDSA continuity proof.');
+    if(r[0]===0)r=r.slice(1);if(s[0]===0)s=s.slice(1);if(r.length>32||s.length>32)throw new Error('Malformed ECDSA continuity proof.');const raw=new Uint8Array(64);raw.set(r,32-r.length);raw.set(s,64-s.length);return raw;
+  }
+  async function signDeviceKeyRotation(privateKey, userId, deviceId, oldFingerprint, newFingerprint, timestamp, epoch) {
+    const raw=new Uint8Array(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},privateKey,rotationStatement(userId,deviceId,oldFingerprint,newFingerprint,timestamp,epoch)));
+    try{return encodeBase64Url(derEncodeP256Signature(raw));}finally{raw.fill(0);}
+  }
+  async function verifyDeviceKeyRotation(publicJwk, userId, deviceId, oldFingerprint, newFingerprint, timestamp, epoch, proof) {
+    try{const key=await crypto.subtle.importKey('jwk',publicJwk,{name:'ECDSA',namedCurve:'P-256'},false,['verify']);const der=decodeBase64Url(proof),raw=derDecodeP256Signature(der);try{return await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},key,raw,rotationStatement(userId,deviceId,oldFingerprint,newFingerprint,timestamp,epoch));}finally{raw.fill(0);der.fill(0);}}catch{return false;}
+  }
   async function fingerprintP256(jwk) {
     if (!jwk || jwk.kty !== 'EC' || jwk.crv !== 'P-256') throw new Error('Unsupported public key type.');
     const x = decodeBase64Url(jwk.x), y = decodeBase64Url(jwk.y);
@@ -221,9 +249,13 @@
     try{return await crypto.subtle.decrypt({name:'AES-GCM',iv:iv1,additionalData:transferChunkLayerAad(metadata,index,count,'layer1'),tagLength:128},layer1Key,inner);}
     finally{inner.fill(0);}
   }
+  function historySyncAad(accountId,mainDeviceId,childDeviceId,requestId,index,count){const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;if(![accountId,mainDeviceId,childDeviceId,requestId].every(value=>typeof value==='string'&&uuid.test(value))||!Number.isInteger(index)||index<0||!Number.isInteger(count)||count<1||index>=count||count>128)throw new Error('Invalid history-sync batch context.');/* Protocol: compact UTF-8 JSON array; fixed ASCII UUIDs and base-10 integers; field order is normative. */return encoder.encode(JSON.stringify(['serein-history-sync-batch-v1',accountId.toLowerCase(),mainDeviceId.toLowerCase(),childDeviceId.toLowerCase(),requestId.toLowerCase(),index,count,1]));}
+  async function deriveHistorySyncKey(privateKey,accountId,localDeviceId,peerDeviceId,peerPublicJwk,mainDeviceId,childDeviceId,requestId,index,count){if(![mainDeviceId,childDeviceId].includes(localDeviceId)||![mainDeviceId,childDeviceId].includes(peerDeviceId)||localDeviceId===peerDeviceId)throw new Error('History-sync device roles do not match.');const peer=await crypto.subtle.importKey('jwk',peerPublicJwk,{name:'ECDH',namedCurve:'P-256'},false,[]),raw=new Uint8Array(await crypto.subtle.deriveBits({name:'ECDH',public:peer},privateKey,256));const parties=[mainDeviceId.toLowerCase(),childDeviceId.toLowerCase()].sort(),scope=`${accountId.toLowerCase()}|${parties.join('|')}`,salt=new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(`serein-history-sync-salt-v1|${scope}`))),info=encoder.encode(`serein-history-sync-key-v1|${scope}|${requestId.toLowerCase()}|${index}|${count}`);try{const material=await crypto.subtle.importKey('raw',raw,'HKDF',false,['deriveKey']);return await crypto.subtle.deriveKey({name:'HKDF',hash:'SHA-256',salt,info},material,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);}finally{raw.fill(0);salt.fill(0);}}
+  async function encryptHistorySyncBatch(key,plaintext,accountId,mainDeviceId,childDeviceId,requestId,index,count){const clear=typeof plaintext==='string'?encoder.encode(plaintext):new Uint8Array(plaintext);if(clear.length>480*1024)throw new Error('History-sync clear batch exceeds its safety limit.');const iv=crypto.getRandomValues(new Uint8Array(12));const ciphertext=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:historySyncAad(accountId,mainDeviceId,childDeviceId,requestId,index,count),tagLength:128},key,clear));return{version:1,algorithm:'AES-256-GCM',iv:encodeBase64Url(iv),ciphertext:encodeBase64Url(ciphertext)};}
+  async function decryptHistorySyncBatch(key,envelope,accountId,mainDeviceId,childDeviceId,requestId,index,count){if(envelope?.version!==1||envelope?.algorithm!=='AES-256-GCM')throw new Error('Unsupported history-sync envelope.');const iv=decodeBase64Url(envelope.iv),ciphertext=decodeBase64Url(envelope.ciphertext);if(iv.length!==12||ciphertext.length<16||ciphertext.length>512*1024)throw new Error('Malformed history-sync ciphertext.');return crypto.subtle.decrypt({name:'AES-GCM',iv,additionalData:historySyncAad(accountId,mainDeviceId,childDeviceId,requestId,index,count),tagLength:128},key,ciphertext);}
   async function sha256Hex(bytes) {
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
     return [...digest].map(byte => byte.toString(16).padStart(2, '0')).join('');
   }
-  window.SereinDeviceCrypto = Object.freeze({ generateDeviceKeyPair, fingerprintP256, fingerprintDeviceKeyBundle, deriveCandidateConversationKey, deriveLayer2ConversationKey, deriveRatchetBootstrapSecret, encryptMessage, decryptMessage, encryptTransferManifest, decryptTransferManifest, encryptTransferManifestLayer2, decryptTransferManifestLayer2, generateTransferKey, importTransferKey, encryptTransferChunk, decryptTransferChunk, encryptTransferChunkLayer2, decryptTransferChunkLayer2, transferChunkIv, sha256Hex, encodeBase64, encodeBase64Url, decodeStandardBase64 });
+  window.SereinDeviceCrypto = Object.freeze({ generateDeviceKeyPair, generateSigningKeyPair, signDeviceKeyRotation, verifyDeviceKeyRotation, fingerprintP256, fingerprintDeviceKeyBundle, deriveCandidateConversationKey, deriveLayer2ConversationKey, deriveRatchetBootstrapSecret, encryptMessage, decryptMessage, encryptTransferManifest, decryptTransferManifest, encryptTransferManifestLayer2, decryptTransferManifestLayer2, generateTransferKey, importTransferKey, encryptTransferChunk, decryptTransferChunk, encryptTransferChunkLayer2, decryptTransferChunkLayer2, transferChunkIv, deriveHistorySyncKey, encryptHistorySyncBatch, decryptHistorySyncBatch, historySyncAadBytes: historySyncAad, sha256Hex, encodeBase64, encodeBase64Url, decodeStandardBase64 });
 })();
