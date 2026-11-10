@@ -9,7 +9,7 @@ test('CI invokes repository shell scripts through bash regardless of executable-
   const ci = read('.github/workflows/ci.yml');
   assert.match(ci, /run: bash scripts\/test_core_ffi\.sh/);
   assert.match(ci, /ANDROID_NDK_HOME=.*bash scripts\/build_native_core\.sh android/);
-  assert.match(ci, /run: bash scripts\/build_native_core\.sh ios/);
+  assert.doesNotMatch(ci, /run: bash scripts\/build_native_core\.sh ios/);
   assert.doesNotMatch(ci, /run: scripts\/(?:test_core_ffi|build_native_core)\.sh/);
   assert.match(ci, /bash -euo pipefail -c '[\s\S]*?connectedDebugAndroidTest[\s\S]*?android-instrumented-\$\{API_LEVEL\}\.log/);
   assert.doesNotMatch(ci, /^\s+set -o pipefail$/m);
@@ -29,16 +29,15 @@ test('RustSec audit is explicitly manual-only', () => {
   assert.doesNotMatch(audit, /^\s+(?:push|pull_request|schedule):/m);
 });
 
-test('iOS simulator CI installs the selected Xcode-matched runtime when it is missing', () => {
+test('the crashing iOS simulator app job is absent while iOS core and manual signing checks remain', () => {
   const ci = read('.github/workflows/ci.yml');
-  assert.match(ci, /Ensure the selected Xcode simulator runtime is installed/);
-  assert.match(ci, /generic\/platform=iOS Simulator/);
-  assert.match(ci, /grep -Fxq 'Xcode 16\.3'/);
-  assert.match(ci, /IOS_SIM_RUNTIME_AVAILABLE/);
-  assert.match(ci, /xcodebuild -downloadPlatform iOS -exportPath/);
-  assert.match(ci, /xcodebuild -importPlatform/);
-  assert.match(ci, /--show-sdk-version/);
+  assert.doesNotMatch(ci, /^  ios-simulator:/m);
+  assert.doesNotMatch(ci, /generic\/platform=iOS Simulator/);
+  assert.match(ci, /target: aarch64-apple-ios\n/);
+  assert.match(ci, /target: aarch64-apple-ios-sim\n/);
   const adhoc = read('.github/workflows/ios-adhoc-test.yml');
+  assert.match(adhoc, /workflow_dispatch:/);
   assert.match(adhoc, /Verify installed iOS SDK/);
+  assert.match(adhoc, /generic\/platform=iOS/);
   assert.doesNotMatch(adhoc, /xcodebuild\s+-downloadPlatform/);
 });

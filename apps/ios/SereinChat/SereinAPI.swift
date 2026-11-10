@@ -52,6 +52,7 @@ private struct SereinAuthReply: Decodable { let account: SereinAccountReply }
 private struct SereinVerificationMeta: Decodable { let required: Bool?; let verified: Bool?; let email: String?; let purpose: String? }
 private struct SereinErrorReply: Decodable { let error: String; let verification: SereinVerificationMeta?; let retry_after_seconds: Int? }
 private struct SereinMessageReply: Decodable { let message: String; let retry_after_seconds: Int? }
+private struct SereinRefreshResponse: Sendable { let data: Data?; let error: String? }
 
 private final class SereinNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
@@ -79,6 +80,7 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
     @Published var contactRequests: [SereinContactRequest] = []
     @Published var blocks: [SereinBlock] = []
     @Published var devices: [SereinDevice] = []
+    @Published var deviceSessionsError: String?
     @Published var presenceVisibility = "contacts"
     @Published var allowContactRequests = true
     @Published var discoverableByEmail = false
@@ -312,30 +314,58 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
             }
         }
     }
+    private func refreshResponse(_ path: String) async -> SereinRefreshResponse {
+        do { return SereinRefreshResponse(data: try await request(path), error: nil) }
+        catch { return SereinRefreshResponse(data: nil, error: error.localizedDescription) }
+    }
     func refreshAccountData() async {
-        async let contactsData = request("/api/v1/contacts")
-        async let requestsData = request("/api/v1/contact-requests")
-        async let blocksData = request("/api/v1/blocks")
-        async let devicesData = request("/api/v1/devices")
-        async let settingsData = request("/api/v1/settings")
-        do {
-            let (c, r, b, d, s) = try await (contactsData, requestsData, blocksData, devicesData, settingsData)
-            contacts = try JSONDecoder().decode([SereinContact].self, from: c)
-            contactRequests = try JSONDecoder().decode([SereinContactRequest].self, from: r)
-            blocks = try JSONDecoder().decode([SereinBlock].self, from: b)
-            devices = try JSONDecoder().decode([SereinDevice].self, from: d)
-            let prefs = try JSONSerialization.jsonObject(with: s) as? [String: Any] ?? [:]
-            theme = ["system", "light", "dark"].contains(prefs["theme"] as? String ?? "") ? (prefs["theme"] as? String ?? "system") : "system"
-            let savedScale = prefs["font_scale"] as? String ?? "system"
-            fontScale = ["system", "standard", "large", "extra_large"].contains(savedScale) ? (savedScale == "standard" ? "system" : savedScale) : "system"
-            reduceMotion = prefs["reduce_motion"] as? Bool ?? false
-            notifications = prefs["notifications"] as? Bool ?? false
-            defaults.set(notifications, forKey: "serein.notifications.enabled")
-            presenceVisibility = (prefs["presence_visibility"] as? String) == "nobody" ? "nobody" : "contacts"
-            allowContactRequests = prefs["allow_contact_requests"] as? Bool ?? true
-            discoverableByEmail = prefs["discoverable_by_email"] as? Bool ?? false
-            errorMessage = nil
-        } catch { errorMessage = error.localizedDescription }
+        async let contactsResponse = refreshResponse("/api/v1/contacts")
+        async let requestsResponse = refreshResponse("/api/v1/contact-requests")
+        async let blocksResponse = refreshResponse("/api/v1/blocks")
+        async let devicesResponse = refreshResponse("/api/v1/devices")
+        async let settingsResponse = refreshResponse("/api/v1/settings")
+        let (c, r, b, d, s) = await (contactsResponse, requestsResponse, blocksResponse, devicesResponse, settingsResponse)
+        var failures: [String] = []
+        if let data = c.data {
+            do { contacts = try JSONDecoder().decode([SereinContact].self, from: data) }
+            catch { failures.append("contacts: \(error.localizedDescription)") }
+        } else { failures.append("contacts: \(c.error ?? "request failed")") }
+        if let data = r.data {
+            do { contactRequests = try JSONDecoder().decode([SereinContactRequest].self, from: data) }
+            catch { failures.append("contact requests: \(error.localizedDescription)") }
+        } else { failures.append("contact requests: \(r.error ?? "request failed")") }
+        if let data = b.data {
+            do { blocks = try JSONDecoder().decode([SereinBlock].self, from: data) }
+            catch { failures.append("blocked accounts: \(error.localizedDescription)") }
+        } else { failures.append("blocked accounts: \(b.error ?? "request failed")") }
+        if let data = d.data {
+            do { devices = try JSONDecoder().decode([SereinDevice].self, from: data); deviceSessionsError = nil }
+            catch { deviceSessionsError = "Signed-in device sessions are unavailable: \(error.localizedDescription)" }
+        } else { deviceSessionsError = "Signed-in device sessions are unavailable: \(d.error ?? "request failed")" }
+        if let data = s.data {
+            do {
+                let prefs = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+                theme = ["system", "light", "dark"].contains(prefs["theme"] as? String ?? "") ? (prefs["theme"] as? String ?? "system") : "system"
+                let savedScale = prefs["font_scale"] as? String ?? "system"
+                fontScale = ["system", "standard", "large", "extra_large"].contains(savedScale) ? (savedScale == "standard" ? "system" : savedScale) : "system"
+                reduceMotion = prefs["reduce_motion"] as? Bool ?? false
+                notifications = prefs["notifications"] as? Bool ?? false
+                defaults.set(notifications, forKey: "serein.notifications.enabled")
+                presenceVisibility = (prefs["presence_visibility"] as? String) == "nobody" ? "nobody" : "contacts"
+                allowContactRequests = prefs["allow_contact_requests"] as? Bool ?? true
+                discoverableByEmail = prefs["discoverable_by_email"] as? Bool ?? false
+            } catch { failures.append("settings: \(error.localizedDescription)") }
+        } else { failures.append("settings: \(s.error ?? "request failed")") }
+        errorMessage = failures.isEmpty ? nil : "Some account details could not be refreshed: \(failures.joined(separator: "; "))"
+    }
+    func refreshDeviceSessions() async {
+        let response = await refreshResponse("/api/v1/devices")
+        guard let data = response.data else {
+            deviceSessionsError = "Signed-in device sessions are unavailable: \(response.error ?? "request failed")"
+            return
+        }
+        do { devices = try JSONDecoder().decode([SereinDevice].self, from: data); deviceSessionsError = nil }
+        catch { deviceSessionsError = "Signed-in device sessions are unavailable: \(error.localizedDescription)" }
     }
     func contactsData() async throws -> Data { try await request("/api/v1/contacts") }
     func refreshContactPresence() async {
@@ -493,7 +523,7 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
             if !SereinAttachmentStore.shared.deleteForAccount(user.id) { cleared = false }
             if let root = URL(string: apiBase), let cookies = HTTPCookieStorage.shared.cookies(for: root) { cookies.filter { $0.name == "serein_session" }.forEach { HTTPCookieStorage.shared.deleteCookie($0) } }
             defaults.removeObject(forKey: "serein.device-id")
-            self.user = nil; currentDevice = nil; contacts = []; contactRequests = []; blocks = []; devices = []
+            self.user = nil; currentDevice = nil; contacts = []; contactRequests = []; blocks = []; devices = []; deviceSessionsError = nil
             cancelVerification()
             return (true, cleared, nil)
         } catch { return (false, false, error.localizedDescription) }
@@ -551,7 +581,7 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         if let root = URL(string: apiBase), let cookies = HTTPCookieStorage.shared.cookies(for: root) {
             cookies.filter { $0.name == "serein_session" }.forEach { HTTPCookieStorage.shared.deleteCookie($0) }
         }
-        user = nil; currentDevice = nil; contacts = []; contactRequests = []; blocks = []; devices = []
+user = nil; currentDevice = nil; contacts = []; contactRequests = []; blocks = []; devices = []; deviceSessionsError = nil
         cancelVerification()
         return true
     }

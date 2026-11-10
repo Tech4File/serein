@@ -12,6 +12,7 @@ const ios = fs.readFileSync(path.join(root, 'apps/ios/SereinChat/SereinChatEngin
 const androidApi = fs.readFileSync(path.join(root, 'apps/android/app/src/main/java/io/serein/chat/SereinApi.java'), 'utf8');
 const iosApi = fs.readFileSync(path.join(root, 'apps/ios/SereinChat/SereinAPI.swift'), 'utf8');
 const mobileMainMigration = fs.readFileSync(path.join(root, 'backend/migrations/0021_mobile_priority_main_device.sql'), 'utf8');
+const activeMainMigration = fs.readFileSync(path.join(root, 'backend/migrations/0022_active_session_main_device.sql'), 'utf8');
 
 test('first main selection prefers the oldest active mobile, and all clients identify their platform explicitly', () => {
   assert.ok(backend.includes("ORDER BY CASE WHEN d.platform IN ('android','ios') THEN 0 ELSE 1 END,d.created_at ASC,d.id ASC"));
@@ -26,6 +27,37 @@ test('first main selection prefers the oldest active mobile, and all clients ide
   assert.match(web, /historySyncRequest'\)\.hidden=!mainId/);
   assert.match(androidActivity, /if\(!mainId\.isEmpty\(\)\)\{labels\.add\("Request ‘Sync everything’ from main"\)/);
   assert.match(iosProductView, /if engine\.mainDeviceID != nil \{ Button\("Request/);
+});
+
+test('main election, mobile priority, and explicit promotion use unexpired auth sessions consistently', () => {
+  const create = backend.slice(backend.indexOf('async fn create_device_session('), backend.indexOf('\nasync fn register(', backend.indexOf('async fn create_device_session(')));
+  const inserted = create.indexOf('INSERT INTO auth_sessions');
+  const elected = create.indexOf('UPDATE accounts a SET main_device_id=');
+  assert.ok(inserted >= 0 && elected > inserted, 'the new session must exist before election');
+  assert.match(create.slice(elected), /EXISTS\(SELECT 1 FROM auth_sessions s WHERE s\.device_id=d\.id AND s\.user_id=d\.user_id AND s\.expires_at>now\(\)\)/);
+  assert.match(create, /ORDER BY CASE WHEN d\.platform IN \('android','ios'\) THEN 0 ELSE 1 END,d\.created_at ASC,d\.id ASC/);
+  assert.match(create, /platform IN \('android','ios'\) AND EXISTS\(SELECT 1 FROM auth_sessions s WHERE s\.device_id=m\.id/);
+
+  const promote = backend.slice(backend.indexOf('async fn promote_current_device_to_main('), backend.indexOf('\nasync fn create_history_sync_request('));
+  assert.ok(promote.indexOf('SELECT id FROM accounts WHERE id=$1 FOR UPDATE') < promote.indexOf('SELECT d.platform'));
+  assert.match(promote, /s\.token_hash=\$3 AND s\.device_id=d\.id AND s\.user_id=d\.user_id AND s\.expires_at>now\(\)/);
+  assert.match(promote, /ORDER BY d\.created_at ASC,d\.id ASC LIMIT 1/);
+
+  const directory = backend.slice(backend.indexOf('async fn list_own_device_keys('), backend.indexOf('async fn list_peer_device_keys('));
+  assert.match(directory, /preferred_mobile_device_id[\s\S]*?EXISTS\(SELECT 1 FROM auth_sessions s WHERE s\.device_id=d\.id AND s\.user_id=d\.user_id AND s\.expires_at>now\(\)\)/);
+  assert.match(directory, /main_device_online[\s\S]*?auth_sessions s JOIN devices d[\s\S]*?s\.expires_at>now\(\)/);
+  const schemaStart = backend.indexOf('async fn initialize_schema(');
+  const schemaEnd = backend.indexOf('\nasync fn ', schemaStart + 1);
+  const schema = backend.slice(schemaStart, schemaEnd);
+  const sessionTable = schema.indexOf('CREATE TABLE IF NOT EXISTS auth_sessions');
+  const firstElection = schema.indexOf('SET main_device_id=(SELECT d.id FROM devices d');
+  const relayCleanup = schema.indexOf("UPDATE history_sync_requests r SET status='cancelled'");
+  assert.ok(sessionTable < firstElection && firstElection < relayCleanup, 'startup must create sessions, elect, then invalidate stale relays');
+  assert.match(schema, /auth_sessions s[\s\S]*?s\.expires_at>now\(\)/);
+  assert.match(activeMainMigration, /auth_sessions s[\s\S]*?s\.expires_at>now\(\)/);
+  assert.match(activeMainMigration, /WHERE NOT a\.main_device_designated/);
+  assert.match(activeMainMigration, /a\.main_device_id IS NOT NULL/);
+  assert.match(activeMainMigration, /NULL designated main remains NULL/);
 });
 
 test('history relay is a short-lived encrypted transport with authenticated main-only access and quotas', () => {

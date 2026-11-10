@@ -9,23 +9,26 @@ const xcode = fs.readFileSync(path.join(root, 'apps/ios/SereinChat.xcodeproj/pro
 const workflow = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
 const androidTest = fs.readFileSync(path.join(root, 'apps/android/app/src/androidTest/java/io/serein/chat/SereinBackupCompatibilityTest.java'), 'utf8');
 
-test('minimum supported OS floors are exercised by native CI rather than only documented', () => {
+test('Android minimum API is exercised in CI and iOS simulator app CI is intentionally absent', () => {
   assert.match(gradle, /minSdk\s+26/);
   assert.match(gradle, /testInstrumentationRunner\s+'android\.test\.InstrumentationTestRunner'/);
   assert.match(xcode, /IPHONEOS_DEPLOYMENT_TARGET = 15\.0/);
   assert.match(workflow, /api-level: \[26, 35\]/);
   assert.match(workflow, /connectedDebugAndroidTest/);
   assert.match(workflow, /Upload Android instrumentation results/);
-  assert.match(workflow, /Launch the built app in an available iOS simulator/);
+  assert.doesNotMatch(workflow, /^  ios-simulator:/m);
+  const adhoc = fs.readFileSync(path.join(root, '.github/workflows/ios-adhoc-test.yml'), 'utf8');
+  assert.match(adhoc, /IPHONEOS_DEPLOYMENT_TARGET|generic\/platform=iOS/);
 });
 
-test('mobile core is cross-checked and native static-library builds are linked into the app targets in CI', () => {
+test('mobile Rust core is cross-checked and native link configuration remains while iOS app CI is omitted', () => {
   assert.match(workflow, /aarch64-linux-android/);
   assert.match(workflow, /aarch64-apple-ios/);
   assert.match(workflow, /aarch64-apple-ios-sim/);
   assert.match(workflow, /cargo check --manifest-path crates\/serein-core\/Cargo.toml --target/);
   assert.match(workflow, /scripts\/build_native_core\.sh android/);
-  assert.match(workflow, /scripts\/build_native_core\.sh ios/);
+  assert.doesNotMatch(workflow, /scripts\/build_native_core\.sh ios/);
+  assert.doesNotMatch(workflow, /^  ios-simulator:/m);
   assert.match(gradle, /externalNativeBuild/);
   assert.match(xcode, /SereinCore\.xcframework in Frameworks/);
 });

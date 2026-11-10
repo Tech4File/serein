@@ -847,23 +847,23 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { border-radiu
 .emoji-search-row .emoji-search-wrap { min-width: 0; flex: 1; }
 .emoji-backspace { display: grid; width: 42px; min-width: 42px; height: 40px; place-items: center; border: 1px solid var(--workspace-border, var(--border)); border-radius: 11px; background: var(--workspace-surface-soft, var(--surface-2)); color: var(--workspace-ink, var(--text)); font-size: 1.18rem; font-weight: 700; }
 .emoji-backspace:hover, .emoji-backspace:focus-visible { border-color: var(--workspace-accent, var(--accent)); color: var(--workspace-accent, var(--accent)); }
-/* Clamp the picker to the current viewport; keep meaningful chat visible on short and narrow screens. */
+/* Preserve the established conversation-centered modal while bounding it to short and narrow viewports. */
 .conversation { position: relative; }
-.emoji-picker { left: max(8px, calc((100% - 900px) / 2)); right: auto; bottom: calc(78px + env(safe-area-inset-bottom)); width: min(440px, calc(100% - 24px)); max-height: min(58dvh, 520px, calc(100dvh - 128px)); overflow: hidden; }
+.emoji-picker { top: 50%; left: 50%; right: auto; bottom: auto; width: min(440px, calc(100% - 24px)); max-height: min(58dvh, 520px, calc(100dvh - 128px)); overflow: hidden; transform: translate(-50%, -50%); }
 .emoji-panel, .gif-panel { min-height: 0; max-height: min(52dvh, 460px, calc(100dvh - 190px)); overflow: auto; overscroll-behavior: contain; }
 .emoji-search-wrap { min-width: 0; display: flex; align-items: center; gap: 8px; }
 .emoji-search-wrap input { min-width: 0; width: 100%; }
 .emoji-categories, .gif-categories { max-height: min(12dvh, 88px); overflow: auto; }
 .emoji-grid, .gif-results { max-height: min(28dvh, 230px); overflow: auto; overscroll-behavior: contain; }
 @media (max-width: 680px) {
-  .emoji-picker { left: 8px; right: 8px; bottom: calc(70px + env(safe-area-inset-bottom)); width: auto; max-height: min(54dvh, 430px, calc(100dvh - 118px - env(safe-area-inset-bottom))); border-radius: 16px; }
+  .emoji-picker { top: 50%; left: 50%; right: auto; bottom: auto; width: calc(100% - 18px); max-height: min(54dvh, 430px, calc(100dvh - 118px - env(safe-area-inset-bottom))); border-radius: 16px; transform: translate(-50%, -50%); }
   .emoji-panel, .gif-panel { max-height: min(48dvh, 360px, calc(100dvh - 190px - env(safe-area-inset-bottom))); padding: 10px; }
   .emoji-grid, .gif-results { max-height: min(24dvh, 190px); }
   .chat-media-preview { width: min(100%, 320px); max-height: 240px; }
   .chat-media-content, .chat-gif-frame { max-height: 240px; }
 }
 @media (max-width: 370px) {
-  .emoji-picker { left: 6px; right: 6px; bottom: calc(64px + env(safe-area-inset-bottom)); max-height: min(48dvh, 350px, calc(100dvh - 108px - env(safe-area-inset-bottom))); padding: 8px; }
+  .emoji-picker { top: 50%; left: 50%; right: auto; bottom: auto; width: calc(100% - 12px); max-height: min(48dvh, 350px, calc(100dvh - 108px - env(safe-area-inset-bottom))); padding: 8px; transform: translate(-50%, -50%); }
   .emoji-picker-head { gap: 5px; padding: 8px; }
   .emoji-picker-intro span { display: none; }
   .emoji-panel, .gif-panel { max-height: min(43dvh, 290px, calc(100dvh - 175px - env(safe-area-inset-bottom))); padding: 8px; }

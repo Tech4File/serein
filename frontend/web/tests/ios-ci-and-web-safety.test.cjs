@@ -5,23 +5,16 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '../../..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
-test('iOS CI verifies and installs the simulator runtime that matches the selected SDK', () => {
+test('iOS simulator app build is deliberately excluded from recurring CI after Xcode crashes', () => {
   const ci = read('.github/workflows/ci.yml');
-  assert.match(ci, /runs-on: macos-15/);
-  assert.match(ci, /test "\$\(uname -m\)" = "arm64"/);
-  assert.match(ci, /xcodebuild -showsdks/);
-  assert.match(ci, /Ensure the selected Xcode simulator runtime is installed/);
-  assert.match(ci, /generic\/platform=iOS Simulator/);
-  assert.match(ci, /IOS_SIM_RUNTIME_AVAILABLE/);
-  assert.match(ci, /xcodebuild -downloadPlatform iOS -exportPath/);
-  assert.match(ci, /xcodebuild -importPlatform/);
-  assert.match(ci, /runtime\.get\('version'\)==wanted/);
-  assert.match(ci, /IOS_SIM_RUNTIME_VERSION=\$IOS_PLATFORM_VERSION/);
-  assert.match(ci, /runtime in compatible/);
-  assert.match(ci, /Preflight Xcode project resolution[\s\S]*?Build iOS simulator app/);
-  assert.match(ci, /build_status=\$\{PIPESTATUS\[0\]\}/);
+  assert.doesNotMatch(ci, /^  ios-simulator:/m);
+  assert.match(ci, /target: aarch64-apple-ios\n/);
+  assert.match(ci, /target: aarch64-apple-ios-sim\n/);
+  assert.match(ci, /cargo check --manifest-path crates\/serein-core\/Cargo.toml --target/);
   const adhoc = read('.github/workflows/ios-adhoc-test.yml');
+  assert.match(adhoc, /workflow_dispatch:/);
   assert.match(adhoc, /Verify installed iOS SDK/);
+  assert.match(adhoc, /generic\/platform=iOS/);
   assert.doesNotMatch(adhoc, /xcodebuild -downloadPlatform iOS/);
 });
 
