@@ -19,22 +19,26 @@ test('GIF duration parser uses frame delays and safely falls back for malformed 
   assert.equal(playback.gifDurationMs(Buffer.from('not a gif')), 1000);
 });
 
-test('chat GIFs preload only in view, play two passes, replay on first tap and open on the next tap', () => {
+test('chat GIFs preload in view, autoplay twice, stop, and open media details on tap', () => {
   assert.match(app, /function queueChatAttachmentPreview/);
   assert.match(app, /IntersectionObserver\(entries=>/);
-  assert.match(app, /durationMs,onOpen:\(\)=>openAttachmentItem\(item\)/);
+  assert.match(app, /attachTwoPassPlayback\(\{image:media,canvas,sourceUrl:cached\.url,durationMs,onComplete:\(\)=>state\.completedGifAutoplay\.add\(item\.id\)\}\)/);
   assert.match(app, /item\.attachment\?\.size>8\*1024\*1024/);
   assert.match(playback.attachTwoPassPlayback.toString(), /durationMs \* 2/);
-  assert.match(playback.attachTwoPassPlayback.toString(), /pendingSecondTap/);
-  assert.match(playback.attachTwoPassPlayback.toString(), /onOpen\?\.\(\)/);
+  assert.doesNotMatch(playback.attachTwoPassPlayback.toString(), /addEventListener\('click'/);
+  assert.match(app, /if\(gif\)\{preview\.addEventListener\('click',\(\)=>openAttachmentItem\(item\)\)/);
+  assert.match(app, /plays twice automatically; tap to open its details/);
   assert.match(html, /media-playback\.js\?v=/);
+  assert.match(app, /Stored in browser-managed data; filesystem path unavailable/);
+  assert.match(app, /if\(!gif\)\{const card/);
 });
 
 test('attachment captions render with the file/media in one chat bubble and older filename labels are not shown as captions', () => {
   assert.match(app, /function attachmentCaption\(item\)/);
   assert.match(app, /caption===`📎 \$\{item\.attachment\.filename\}`\?'':caption/);
   assert.match(app, /captionNode\.className='attachment-caption'/);
-  assert.match(app, /bubble\.append\(card\);const caption=attachmentCaption\(item\)/);
+  assert.match(app, /if\(!gif\)\{const card=document\.createElement\('div'\);card\.className='attachment-card'/);
+  assert.match(app, /bubble\.append\(card\);\}const caption=attachmentCaption\(item\)/);
   assert.match(css, /\.attachment-caption\s*\{[^}]*white-space:\s*pre-wrap/);
 });
 

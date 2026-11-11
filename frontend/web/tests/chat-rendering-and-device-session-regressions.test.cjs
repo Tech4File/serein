@@ -35,7 +35,7 @@ test('web inserts a bubble and metadata for every ordinary timeline row before a
 test('Android and iOS render message body, bubble surface, and timestamp/delivery state independently of Web', () => {
   const androidRender = android.slice(android.indexOf('private void renderMessage(JSONObject row)'), android.indexOf('private String deliverySummary('));
   assert.match(androidRender, /SereinUi\.chatBubble\(this,mine\)/);
-  assert.match(androidRender, /TextView body=SereinUi\.text\(this,row\.optString\("text"\)/);
+  assert.match(androidRender, /TextView body=SereinUi\.text\(this,messageText,16/);
   assert.match(androidRender, /bubble\.addView\(meta\)/);
   assert.match(androidRender, /line\.addView\(bubble,bubbleParams\)/);
   const iosTimeline = iosView.slice(iosView.indexOf('private var timeline:'), iosView.indexOf('private func deliverySummary('));
@@ -60,9 +60,13 @@ test('web refreshes keys and composer readiness when the selected contact gains 
 test('emoji and GIF picker remains centered inside the conversation at desktop and mobile widths', () => {
   const finalRules = experienceCss.slice(experienceCss.lastIndexOf('/* Preserve the established conversation-centered modal'));
   assert.match(finalRules, /\.emoji-picker \{ top: 50%; left: 50%; right: auto; bottom: auto;[\s\S]*?transform: translate\(-50%, -50%\); \}/);
+  assert.match(finalRules, /@media \(min-width: 681px\) \{\s*\.emoji-picker \{[\s\S]*?width: min\(560px, calc\(100% - 24px\)\);[\s\S]*?min-width: min\(480px, calc\(100% - 24px\)\);[\s\S]*?max-width: calc\(100% - 24px\);/);
   assert.match(finalRules, /@media \(max-width: 680px\) \{\s*\.emoji-picker \{ top: 50%; left: 50%; right: auto; bottom: auto;/);
   assert.match(finalRules, /@media \(max-width: 370px\) \{\s*\.emoji-picker \{ top: 50%; left: 50%; right: auto; bottom: auto;/);
   assert.doesNotMatch(finalRules, /\.emoji-picker \{ left: max\(8px, calc\(\(100% - 900px\) \/ 2\)\)/);
+  assert.match(experienceCss, /\.emoji-categories, \.gif-categories \{[\s\S]*?flex-wrap: nowrap;[\s\S]*?overflow-x: auto;[\s\S]*?overscroll-behavior-x: auto/);
+  assert.match(experienceCss, /container-type: inline-size/);
+  assert.match(experienceCss, /font-size: clamp\(22px, 5\.6cqi, 27px\)/);
 });
 
 test('native clients refresh selected-contact keys on their own foreground cadence', () => {

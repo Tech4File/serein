@@ -68,6 +68,7 @@ type PeerMap = DashMap<Uuid, Peer>;
 #[derive(Serialize)] struct DeviceSessionReply { id: Uuid, name: String, platform: String, created_at: String, last_seen_at: String, current: bool, online: bool, main: bool }
 #[derive(Deserialize)] #[serde(tag = "type", rename_all = "snake_case")] enum ClientFrame { Message { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }, Ack { id: Uuid }, Heartbeat }
 #[derive(Deserialize)] struct HistoryQuery { after_created_at: Option<String>, after_id: Option<Uuid>, limit: Option<i64> }
+#[derive(Deserialize)] struct ContactLookupQuery { identity: String }
 #[derive(Deserialize)] struct ExpiredMessagesQuery { after_created_at: Option<String>, after_id: Option<Uuid>, limit: Option<i64>, contact_id: Option<Uuid> }
 #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct MessageReceiptsQuery { ids: Vec<Uuid> }
 #[derive(Deserialize)] struct SendEnvelopeInput { id: Uuid, to: Uuid, iv: String, ciphertext: String, crypto_version: Option<u8> }
@@ -136,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/healthz", get(healthz)).route("/api/v1/security/capabilities", get(security_capabilities)).route("/status", get(|| async { axum::response::Html(include_str!("../../frontend/web/status.html")) }))
         .route("/api/v1/auth/register", post(register)).route("/api/v1/auth/verify-email", post(verify_email)).route("/api/v1/auth/resend-verification", post(resend_verification)).route("/api/v1/auth/login", post(login)).route("/api/v1/auth/verify-login", post(verify_login)).route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/me", get(me).delete(delete_account)).route("/api/v1/backups/key-envelope", post(get_backup_key_envelope)).route("/api/v1/device-key", put(register_device_public_key)).route("/api/v1/device-keys", get(list_own_device_keys)).route("/api/v1/contacts/:contact_id/device-keys", get(list_contact_device_public_keys)).route("/api/v1/messages", get(list_messages).post(send_message_api)).route("/api/v1/messages/expiries", get(list_expired_messages)).route("/api/v1/messages/receipts", post(list_message_receipts)).route("/api/v1/messages/read", post(mark_messages_read_api)).route("/api/v1/messages/:id/ack", post(ack_message_api)).route("/api/v1/messages/:id/read", post(mark_message_read_api)).route("/api/v1/settings", get(get_settings).put(put_settings)).route("/api/v1/contacts", get(list_contacts).post(create_contact_request))
-        .route("/api/v1/contact-requests", get(list_contact_requests).post(create_contact_request)).route("/api/v1/contact-requests/:request_id/accept", post(accept_contact_request)).route("/api/v1/contact-requests/:request_id", delete(delete_contact_request))
+        .route("/api/v1/contact-lookup", get(lookup_contact)).route("/api/v1/contact-requests", get(list_contact_requests).post(create_contact_request)).route("/api/v1/contact-requests/:request_id/accept", post(accept_contact_request)).route("/api/v1/contact-requests/:request_id", delete(delete_contact_request))
         .route("/api/v1/blocks", get(list_blocks)).route("/api/v1/blocks/:user_id", put(block_user).delete(unblock_user))
         .route("/api/v1/contacts/:contact_id", delete(remove_contact)).route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/:device_id", delete(revoke_device)).route("/api/v1/devices/revoke-others", post(revoke_other_devices))
@@ -349,6 +350,7 @@ fn parse_web_origins(raw:&str)->Result<Vec<String>,String>{
 }
 
 async fn security_headers(State(state):State<AppState>,request:Request,next:Next)->Response{
+    let private_lookup=request.uri().path()=="/api/v1/contact-lookup";
     if let Some(origin)=request.headers().get(header::ORIGIN){
         let allowed=origin.to_str().ok().and_then(|value|normalize_web_origin(value).ok())
             .is_some_and(|origin|state.allowed_origins.iter().any(|allowed|allowed==&origin));
@@ -362,6 +364,7 @@ async fn security_headers(State(state):State<AppState>,request:Request,next:Next
     headers.insert("content-security-policy",HeaderValue::from_static("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://nekos.best; font-src 'self' data:; connect-src 'self' https: wss:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"));
     headers.insert("x-content-type-options",HeaderValue::from_static("nosniff"));
     headers.insert("x-frame-options",HeaderValue::from_static("DENY"));
+    if private_lookup{headers.insert(header::CACHE_CONTROL,HeaderValue::from_static("no-store"));}
     headers.insert("referrer-policy",HeaderValue::from_static("no-referrer"));
     headers.insert("permissions-policy",HeaderValue::from_static("camera=(self), microphone=(self), geolocation=()"));
     if state.cookie_secure{headers.insert("strict-transport-security",HeaderValue::from_static("max-age=31536000"));}
@@ -762,13 +765,13 @@ async fn register_device_public_key(State(state):State<AppState>,headers:HeaderM
     let signing_value=match input.signing_public_key.as_ref().map(serde_json::to_value).transpose(){Ok(v)=>v,Err(_)=>return api_error(StatusCode::BAD_REQUEST,"invalid device signing key")};
     let mut tx=match state.db.begin().await{Ok(v)=>v,Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key service unavailable")};
     let existing=sqlx::query_as::<_,(Value,Option<Value>,String,i16,Option<Value>,i64,Option<String>,Option<String>)>("SELECT k.public_key,k.layer2_public_key,k.fingerprint,k.ratchet_version,k.signing_public_key,k.key_epoch,k.previous_fingerprint,k.rotation_proof FROM device_public_keys k JOIN devices d ON d.id=k.device_id AND d.user_id=k.user_id WHERE k.device_id=$1 AND k.user_id=$2 AND d.revoked_at IS NULL FOR UPDATE OF k").bind(ctx.device_id).bind(ctx.user_id).fetch_optional(&mut *tx).await;
-    let (previous_fingerprint,key_epoch,rotation_proof)=match existing{
+    let (previous_fingerprint,rotation_proof)=match existing{
         Err(_)=>{let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key status unavailable");}
         Ok(None)=>{
             if let Some(signing_key)=input.signing_public_key.as_ref(){let epoch=input.key_epoch.unwrap_or(1);let statement=device_key_rotation_statement(ctx.user_id,ctx.device_id,"",&fingerprint,input.rotation_timestamp.unwrap_or(0),epoch);if epoch!=1||input.rotation_timestamp.unwrap_or(0)<1||!input.rotation_proof.as_deref().is_some_and(|proof|verify_device_key_rotation_signature(signing_key,&statement,proof)){let _=tx.rollback().await;return api_error(StatusCode::BAD_REQUEST,"initial device signing-key proof is invalid");}}
             let result=sqlx::query("INSERT INTO device_public_keys(device_id,user_id,algorithm,public_key,layer2_public_key,fingerprint,key_version,ratchet_version,signing_public_key,key_epoch,rotation_timestamp,rotation_proof) SELECT d.id,d.user_id,'ECDH-P256',$3,$4,$5,2,$6,$7,1,$8,$9 FROM devices d WHERE d.id=$1 AND d.user_id=$2 AND d.revoked_at IS NULL ON CONFLICT(device_id) DO NOTHING").bind(ctx.device_id).bind(ctx.user_id).bind(&public_key).bind(&layer2_public_key).bind(&fingerprint).bind(ratchet_version as i16).bind(&signing_value).bind(input.rotation_timestamp).bind(&input.rotation_proof).execute(&mut *tx).await;
             if !matches!(result,Ok(ref result) if result.rows_affected()==1){let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"active device key registration changed during update");}
-            (None,1,None)
+            (None,None)
         }
         Ok(Some((old_public,old_layer2,old_fingerprint,old_ratchet,old_signing,old_epoch,old_previous,old_proof)))=>{
             if old_ratchet>ratchet_version as i16{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"ratchet capability downgrade rejected; the higher published capability is preserved");}
@@ -787,7 +790,7 @@ async fn register_device_public_key(State(state):State<AppState>,headers:HeaderM
                     }
                 }
                 if sqlx::query("UPDATE device_public_keys SET ratchet_version=$3,signing_public_key=COALESCE(signing_public_key,$4),rotation_timestamp=COALESCE(rotation_timestamp,$6),rotation_proof=COALESCE(rotation_proof,$7) WHERE device_id=$1 AND user_id=$2 AND fingerprint=$5").bind(ctx.device_id).bind(ctx.user_id).bind(ratchet_version as i16).bind(resulting_signing).bind(&fingerprint).bind(input.rotation_timestamp).bind(&input.rotation_proof).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"device key capability could not be updated");}
-                (old_previous,old_epoch,resulting_proof)
+                (old_previous,resulting_proof)
             }else{
                 let Some(old_signer)=old_signing_key else{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"legacy device key has no signing anchor; automatic rotation is blocked");};
                 let Some(new_signer)=input.signing_public_key.as_ref()else{let _=tx.rollback().await;return api_error(StatusCode::CONFLICT,"changed device key requires cryptographic continuity proof");};
@@ -800,7 +803,7 @@ async fn register_device_public_key(State(state):State<AppState>,headers:HeaderM
                 let updated=sqlx::query("UPDATE device_public_keys SET public_key=$3,layer2_public_key=$4,fingerprint=$5,key_version=2,ratchet_version=$6,previous_fingerprint=$7,rotation_proof=$8,key_epoch=$9,rotation_timestamp=$10,rotated_at=now() WHERE device_id=$1 AND user_id=$2 AND fingerprint=$7").bind(ctx.device_id).bind(ctx.user_id).bind(&public_key).bind(&layer2_public_key).bind(&fingerprint).bind(ratchet_version as i16).bind(&old_fingerprint).bind(proof).bind(epoch).bind(input.rotation_timestamp).execute(&mut *tx).await;
                 if !matches!(updated,Ok(ref result) if result.rows_affected()==1){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"verified device key rotation could not be saved");}
                 if sqlx::query("INSERT INTO device_key_rotation_history(device_id,key_epoch,old_fingerprint,new_fingerprint,proof,rotation_timestamp) VALUES($1,$2,$3,$4,$5,$6)").bind(ctx.device_id).bind(epoch).bind(&old_fingerprint).bind(&fingerprint).bind(proof).bind(input.rotation_timestamp).execute(&mut *tx).await.is_err(){let _=tx.rollback().await;return api_error(StatusCode::SERVICE_UNAVAILABLE,"key continuity proof history could not be saved");}
-                (Some(old_fingerprint),epoch,Some(proof.to_owned()))
+                (Some(old_fingerprint),Some(proof.to_owned()))
             }
         }
     };
@@ -1087,8 +1090,31 @@ async fn abort_encrypted_transfer(State(state):State<AppState>,headers:HeaderMap
 }
 
 async fn enforce_action_limit(db:&PgPool,user_id:Uuid,action:&str,limit:i32)->Result<bool,sqlx::Error>{
-    let attempts=sqlx::query_scalar::<_,i32>("INSERT INTO account_action_limits(user_id,action,window_started_at,attempt_count) VALUES($1,$2,now(),1) ON CONFLICT(user_id,action) DO UPDATE SET window_started_at=CASE WHEN account_action_limits.window_started_at<now()-interval '1 hour' THEN now() ELSE account_action_limits.window_started_at END,attempt_count=CASE WHEN account_action_limits.window_started_at<now()-interval '1 hour' THEN 1 ELSE LEAST(account_action_limits.attempt_count+1,11) END RETURNING attempt_count").bind(user_id).bind(action).fetch_one(db).await?;
+    let attempts=sqlx::query_scalar::<_,i32>("INSERT INTO account_action_limits(user_id,action,window_started_at,attempt_count) VALUES($1,$2,now(),1) ON CONFLICT(user_id,action) DO UPDATE SET window_started_at=CASE WHEN account_action_limits.window_started_at<now()-interval '1 hour' THEN now() ELSE account_action_limits.window_started_at END,attempt_count=CASE WHEN account_action_limits.window_started_at<now()-interval '1 hour' THEN 1 ELSE LEAST(account_action_limits.attempt_count+1,61) END RETURNING attempt_count").bind(user_id).bind(action).fetch_one(db).await?;
     Ok(attempts<=limit)
+}
+
+async fn lookup_contact(State(state):State<AppState>,headers:HeaderMap,Query(query):Query<ContactLookupQuery>)->Response{
+    let ctx=match require_user(&state,&headers).await{Ok(v)=>v,Err(r)=>return r};
+    let mut identity=query.identity.trim().to_ascii_lowercase();
+    if identity.starts_with('@')&&!identity[1..].contains('@'){identity.remove(0);}
+    let by_email=identity.contains('@');
+    if identity.len()>254||(by_email&&!valid_email(&identity))||(!by_email&&!valid_username(&normalise_username(&identity))){return Json(serde_json::json!({"result":null,"message":"Enter an exact username or verified email address."})).into_response();}
+    match enforce_action_limit(&state.db,ctx.user_id,"contact-lookup",60).await{
+        Ok(true)=>{},Ok(false)=>return api_error(StatusCode::TOO_MANY_REQUESTS,"profile lookup limit reached; try again later"),Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"profile lookup is temporarily unavailable")
+    }
+    let row=sqlx::query_as::<_,(Uuid,String,String,bool,Option<Uuid>,Option<Uuid>,bool,bool)>("SELECT a.id,a.username,a.display_name,EXISTS(SELECT 1 FROM contacts c WHERE c.owner_id=$2 AND c.contact_id=a.id AND c.deleted_at IS NULL), (SELECT r.id FROM contact_requests r WHERE r.sender_id=a.id AND r.recipient_id=$2 AND r.expires_at>now() ORDER BY r.created_at DESC LIMIT 1), (SELECT r.id FROM contact_requests r WHERE r.sender_id=$2 AND r.recipient_id=a.id AND r.expires_at>now() ORDER BY r.created_at DESC LIMIT 1), COALESCE(s.settings->>'allow_contact_requests','true')<>'false' AND (NOT $3 OR COALESCE(s.settings->>'discoverable_by_email','false')<>'false'), COALESCE(s.settings->>'presence_visibility','contacts')<>'nobody' FROM accounts a LEFT JOIN user_settings s ON s.user_id=a.id WHERE a.email_verified=TRUE AND a.id<>$2 AND (($3 AND lower(a.email)=$1) OR (NOT $3 AND a.username=$1)) AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.owner_id=$2 AND b.blocked_user_id=a.id) OR (b.owner_id=a.id AND b.blocked_user_id=$2)) AND (EXISTS(SELECT 1 FROM contacts c WHERE c.owner_id=$2 AND c.contact_id=a.id AND c.deleted_at IS NULL) OR EXISTS(SELECT 1 FROM contact_requests r WHERE r.sender_id=a.id AND r.recipient_id=$2 AND r.expires_at>now()) OR EXISTS(SELECT 1 FROM contact_requests r WHERE r.sender_id=$2 AND r.recipient_id=a.id AND r.expires_at>now()) OR (COALESCE(s.settings->>'allow_contact_requests','true')<>'false' AND (NOT $3 OR COALESCE(s.settings->>'discoverable_by_email','false')<>'false')))" )
+        .bind(&identity).bind(ctx.user_id).bind(by_email).fetch_optional(&state.db).await;
+    let candidate=match row{Ok(Some(value))=>value,Ok(None)=>return Json(serde_json::json!({"result":null,"message":"No profile is available for that exact identity. Check the spelling; email lookup is only shown when enabled by that account."})).into_response(),Err(error)=>{warn!(error=%error,"exact contact lookup failed");return api_error(StatusCode::SERVICE_UNAVAILABLE,"profile lookup is temporarily unavailable");}};
+    let (id,username,display_name,connected,incoming_id,outgoing_id,can_request,presence_allowed)=candidate;
+    let (relationship,request_id)=if connected{("connected",None)}else if let Some(id)=incoming_id{("incoming",Some(id))}else if let Some(id)=outgoing_id{("pending",Some(id))}else if can_request{("request",None)}else{return Json(serde_json::json!({"result":null,"message":"No profile is available for that exact identity."})).into_response();};
+    let presence_visible=connected&&presence_allowed;
+    let online=if presence_visible{
+        match sqlx::query_scalar::<_,Uuid>("SELECT d.id FROM devices d WHERE d.user_id=$1 AND d.revoked_at IS NULL AND d.last_seen_at>now()-interval '90 seconds' AND EXISTS(SELECT 1 FROM auth_sessions s WHERE s.device_id=d.id AND s.user_id=d.user_id AND s.expires_at>now())").bind(id).fetch_all(&state.db).await{
+            Ok(ids)=>ids.iter().any(|device_id|state.peers.contains_key(device_id)),Err(error)=>{warn!(error=%error,"exact contact presence lookup failed");return api_error(StatusCode::SERVICE_UNAVAILABLE,"profile lookup is temporarily unavailable");}
+        }
+    }else{false};
+    Json(serde_json::json!({"result":{"user_id":id,"username":username,"display_name":display_name,"relationship":relationship,"request_id":request_id,"can_request":relationship=="request","online":online,"presence_visible":presence_visible}})).into_response()
 }
 
 async fn create_contact_request(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<AddContactInput>)->Response{

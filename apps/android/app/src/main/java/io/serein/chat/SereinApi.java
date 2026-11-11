@@ -199,6 +199,7 @@ final class SereinApi {
     }
     void saveSettings(JSONObject patch, Callback cb) { request("PUT", "/api/v1/settings", patch, cb); }
     void addContact(String identity, Callback cb) { request("POST", "/api/v1/contact-requests", json("identity", identity), cb); }
+    void lookupContact(String identity, Callback cb) { try { request("GET", "/api/v1/contact-lookup?identity=" + java.net.URLEncoder.encode(identity, "UTF-8"), null, cb); } catch (Exception error) { main.post(() -> cb.complete(null, "Could not look up this profile.")); } }
     void contactRequests(Callback cb) { request("GET", "/api/v1/contact-requests", null, cb); }
     void acceptContactRequest(String id, Callback cb) { request("POST", "/api/v1/contact-requests/" + id + "/accept", new JSONObject(), cb); }
     void dismissContactRequest(String id, Callback cb) { request("DELETE", "/api/v1/contact-requests/" + id, null, cb); }

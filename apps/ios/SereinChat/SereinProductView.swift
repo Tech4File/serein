@@ -4,6 +4,7 @@ import UserNotifications
 import UniformTypeIdentifiers
 import AVKit
 import QuickLook
+import ImageIO
 
 private struct SereinBackupDocument: FileDocument {
     static var readableContentTypes: [UTType] { [.data] }
@@ -379,7 +380,7 @@ private struct SereinNativeGIFPicker: View {
                     Text(status+" Search terms and request metadata are sent to nekos.best.").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(10)
                     if !exhausted && !results.isEmpty { Button("Load more") { Task { await loadBatch() } }.font(.system(size: 12, weight: .semibold, relativeTo: .body)).padding(.bottom, 12) }
                 }
-            }.padding(12).navigationTitle("GIFs").navigationBarTitleDisplayMode(.inline)
+            }.padding(12).frame(maxWidth: 700).frame(maxWidth: .infinity).navigationTitle("GIFs").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
                 .task { await loadCategories() }
         }
@@ -509,8 +510,8 @@ private struct SereinContactProfile: View {
                                     }
                                     Button { showMediaLibrary=true } label: {
                                         VStack(spacing: 8) {
-                                            Image(systemName: "square.grid.2x2")
-                                                .font(.system(size: 23, weight: .medium))
+                                            Image(systemName: "arrow.right")
+                                                .font(.system(size: 30, weight: .heavy, relativeTo: .body))
                                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                                 .background(SereinPalette.green.opacity(0.11), in: RoundedRectangle(cornerRadius: 10))
                                             Text("View all").font(.system(size: 12, weight: .semibold, relativeTo: .body))
@@ -671,12 +672,13 @@ private struct SereinDirectMediaViewer: View {
                 HStack { VStack(alignment:.leading,spacing:2){Text(item.attachment.filename).font(.system(size:14,weight:.semibold)).lineLimit(1);Text("\(item.attachment.contentType) · \(SereinMediaLibrary.bytes(item.attachment.size))").font(.system(size:10)).foregroundStyle(.white.opacity(0.7))};Spacer();Button("Done"){player?.pause();dismiss()}.font(.system(size:12,weight:.semibold)).padding(.horizontal,12).padding(.vertical,8).background(.white.opacity(0.13),in:Capsule()) }.foregroundStyle(.white).padding(.horizontal,14).padding(.top,8)
                 Spacer(minLength:8)
                 if kind=="photo" || kind=="gif" {
-                    if let image=UIImage(contentsOfFile:item.url.path){Image(uiImage:image).resizable().scaledToFit().frame(maxWidth:.infinity,maxHeight:.infinity)}else{VStack(spacing:8){Image(systemName:"photo").font(.system(size:38));Text("Preview unavailable").font(.system(size:13))}.foregroundStyle(.white.opacity(0.8))}
+                    if kind == "gif" { SereinInlineGIFView(url:item.url).frame(maxWidth:.infinity,maxHeight:.infinity) }
+                    else if let image=UIImage(contentsOfFile:item.url.path){Image(uiImage:image).resizable().scaledToFit().frame(maxWidth:.infinity,maxHeight:.infinity)}else{VStack(spacing:8){Image(systemName:"photo").font(.system(size:38));Text("Preview unavailable").font(.system(size:13))}.foregroundStyle(.white.opacity(0.8))}
                 } else if kind=="video" { if let player { VideoPlayer(player:player).frame(maxWidth:.infinity,maxHeight:.infinity).onAppear{player.play()} } else { ProgressView().tint(.white) } }
                 else if kind=="audio" { VStack(spacing:12){Image(systemName:"waveform").font(.system(size:64)).foregroundStyle(.white);if let player { VideoPlayer(player:player).frame(height:90) } else { ProgressView().tint(.white) }} }
                 else { SereinQuickLookDocument(url:item.url).frame(maxWidth:.infinity,maxHeight:.infinity) }
                 Spacer(minLength:8)
-                HStack { Text("Saved in Serein’s on-device Downloads folder.").font(.system(size:10)).foregroundStyle(.white.opacity(0.68));Spacer();Button("Open in…"){if let view=UIApplication.shared.connectedScenes.compactMap({$0 as? UIWindowScene}).flatMap(\.windows).first(where:{$0.isKeyWindow})?.rootViewController{try? SereinAttachmentStore.shared.open(item.url,from:view)}}.font(.system(size:11,weight:.semibold)) }.foregroundStyle(.white).padding(.horizontal,14).padding(.bottom,12)
+                HStack { Text(item.url.path).font(.system(size:9,relativeTo:.caption2)).foregroundStyle(.white.opacity(0.68)).lineLimit(2).truncationMode(.middle);Spacer();Button("Open in…"){if let view=UIApplication.shared.connectedScenes.compactMap({$0 as? UIWindowScene}).flatMap(\.windows).first(where:{$0.isKeyWindow})?.rootViewController{try? SereinAttachmentStore.shared.open(item.url,from:view)}}.font(.system(size:11,weight:.semibold)) }.foregroundStyle(.white).padding(.horizontal,14).padding(.bottom,12)
             }
         }.onAppear{if kind=="video" || kind=="audio"{player=AVPlayer(url:item.url)}}.onDisappear{player?.pause()}
     }
@@ -693,6 +695,11 @@ private struct SereinQuickLookDocument: UIViewControllerRepresentable {
         func numberOfPreviewItems(in controller:QLPreviewController)->Int{1}
         func previewController(_ controller:QLPreviewController,previewItemAt index:Int)->QLPreviewItem{url as NSURL}
     }
+}
+
+private struct SereinChatContentBottomPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 private struct SereinConversationTimelineItem: Identifiable {
@@ -762,6 +769,9 @@ private struct SereinNativeConversation: View {
     @State private var showFilePicker = false
     @State private var showEmojiPicker = false
         @State private var fileToOpen: OpenAttachment?
+    @State private var selectedInlineMedia: SereinMediaViewerItem?
+    @State private var inlineGIFURLs: [String: URL] = [:]
+    @State private var showJumpToLatest = false
     @Environment(\.colorScheme) private var colorScheme
 
     private var outgoingBubble: Color { colorScheme == .dark ? Color(red: 0.02, green: 0.36, blue: 0.32) : Color(red: 0.84, green: 0.96, blue: 0.87) }
@@ -799,17 +809,30 @@ private struct SereinNativeConversation: View {
                 if !contact.isDeleted && !engine.archived { Button { showKeys = true } label: { Label("Security", systemImage: "lock.shield").font(.system(size: 12, weight: .semibold, relativeTo: .body)) } }
             }
             ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(timeline) { item in
+                GeometryReader { viewport in
+                    ZStack {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 10) {
+                                ForEach(timeline) { item in
                             if item.startsNewDay { SereinConversationDaySeparator(timestamp: item.createdAt) }
                             if let event=item.eventText { SereinConversationSystemEvent(text:event,timestamp:item.createdAt) }
                             if let message=item.message {
                             HStack(alignment: .bottom, spacing: 7) {
                                 if message.mine { Spacer(minLength: 34) }
                                 VStack(alignment: .leading, spacing: 5) {
-                                    Text(message.text).font(.system(size: 15, relativeTo: .body)).textSelection(.enabled)
-                                    if let attachment = message.attachment {
+                                    if let attachment = message.attachment, SereinMediaLibrary.kind(for: attachment) == "gif" {
+                                        Button { openInlineMedia(attachment) } label: {
+                                            Group {
+                                                if let url = inlineGIFURLs[attachment.transferID] { SereinInlineGIFView(url: url) }
+                                                else { ProgressView().frame(width: 220, height: 135).background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12)) }
+                                            }.frame(maxWidth: 260, maxHeight: 180).clipShape(RoundedRectangle(cornerRadius: 12))
+                                        }.buttonStyle(.plain).accessibilityLabel("Open GIF \(attachment.filename)")
+                                            .task(id: attachment.transferID) { await loadInlineGIF(attachment) }
+                                        if !message.text.isEmpty && message.text != "📎 \(attachment.filename)" { Text(message.text).font(.system(size: 15, relativeTo: .body)).textSelection(.enabled) }
+                                    } else {
+                                        Text(message.text).font(.system(size: 15, relativeTo: .body)).textSelection(.enabled)
+                                    }
+                                    if let attachment = message.attachment, SereinMediaLibrary.kind(for: attachment) != "gif" {
                                         HStack(spacing: 8) {
                                             Image(systemName: attachment.contentType.hasPrefix("audio/") ? "waveform" : attachment.contentType.hasPrefix("video/") ? "film" : "doc")
                                             VStack(alignment: .leading, spacing: 3) {
@@ -838,8 +861,16 @@ private struct SereinNativeConversation: View {
                                 if !message.mine { Spacer(minLength: 34) }
                             }.id(item.id)
                             }
+                                }
+                            }.padding(.vertical, 8)
+                                .background(GeometryReader { content in Color.clear.preference(key: SereinChatContentBottomPreferenceKey.self, value: content.frame(in: .named("serein-chat-scroll")).maxY) })
+                        }.coordinateSpace(name: "serein-chat-scroll")
+                        if showJumpToLatest {
+                            Button { withAnimation(.easeOut(duration: 0.22)) { if let last = engine.messages.last { proxy.scrollTo(last.id, anchor: .bottom) } } } label: {
+                                Image(systemName: "arrow.down").font(.system(size: 17, weight: .bold, relativeTo: .body)).frame(width: 48, height: 48).background(.ultraThinMaterial, in: Circle()).overlay(Circle().stroke(Color.secondary.opacity(0.25), lineWidth: 1)).shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+                            }.buttonStyle(.plain).accessibilityLabel("Jump to latest messages").position(x: viewport.size.width / 2, y: viewport.size.height / 2)
                         }
-                    }.padding(.vertical, 8)
+                    }.onPreferenceChange(SereinChatContentBottomPreferenceKey.self) { bottom in showJumpToLatest = bottom > viewport.size.height + 160 }
                 }.onChange(of: engine.messages.count) { _ in if let last = engine.messages.last { proxy.scrollTo(last.id, anchor: .bottom) } }
             }.background(SereinConversationWallpaper())
             HStack(alignment: .bottom, spacing: 5) {
@@ -868,7 +899,7 @@ private struct SereinNativeConversation: View {
                         }
                     }.frame(maxHeight: 128).clipped()
                     Text("GIFs and images use the encrypted attachment path.").font(.system(size: 10, relativeTo: .body)).foregroundStyle(.secondary)
-                }.padding(9).frame(maxWidth: .infinity).background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12)).shadow(color: .black.opacity(0.18), radius: 12, y: 4).padding(.horizontal, 10).padding(.bottom, 54).transition(.move(edge: .bottom).combined(with: .opacity))
+                }.padding(9).frame(maxWidth: 560).frame(maxWidth: .infinity).background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12)).shadow(color: .black.opacity(0.18), radius: 12, y: 4).padding(.horizontal, 10).padding(.bottom, 54).transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.easeOut(duration: 0.18), value: showEmojiPicker)
@@ -974,10 +1005,25 @@ private struct SereinNativeConversation: View {
             Task { defer { if startedAccess { url.stopAccessingSecurityScopedResource() } }; await engine.sendFile(url: url, filename: filename, contentType: mime) }
         }
         .sheet(item: $fileToOpen) { item in SereinDocumentOpenSheet(url: item.url) { fileToOpen = nil } }
+        .fullScreenCover(item: $selectedInlineMedia) { item in SereinDirectMediaViewer(item: item) }
     }
 
     private static let commonEmojis = ["😀","😃","😄","😁","😆","😅","😂","🙂","🙃","😉","😊","😍","🥰","😘","😋","😎","🤔","🥳","😴","😭","😡","🤗","🤩","🤝","👋","🙌","👏","👍","👎","👌","✌️","🤞","🙏","💪","❤️","🧡","💛","💚","💙","💜","🖤","🤍","💔","💕","💖","💯","🔥","✨","🎉","🎂","☕","🍕","🌈","🌻","🐱","🐶","🦋","🌍","🚀","🎵"]
     private func insertEmoji(_ emoji: String) { draft.append(emoji) }
+    private func loadInlineGIF(_ attachment: SereinEncryptedAttachment) async {
+        guard inlineGIFURLs[attachment.transferID] == nil else { return }
+        var url = engine.localFile(for: attachment)
+        if url == nil { url = await engine.download(attachment) }
+        if let url { inlineGIFURLs[attachment.transferID] = url }
+    }
+    private func openInlineMedia(_ attachment: SereinEncryptedAttachment) {
+        Task {
+            var url = inlineGIFURLs[attachment.transferID] ?? engine.localFile(for: attachment)
+            if url == nil { url = await engine.download(attachment) }
+            if let url { selectedInlineMedia = SereinMediaViewerItem(attachment: attachment, url: url) }
+        }
+    }
+
     private func sendPastedImage(_ url: URL) {
         let filename = url.lastPathComponent
         let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? (url.pathExtension.lowercased() == "gif" ? "image/gif" : "application/octet-stream")
@@ -1006,6 +1052,31 @@ private struct SereinNativeConversation: View {
         if size < 1024 { return "\(size) B" }
         if size < 1024 * 1024 { return String(format: "%.1f KB", Double(size) / 1024) }
         return String(format: "%.1f MB", Double(size) / 1048576)
+    }
+}
+
+private struct SereinInlineGIFView: UIViewRepresentable {
+    let url: URL
+    func makeUIView(context: Context) -> UIImageView {
+        let view = UIImageView(); view.contentMode = .scaleAspectFit; view.clipsToBounds = true; view.backgroundColor = .clear
+        configure(view); return view
+    }
+    func updateUIView(_ view: UIImageView, context: Context) { if view.accessibilityIdentifier != url.path { configure(view) } }
+    private func configure(_ view: UIImageView) {
+        view.stopAnimating(); view.accessibilityIdentifier = url.path
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return }
+        let total = CGImageSourceGetCount(source); guard total > 0 else { return }
+        let strideBy = max(1, Int(ceil(Double(total) / 36.0))); var frames: [UIImage] = []; var duration = 0.0
+        for index in Swift.stride(from: 0, to: total, by: strideBy) {
+            guard let cg = CGImageSourceCreateThumbnailAtIndex(source, index, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 360] as CFDictionary) else { continue }
+            frames.append(UIImage(cgImage: cg))
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
+            let gif = properties?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
+            let frameDelay = (gif?[kCGImagePropertyGIFUnclampedDelayTime] as? NSNumber)?.doubleValue ?? (gif?[kCGImagePropertyGIFDelayTime] as? NSNumber)?.doubleValue ?? 0.1
+            duration += max(0.02, frameDelay) * Double(strideBy)
+        }
+        guard !frames.isEmpty else { return }
+        view.animationImages = frames; view.animationDuration = max(duration, 0.25); view.animationRepeatCount = 1; view.image = frames.first; view.startAnimating()
     }
 }
 
@@ -1104,10 +1175,86 @@ private extension String {
     var groupedFingerprint: String { stride(from: 0, to: count, by: 4).map { offset in let start = index(startIndex, offsetBy: offset); let end = index(start, offsetBy: min(4, count - offset)); return String(self[start..<end]) }.joined(separator: " ") }
 }
 
+private struct SereinContactFinder: View {
+    @ObservedObject var api: SereinAPI
+    @Environment(\.dismiss) private var dismiss
+    @State private var identity = ""
+    @State private var result: SereinContactLookup?
+    @State private var relationshipOverride: String?
+    @State private var status = "Enter an exact @username or verified email address. Partial names are not searched."
+    @State private var looking = false
+    private var normalizedIdentity: String? {
+        var value = identity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.hasPrefix("@") && !value.dropFirst().contains("@") { value.removeFirst() }
+        if value.contains("@") { return value.range(of: #"^[a-z0-9_%+-]+(?:\.[a-z0-9_%+-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"#, options: .regularExpression) != nil ? value : nil }
+        return value.range(of: #"^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$"#, options: .regularExpression) != nil ? value : nil
+    }
+    private var relationship: String { relationshipOverride ?? result?.relationship ?? "" }
+    var body: some View {
+        NavigationView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Enter an exact username or verified email. Email lookup is shown only when that person has enabled it. You’ll see their profile before sending a request.")
+                    .font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary)
+                TextField("@username or verified email", text: $identity)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder).submitLabel(.search)
+                if looking { HStack(spacing: 8) { ProgressView(); Text("Looking up profile…").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary) } }
+                if let result {
+                    HStack(spacing: 12) {
+                        SereinAvatar(name: result.display_name, size: 48)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(result.display_name).font(.system(size: 15, weight: .semibold, relativeTo: .body))
+                            Text("@\(result.username)").font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary)
+                            Text(relationship == "connected" ? (result.presence_visible ? (result.online ? "Online" : "Offline") : "Online status hidden") : relationship == "incoming" ? "Sent you a request" : relationship == "pending" ? "Request sent · awaiting acceptance" : "Available to receive a request")
+                                .font(.system(size: 11, relativeTo: .body)).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 4)
+                        finderAction(result)
+                    }
+                    .padding(12).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.secondary.opacity(0.17), lineWidth: 1))
+                }
+                Text(status).font(.system(size: 12, relativeTo: .body)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(16).navigationTitle("New chat").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+            .task(id: identity) { await lookupAfterPause() }
+        }
+    }
+    @ViewBuilder private func finderAction(_ result: SereinContactLookup) -> some View {
+        if relationship == "connected", let contact = api.contacts.first(where: { $0.user_id == result.user_id }) {
+            NavigationLink(destination: SereinNativeConversation(api: api, contact: contact)) { Label("Message", systemImage: "message.fill").font(.system(size: 11, weight: .semibold, relativeTo: .body)).labelStyle(.iconOnly).frame(width: 42, height: 42).background(SereinPalette.green, in: Circle()).foregroundStyle(.white) }
+                .accessibilityLabel("Message @\(result.username)")
+        } else if relationship == "incoming" {
+            Button { Task { if let request = api.contactRequests.first(where: { $0.id == result.request_id }) { await api.acceptContactRequest(request); relationshipOverride = "connected"; status = "Connection accepted. You can message now." } } } label: { Label("Accept request", systemImage: "checkmark") .font(.system(size: 11, weight: .semibold, relativeTo: .body)).labelStyle(.iconOnly).frame(width: 42, height: 42).background(SereinPalette.green, in: Circle()).foregroundStyle(.white) }.accessibilityLabel("Accept request from @\(result.username)")
+        } else if relationship == "pending" {
+            Label("Pending", systemImage: "clock").font(.system(size: 10, weight: .semibold, relativeTo: .body)).labelStyle(.iconOnly).frame(width: 42, height: 42).foregroundStyle(.secondary).accessibilityLabel("Request pending")
+        } else {
+            Button { Task { let sent = await api.addContact(identity: normalizedIdentity ?? identity, expectedUsername: result.username); if sent { relationshipOverride = "pending"; status = api.errorMessage ?? "Request sent. You can track it in Requests." } else { status = api.errorMessage ?? "The request could not be confirmed. Check Requests and try again later." } } } label: { Label("Request", systemImage: "person.badge.plus").font(.system(size: 11, weight: .semibold, relativeTo: .body)).labelStyle(.iconOnly).frame(width: 42, height: 42).background(SereinPalette.green, in: Circle()).foregroundStyle(.white) }.accessibilityLabel("Send connection request to @\(result.username)")
+        }
+    }
+    @MainActor private func lookupAfterPause() async {
+        result = nil; relationshipOverride = nil
+        let raw = identity.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { status = "Enter an exact @username or verified email address. Partial names are not searched."; looking = false; return }
+        guard let normalizedIdentity else { status = "Enter a complete, exact username or email address."; looking = false; return }
+        looking = true; status = "Checking the account’s discovery settings…"
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        guard !Task.isCancelled else { return }
+        do {
+            let found = try await api.lookupContact(identity: normalizedIdentity)
+            guard !Task.isCancelled else { return }
+            result = found
+            if found == nil { status = "No profile is available. Check the exact spelling; email lookup works only when the account allows it." }
+            else { status = "Profile found. A request becomes a chat after the other person accepts." }
+        } catch { if !Task.isCancelled { status = error.localizedDescription } }
+        looking = false
+    }
+}
+
 private struct SereinNativeContacts: View {
     @ObservedObject var api: SereinAPI
     @State private var showAdd = false
-    @State private var newIdentity = ""
     @State private var blockTarget: SereinContact?
     @State private var confirmBlock = false
     var body: some View {
@@ -1157,7 +1304,7 @@ private struct SereinNativeContacts: View {
             }
             .navigationTitle("Contacts")
             .toolbar { ToolbarItem(placement: .navigationBarLeading) { Button { Task { await api.refreshAccountData() } } label: { Image(systemName: "arrow.clockwise") } }; ToolbarItem(placement: .navigationBarTrailing) { Button { showAdd = true } label: { Image(systemName: "person.badge.plus") } } }
-            .alert("Request a connection", isPresented: $showAdd) { TextField("Username or verified email", text: $newIdentity); Button("Cancel", role: .cancel) { }; Button("Send request") { Task { await api.addContact(identity: newIdentity); newIdentity = "" } } } message: { Text("The other person must accept. Sent and received requests show their timestamped pending status; acceptance creates a fresh conversation.") }
+            .sheet(isPresented: $showAdd) { SereinContactFinder(api: api) }
             .confirmationDialog("Block this account?", isPresented: $confirmBlock, titleVisibility: .visible) { if let target = blockTarget { Button("Block @\(target.username)", role: .destructive) { Task { await api.block(target) } } }; Button("Cancel", role: .cancel) { blockTarget = nil } } message: { Text("Blocking removes the contact link and prevents future requests and message delivery. Existing encrypted history remains stored.") }
         }
     }

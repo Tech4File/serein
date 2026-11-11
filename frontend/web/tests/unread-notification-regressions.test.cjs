@@ -19,8 +19,10 @@ test('unread state and in-app sound depend on the visible foreground conversatio
   assert.match(app, /function isConversationActivelyViewed\(contactId\)\{return !!contactId&&document\.visibilityState==='visible'&&document\.hasFocus\?\.\(\)!==false&&state\.selected\?\.id===contactId&&!\$\('app'\)\.classList\.contains\('hidden'\)&&!\$\('conversation'\)\.classList\.contains\('hidden'\);\}/);
   const notify = app.slice(app.indexOf('function notifyIncomingMessage('), app.indexOf('function loadTheme('));
   assert.match(notify, /if\(isConversationActivelyViewed\(contact\.id\)\)return/);
-  assert.match(notify, /pageActive=document\.visibilityState==='visible'&&document\.hasFocus\?\.\(\)!==false/);
-  assert.match(notify, /if\(pageActive&&state\.settings\.notification_sound\)playIncomingTone\(\)/);
+  assert.match(notify, /pageVisible=document\.visibilityState==='visible'/);
+  assert.doesNotMatch(notify, /document\.hasFocus/);
+  assert.match(notify, /if\(pageVisible&&state\.settings\.notification_sound\)playIncomingTone\(\)/);
+  assert.match(notify, /silent:pageVisible\|\|!state\.settings\.notification_sound/);
   assert.match(notify, /state\.settings\.notifications&&'Notification'in window&&Notification\.permission==='granted'/);
   const process = app.slice(app.indexOf('async function processPacket('), app.indexOf('async function handlePacket('));
   assert.match(process, /if\(isConversationActivelyViewed\(contact\.id\)\)contact\.unread=0;else\{contact\.unread\+\+;/);

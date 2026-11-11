@@ -40,6 +40,18 @@ struct SereinContactRequest: Decodable, Identifiable {
     let created_at: String
     let direction: String
 }
+struct SereinContactLookup: Decodable, Identifiable {
+    var id: String { user_id }
+    let user_id: String
+    let username: String
+    let display_name: String
+    let relationship: String
+    let request_id: String?
+    let can_request: Bool
+    let online: Bool
+    let presence_visible: Bool
+}
+private struct SereinContactLookupEnvelope: Decodable { let result: SereinContactLookup?; let message: String? }
 struct SereinBlock: Decodable, Identifiable {
     var id: String { user_id }
     let user_id: String
@@ -368,6 +380,11 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         catch { deviceSessionsError = "Signed-in device sessions are unavailable: \(error.localizedDescription)" }
     }
     func contactsData() async throws -> Data { try await request("/api/v1/contacts") }
+    func lookupContact(identity: String) async throws -> SereinContactLookup? {
+        var components = URLComponents(); components.path = "/api/v1/contact-lookup"; components.queryItems = [URLQueryItem(name: "identity", value: identity)]
+        let data = try await request(components.string ?? "/api/v1/contact-lookup")
+        return try JSONDecoder().decode(SereinContactLookupEnvelope.self, from: data).result
+    }
     func refreshContactPresence() async {
         do {
             let data = try await request("/api/v1/contacts")
@@ -489,9 +506,16 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
         }
         return (data, http)
     }
-    func addContact(identity: String) async {
-        do { let data = try await request("/api/v1/contact-requests", method: "POST", values: ["identity": identity]); let reply = try JSONDecoder().decode(SereinMessageReply.self, from: data); errorMessage = reply.message; await refreshAccountData() }
-        catch { errorMessage = error.localizedDescription }
+    @discardableResult func addContact(identity: String, expectedUsername: String? = nil) async -> Bool {
+        do {
+            _ = try await request("/api/v1/contact-requests", method: "POST", values: ["identity": identity])
+            await refreshAccountData()
+            if let expectedUsername, contactRequests.contains(where: { $0.direction == "sent" && $0.username == expectedUsername }) {
+                errorMessage = "Request sent to @\(expectedUsername). You can track it in Requests until accepted."; return true
+            }
+            errorMessage = "No pending request could be confirmed. The account’s privacy setting or request limit may have changed; check Requests and try again later."
+            return false
+        } catch { errorMessage = error.localizedDescription; return false }
     }
     func acceptContactRequest(_ request: SereinContactRequest) async {
         do { _ = try await self.request("/api/v1/contact-requests/\(request.id)/accept", method: "POST", values: [:]); await refreshAccountData() }

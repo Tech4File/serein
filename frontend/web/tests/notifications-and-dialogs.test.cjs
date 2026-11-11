@@ -14,7 +14,7 @@ test('connection request dialog close and cancel bypass required-field validatio
   assert.doesNotMatch(dialog, /<form[^>]*method="dialog"/);
   assert.match(dialog, /id="contactClose"[^>]*type="button"/);
   assert.match(dialog, /id="contactCancel"[^>]*type="button"/);
-  assert.match(dialog, /<button class="btn btn-primary" type="submit">Send request<\/button>/);
+  assert.match(dialog, /<button id="contactSubmit" class="btn btn-primary" type="submit" disabled>Find profile<\/button>/);
   assert.match(js, /\$\('contactClose'\)\.addEventListener\('click',\(\)=>el\.contactDialog\.close\(\)\)/);
   assert.match(js, /\$\('contactCancel'\)\.addEventListener\('click',\(\)=>el\.contactDialog\.close\(\)\)/);
   assert.match(js, /async function addContact\(event\)\{event\.preventDefault\(\)/);

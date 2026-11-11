@@ -25,7 +25,7 @@ test('browser notices target incoming messages when the Serein tab is not active
   assert.match(notify, /isConversationActivelyViewed\(contact\.id\)/);
   assert.match(notify, /new Notification\('New encrypted message'/);
   assert.match(notify, /body:'A new message is waiting in Serein\.'/);
-  assert.match(notify, /silent:pageActive\|\|!state\.settings\.notification_sound/);
+  assert.match(notify, /silent:pageVisible\|\|!state\.settings\.notification_sound/);
   assert.match(notify, /notice\.onclick=\(\)=>\{window\.focus\(\)/);
   assert.match(html, /server-backed Web Push is not configured/);
 });

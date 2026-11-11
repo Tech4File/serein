@@ -54,27 +54,10 @@
     return frames ? Math.min(120000, Math.max(250, 20 * frames, duration)) : 1000;
   }
 
-  function attachTwoPassPlayback({ image, canvas, sourceUrl, durationMs = 1000, onOpen }) {
+  function attachTwoPassPlayback({ image, canvas, sourceUrl, durationMs = 1000, onComplete }) {
     let timer = 0;
-    let pendingSecondTap = 0;
     let disposed = false;
-    let playing = false;
-    const start = () => {
-      if (disposed) return;
-      clearTimeout(timer);
-      playing = true;
-      canvas.hidden = true;
-      image.hidden = false;
-      image.removeAttribute('src');
-      requestAnimationFrame(() => {
-        if (disposed) return;
-        image.onload = () => {
-          clearTimeout(timer);
-          timer = setTimeout(pauseAtCurrentFrame, Math.max(40, durationMs * 2));
-        };
-        image.src = sourceUrl;
-      });
-    };
+    let playing = true;
     const pauseAtCurrentFrame = () => {
       if (disposed || !playing) return;
       try {
@@ -86,31 +69,16 @@
         canvas.hidden = false;
         playing = false;
         image.removeAttribute('src');
+        onComplete?.();
       } catch {
         // Keep the GIF visible if the browser cannot snapshot the current frame.
       }
     };
-    const handleTap = event => {
-      event.preventDefault();
-      if (pendingSecondTap) {
-        clearTimeout(pendingSecondTap);
-        pendingSecondTap = 0;
-        onOpen?.();
-        return;
-      }
-      start();
-      pendingSecondTap = setTimeout(() => { pendingSecondTap = 0; }, Math.max(1400, durationMs * 2 + 300));
-    };
-    image.addEventListener('click', handleTap);
-    canvas.addEventListener('click', handleTap);
     image.onload = () => { timer = setTimeout(pauseAtCurrentFrame, Math.max(40, durationMs * 2)); };
     image.src = sourceUrl;
     return Object.freeze({ dispose() {
       disposed = true;
       clearTimeout(timer);
-      clearTimeout(pendingSecondTap);
-      image.removeEventListener('click', handleTap);
-      canvas.removeEventListener('click', handleTap);
       image.onload = null;
     } });
   }
