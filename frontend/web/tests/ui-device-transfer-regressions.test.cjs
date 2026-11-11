@@ -36,6 +36,8 @@ test('GIF search controls keep intrinsic button width and let the search input s
   assert.match(experienceCss, /\.gif-search-wrap\s*\{\s*flex:\s*1;\s*\}/s);
   assert.match(experienceCss, /\.gif-search-wrap\s*\{\s*min-width:\s*0;\s*\}/s);
   assert.match(experienceCss, /\.gif-search-button\s*\{\s*width:\s*auto;\s*height:\s*auto/s);
+  assert.match(experienceCss, /\.gif-search \.gif-search-button\s*\{[\s\S]*?min-width:\s*78px;[\s\S]*?height:\s*44px;[\s\S]*?border-radius:\s*12px;[\s\S]*?font-weight:\s*700/s);
+  assert.match(experienceCss, /\.gif-search \.gif-search-clear\s*\{[\s\S]*?width:\s*44px;[\s\S]*?height:\s*44px;/s);
   assert.match(experienceCss, /@media \(max-width: 360px\)[\s\S]*?\.gif-search-button\s*\{\s*padding-inline:\s*8px/s);
   assert.match(experienceCss, /\*::-webkit-scrollbar-thumb\s*\{/);
 });

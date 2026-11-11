@@ -272,7 +272,6 @@ final class SereinDeviceCrypto {
 
     static String base64Url(byte[] value) { return Base64.encodeToString(value, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING); }
     static byte[] decodeBase64Url(String value) { return Base64.decode(value, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING); }
-    static String sha256Hex(byte[] value) throws Exception { return hex(MessageDigest.getInstance("SHA-256").digest(value)); }
     static byte[] randomBytes(int length) { byte[] value = new byte[length]; RANDOM.nextBytes(value); return value; }
     static String hex(byte[] bytes) { StringBuilder out = new StringBuilder(bytes.length * 2); for (byte b : bytes) out.append(String.format(java.util.Locale.ROOT, "%02x", b & 0xff)); return out.toString(); }
 

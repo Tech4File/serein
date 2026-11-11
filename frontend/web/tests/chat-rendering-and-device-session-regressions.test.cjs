@@ -57,12 +57,14 @@ test('web refreshes keys and composer readiness when the selected contact gains 
   assert.match(refresh, /setConnected\(\)/);
 });
 
-test('emoji and GIF picker remains centered inside the conversation at desktop and mobile widths', () => {
+test('emoji and GIF picker stays centered in the conversation and sits above the desktop composer', () => {
   const finalRules = experienceCss.slice(experienceCss.lastIndexOf('/* Preserve the established conversation-centered modal'));
   assert.match(finalRules, /\.emoji-picker \{ top: 50%; left: 50%; right: auto; bottom: auto;[\s\S]*?transform: translate\(-50%, -50%\); \}/);
-  assert.match(finalRules, /@media \(min-width: 681px\) \{\s*\.emoji-picker \{[\s\S]*?width: min\(560px, calc\(100% - 24px\)\);[\s\S]*?min-width: min\(480px, calc\(100% - 24px\)\);[\s\S]*?max-width: calc\(100% - 24px\);/);
+  assert.match(finalRules, /@media \(min-width: 681px\) \{\s*\.emoji-picker \{[\s\S]*?width: min\(570px, calc\(100% - 14px\)\);[\s\S]*?min-width: min\(490px, calc\(100% - 14px\)\);[\s\S]*?max-width: calc\(100% - 14px\);/);
   assert.match(finalRules, /@media \(max-width: 680px\) \{\s*\.emoji-picker \{ top: 50%; left: 50%; right: auto; bottom: auto;/);
   assert.match(finalRules, /@media \(max-width: 370px\) \{\s*\.emoji-picker \{ top: 50%; left: 50%; right: auto; bottom: auto;/);
+  assert.match(experienceCss, /@media \(min-width: 681px\) \{\s*\.emoji-picker \{\s*top: auto;\s*bottom: calc\(108px \+ env\(safe-area-inset-bottom\)\);[\s\S]*?transform: translateX\(-50%\);[\s\S]*?\.emoji-picker\.is-closing \{ animation: picker-close-to-composer/);
+  assert.match(experienceCss, /@keyframes picker-close-to-composer \{[\s\S]*?translate\(-50%, 0\)[\s\S]*?translate\(-50%, 8px\)/);
   assert.doesNotMatch(finalRules, /\.emoji-picker \{ left: max\(8px, calc\(\(100% - 900px\) \/ 2\)\)/);
   assert.match(experienceCss, /\.emoji-categories, \.gif-categories \{[\s\S]*?flex-wrap: nowrap;[\s\S]*?overflow-x: auto;[\s\S]*?overscroll-behavior-x: auto/);
   assert.match(experienceCss, /container-type: inline-size/);

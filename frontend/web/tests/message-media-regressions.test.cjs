@@ -7,6 +7,7 @@ const read = file => fs.readFileSync(path.join(root, file), 'utf8');
 const app = read('frontend/web/app.js');
 const html = read('frontend/web/index.html');
 const css = read('frontend/web/experience.css');
+const workspaceCss = read('frontend/web/workspace.css');
 const playback = require('../media-playback.js');
 
 test('GIF duration parser uses frame delays and safely falls back for malformed input', () => {
@@ -31,6 +32,13 @@ test('chat GIFs preload in view, autoplay twice, stop, and open media details on
   assert.match(html, /media-playback\.js\?v=/);
   assert.match(app, /Stored in browser-managed data; filesystem path unavailable/);
   assert.match(app, /if\(!gif\)\{const card/);
+});
+
+test('chat bubbles hug message content, wrap at their existing max width, and completed GIF source images stay hidden', () => {
+  assert.match(css, /\.message-row > \.bubble\s*\{[^}]*width:\s*fit-content;[^}]*min-width:\s*0/s);
+  assert.match(css, /\.bubble \.attachment-card\s*\{[^}]*width:\s*fit-content;[^}]*min-width:\s*0;[^}]*max-width:\s*100%/s);
+  assert.match(workspaceCss, /\.bubble\s*\{[^}]*max-width:\s*min\(76%,\s*610px\)/s);
+  assert.match(css, /\.chat-media-content\[hidden\]\s*\{\s*display:\s*none\s*!important/);
 });
 
 test('attachment captions render with the file/media in one chat bubble and older filename labels are not shown as captions', () => {

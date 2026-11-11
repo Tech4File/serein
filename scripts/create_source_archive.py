@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED_COMPONENTS = {
-    ".arena", ".build", ".cache", ".dSYM", ".git", ".gradle", ".idea", ".local",
+    ".arena", ".build", ".cache", ".cxx", ".dSYM", ".git", ".gradle", ".idea", ".local",
     ".mypy_cache", ".next", ".nox", ".npm", ".nuxt", ".output", ".parcel-cache",
     ".playwright-cli", ".pytest_cache", ".ruff_cache", ".svelte-kit", ".swiftpm", ".tox",
     ".turbo", ".venv", ".vite", ".xcarchive", "Carthage", "DerivedData", "Pods",

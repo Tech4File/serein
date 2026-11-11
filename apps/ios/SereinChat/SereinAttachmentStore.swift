@@ -37,6 +37,20 @@ final class SereinAttachmentStore: NSObject, UIDocumentInteractionControllerDele
         catch { return false }
     }
 
+    @discardableResult func deleteTransfer(accountID:String,transferID:String)->Bool {
+        guard let account=UUID(uuidString:accountID),let uuid=UUID(uuidString:transferID),let documents=FileManager.default.urls(for:.documentDirectory,in:.userDomainMask).first else{return false}
+        let scope=accountScope(account),base=documents.appendingPathComponent(folderName,isDirectory:true),prefix=uuid.uuidString.lowercased()+"_";var ok=true
+        // New downloads are isolated by account. Also remove the matching legacy
+        // unscoped file, whose globally unique transfer UUID identifies its owner.
+        for directory in [base.appendingPathComponent(scope,isDirectory:true),base] {
+            var isDirectory:ObjCBool=false
+            guard FileManager.default.fileExists(atPath:directory.path,isDirectory:&isDirectory) else{continue}
+            guard isDirectory.boolValue,let files=try? FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:nil,options:[.skipsHiddenFiles]) else{return false}
+            for file in files where file.lastPathComponent.hasPrefix(prefix){do{try FileManager.default.removeItem(at:file)}catch{ok=false}}
+        }
+        cachedDownloadsDirectories.removeValue(forKey:scope);return ok
+    }
+
     private func safeFilename(_ input: String?) -> String {
         let raw = (input?.isEmpty == false ? input : nil) ?? "attachment"
         var scalars = String.UnicodeScalarView()

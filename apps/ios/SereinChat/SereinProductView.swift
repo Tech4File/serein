@@ -772,6 +772,9 @@ private struct SereinNativeConversation: View {
     @State private var selectedInlineMedia: SereinMediaViewerItem?
     @State private var inlineGIFURLs: [String: URL] = [:]
     @State private var showJumpToLatest = false
+    @State private var selectedMessageIDs=Set<String>()
+    @State private var showDeleteSelection=false
+    @State private var deletionError:String?
     @Environment(\.colorScheme) private var colorScheme
 
     private var outgoingBubble: Color { colorScheme == .dark ? Color(red: 0.02, green: 0.36, blue: 0.32) : Color(red: 0.84, green: 0.96, blue: 0.87) }
@@ -807,6 +810,10 @@ private struct SereinNativeConversation: View {
                 SereinStatusPill(title: securitySummary)
                 Spacer()
                 if !contact.isDeleted && !engine.archived { Button { showKeys = true } label: { Label("Security", systemImage: "lock.shield").font(.system(size: 12, weight: .semibold, relativeTo: .body)) } }
+            }
+            if !selectedMessageIDs.isEmpty {
+                HStack(spacing:10) { Text("\(selectedMessageIDs.count) selected").font(.system(size:12,weight:.semibold,relativeTo:.body));Spacer();Button("Cancel"){selectedMessageIDs.removeAll()}.font(.system(size:12,weight:.semibold,relativeTo:.body));Button(role:.destructive){showDeleteSelection=true}label:{Label("Delete",systemImage:"trash").font(.system(size:12,weight:.semibold,relativeTo:.body))} }
+                    .padding(.horizontal,12).padding(.vertical,8).background(Color(uiColor:.secondarySystemBackground),in:RoundedRectangle(cornerRadius:12))
             }
             ScrollViewReader { proxy in
                 GeometryReader { viewport in
@@ -858,6 +865,10 @@ private struct SereinNativeConversation: View {
                                 .padding(.horizontal, 12).padding(.vertical, 9)
                                 .frame(maxWidth: UIScreen.main.bounds.width * 0.82, alignment: .leading)
                                 .background(message.mine ? outgoingBubble : incomingBubble, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius:15,style:.continuous).stroke(selectedMessageIDs.contains(message.id) ? SereinPalette.green : .clear,lineWidth:3))
+                                .contentShape(RoundedRectangle(cornerRadius:15,style:.continuous))
+                                .onLongPressGesture(minimumDuration:0.45){guard !message.isSystem else{return};toggleMessageSelection(message.id)}
+                                .overlay { if !selectedMessageIDs.isEmpty { Color.clear.contentShape(Rectangle()).onTapGesture{toggleMessageSelection(message.id)}.onLongPressGesture(minimumDuration:0.45){toggleMessageSelection(message.id)} } }
                                 if !message.mine { Spacer(minLength: 34) }
                             }.id(item.id)
                             }
@@ -871,7 +882,7 @@ private struct SereinNativeConversation: View {
                             }.buttonStyle(.plain).accessibilityLabel("Jump to latest messages").position(x: viewport.size.width / 2, y: viewport.size.height / 2)
                         }
                     }.onPreferenceChange(SereinChatContentBottomPreferenceKey.self) { bottom in showJumpToLatest = bottom > viewport.size.height + 160 }
-                }.onChange(of: engine.messages.count) { _ in if let last = engine.messages.last { proxy.scrollTo(last.id, anchor: .bottom) } }
+                }.onChange(of: engine.messages.count) { _ in selectedMessageIDs.formIntersection(Set(engine.messages.map(\.id)));if let last = engine.messages.last { proxy.scrollTo(last.id, anchor: .bottom) } }
             }.background(SereinConversationWallpaper())
             HStack(alignment: .bottom, spacing: 5) {
                 Button { showEmojiPicker.toggle() } label: { Image(systemName: "face.smiling").font(.system(size: 19, weight: .medium, relativeTo: .body)).frame(width: 42, height: 44) }
@@ -956,7 +967,7 @@ private struct SereinNativeConversation: View {
         .sheet(isPresented: $showGIFPicker) { SereinNativeGIFPicker { url in Task { defer { try? FileManager.default.removeItem(at: url) }; await engine.sendFile(url: url, filename: url.lastPathComponent, contentType: "image/gif") } } }
         .task {
             if !engine.ready { await engine.initialize() }
-            guard !contact.isDeleted && !engine.archived else { return }
+            if contact.isDeleted || engine.archived { while !Task.isCancelled { await engine.syncMessageDeletions();try? await Task.sleep(nanoseconds:5_000_000_000) };return }
             var cycles = 0
             while !Task.isCancelled && !engine.archived {
                 await engine.poll(); cycles += 1
@@ -997,6 +1008,12 @@ private struct SereinNativeConversation: View {
             } message: { Text("The server must confirm the old-key queue is clear. A proof signed by this device’s separate signing identity is required; failed rotation does not update peer pins.") }
             .alert("Key rotation did not complete", isPresented: Binding(get: { keyRotationError != nil }, set: { if !$0 { keyRotationError = nil } })) { Button("OK", role: .cancel) { keyRotationError = nil } } message: { Text(keyRotationError ?? "The device key was not changed.") }
         }
+        .confirmationDialog("Delete \(selectedMessageIDs.count) selected message\(selectedMessageIDs.count == 1 ? "" : "s")?",isPresented:$showDeleteSelection,titleVisibility:.visible){
+            Button("Delete for me",role:.destructive){Task{await deleteSelectedMessages(scope:"me")}}
+            if selectedMessagesAllMine { Button("Delete for everyone",role:.destructive){Task{await deleteSelectedMessages(scope:"everyone")}} }
+            Button("Cancel",role:.cancel){}
+        } message:{Text("Selected messages and attached media are removed from Serein-managed copies. Offline devices apply the request when they next sync.")}
+        .alert("Message deletion did not complete",isPresented:Binding(get:{deletionError != nil},set:{if !$0{deletionError=nil}})){Button("OK",role:.cancel){deletionError=nil}}message:{Text(deletionError ?? "Try again when connected.")}
         .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
             guard case .success(let urls) = result, let url = urls.first else { return }
             let startedAccess = url.startAccessingSecurityScopedResource()
@@ -1023,6 +1040,10 @@ private struct SereinNativeConversation: View {
             if let url { selectedInlineMedia = SereinMediaViewerItem(attachment: attachment, url: url) }
         }
     }
+
+    private func toggleMessageSelection(_ id:String){if selectedMessageIDs.contains(id){selectedMessageIDs.remove(id)}else{selectedMessageIDs.insert(id)}}
+    private var selectedMessagesAllMine:Bool { let selected=engine.messages.filter{selectedMessageIDs.contains($0.id)};return !selected.isEmpty && selected.count==selectedMessageIDs.count && selected.allSatisfy{$0.mine} }
+    private func deleteSelectedMessages(scope:String){let ids=selectedMessageIDs;Task{do{try await engine.deleteMessages(ids,scope:scope);selectedMessageIDs.removeAll()}catch{deletionError=error.localizedDescription}}}
 
     private func sendPastedImage(_ url: URL) {
         let filename = url.lastPathComponent
@@ -1381,35 +1402,51 @@ private struct SereinNativeSettings: View {
         .onChange(of: api.allowContactRequests) { _ in Task { await api.savePreferences() } }
         .onChange(of: api.discoverableByEmail) { _ in Task { await api.savePreferences() } }
     }
+    @MainActor private func syncMessageDeletionsBeforeBackup(userID:String,local:SereinLocalStore) async throws {
+        for transfer in local.pendingTransferDeletions() where SereinAttachmentStore.shared.deleteTransfer(accountID:userID,transferID:transfer) { try local.markTransferDeletionComplete(transfer) }
+        let cursor=local.metadata("messageDeletionCursor");var afterTime=cursor?["after_created_at"] as? String,afterID=cursor?["after_id"] as? String
+        for _ in 0..<1000 {
+            let data=try await api.messageDeletions(afterCreatedAt:afterTime,afterID:afterID)
+            guard let page=try JSONSerialization.jsonObject(with:data) as? [String:Any],let rows=page["deletions"] as? [[String:Any]] else { throw SereinLocalStore.StoreError.historyUnavailable }
+            if rows.isEmpty { return }
+            for row in rows {
+                guard let id=row["message_id"] as? String,let deletedAt=row["deleted_at"] as? String,let expiry=row["expires_at"] as? String else { throw SereinLocalStore.StoreError.historyUnavailable }
+                let formatter=ISO8601DateFormatter();formatter.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
+                guard let date=formatter.date(from:expiry) ?? ISO8601DateFormatter().date(from:expiry) else { throw SereinLocalStore.StoreError.historyUnavailable }
+                let transfers=row["transfer_ids"] as? [String] ?? []
+                try local.deleteMessage(messageID:id,transferIDs:transfers,expiresAtMillis:Int64(date.timeIntervalSince1970*1000))
+                for transfer in transfers where SereinAttachmentStore.shared.deleteTransfer(accountID:userID,transferID:transfer) { try local.markTransferDeletionComplete(transfer) }
+                afterTime=deletedAt;afterID=id;try local.setMetadata(["after_created_at":deletedAt,"after_id":id],for:"messageDeletionCursor")
+            }
+            if page["has_more"] as? Bool != true { return }
+        }
+        throw SereinLocalStore.StoreError.historyUnavailable
+    }
+
     @MainActor private func createEncryptedBackup() {
         guard let user = api.user else { backupStatus = "Sign in before creating a backup."; return }
-        do {
-            let local = try SereinLocalStore(accountID: user.id)
-            let messages = local.backupMessages()
-            guard messages.count <= SereinBackupStore.maximumMessages else { throw SereinBackupStore.BackupError.tooLarge }
-            let contactRows: [[String: Any]] = api.contacts.filter { !$0.isDeleted }.map { ["user_id": $0.user_id, "username": $0.username, "display_name": $0.display_name] }
-            let snapshot: [String: Any] = ["snapshot_version": 1, "created_at": ISO8601DateFormatter().string(from: Date()), "messages": messages, "contacts": contactRows, "media": ["included": false, "policy": "references-only"]]
-            creatingBackup = true; backupStatus = "Step 1 of 3 · Requesting the account-bound backup key… Keep Serein open until encryption starts."
-            let backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "SereinEncryptedBackup") { DispatchQueue.main.async { self.backupStatus = "Backup is still being prepared; return to Serein to continue." } }
-            Task {
-                var keyBytes = Data()
-                defer { if !keyBytes.isEmpty { keyBytes.resetBytes(in: 0..<keyBytes.count) }; if backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(backgroundTask) } }
-                do {
-                    keyBytes = try await api.requestBackupKey(accountID: user.id, username: user.username)
-                    backupStatus = "Step 2 of 3 · Compressing and encrypting locally…"
-                    let keyForCodec = keyBytes
-                    let result = try await Task.detached(priority: .userInitiated) {
-                        try SereinBackupStore.create(accountID: user.id, username: user.username, backupKey: keyForCodec, snapshot: snapshot)
-                    }.value
-                    guard api.user?.id == user.id else { creatingBackup = false; backupStatus = "Account changed before export completed. Try again while signed in."; await postBackupNotification("Backup not completed", "The signed-in account changed before export completed."); return }
-                    backupDocument = SereinBackupDocument(bytes: result.bytes)
-                    backupFilename = result.filename
-                    backupStatus = "Step 3 of 3 · Encrypted file ready. Choose a durable location in Files."
-                    showingBackupExporter = true
-                    if scenePhase != .active { await postBackupNotification("Encrypted backup ready", "Return to Serein and choose where to save the encrypted file.") }
-                } catch { creatingBackup = false; backupStatus = error.localizedDescription; await postBackupNotification("Backup could not be completed", "Serein could not prepare the encrypted backup. Return to the app for details.") }
-            }
-        } catch { backupStatus = error.localizedDescription }
+        creatingBackup = true;backupStatus="Applying pending message deletions before creating the backup…"
+        let backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "SereinEncryptedBackup") { DispatchQueue.main.async { self.backupStatus = "Backup is still being prepared; return to Serein to continue." } }
+        Task {
+            var keyBytes=Data()
+            defer { if !keyBytes.isEmpty { keyBytes.resetBytes(in:0..<keyBytes.count) };if backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(backgroundTask) } }
+            do {
+                let local=try SereinLocalStore(accountID:user.id)
+                try await syncMessageDeletionsBeforeBackup(userID:user.id,local:local)
+                guard api.user?.id==user.id else{throw SereinLocalStore.StoreError.historyUnavailable}
+                let messages=local.backupMessages()
+                guard messages.count<=SereinBackupStore.maximumMessages else{throw SereinBackupStore.BackupError.tooLarge}
+                let contactRows:[[String:Any]]=api.contacts.filter{!$0.isDeleted}.map{["user_id":$0.user_id,"username":$0.username,"display_name":$0.display_name]}
+                let snapshot:[String:Any]=["snapshot_version":1,"created_at":ISO8601DateFormatter().string(from:Date()),"messages":messages,"contacts":contactRows,"media":["included":false,"policy":"references-only"]]
+                backupStatus="Step 1 of 3 · Requesting the account-bound backup key… Keep Serein open until encryption starts."
+                keyBytes=try await api.requestBackupKey(accountID:user.id,username:user.username)
+                backupStatus="Step 2 of 3 · Compressing and encrypting locally…"
+                let keyForCodec=keyBytes,result=try await Task.detached(priority:.userInitiated){try SereinBackupStore.create(accountID:user.id,username:user.username,backupKey:keyForCodec,snapshot:snapshot)}.value
+                guard api.user?.id==user.id else{creatingBackup=false;backupStatus="Account changed before export completed. Try again while signed in.";await postBackupNotification("Backup not completed","The signed-in account changed before export completed.");return}
+                backupDocument=SereinBackupDocument(bytes:result.bytes);backupFilename=result.filename;backupStatus="Step 3 of 3 · Encrypted file ready. Choose a durable location in Files.";showingBackupExporter=true
+                if scenePhase != .active { await postBackupNotification("Encrypted backup ready","Return to Serein and choose where to save the encrypted file.") }
+            }catch{creatingBackup=false;backupStatus=error.localizedDescription;await postBackupNotification("Backup could not be completed","Serein could not prepare the encrypted backup. Return to the app for details.")}
+        }
     }
 
     @MainActor private func postBackupNotification(_ title:String,_ body:String) async {

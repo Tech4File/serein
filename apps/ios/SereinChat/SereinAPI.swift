@@ -460,6 +460,12 @@ private final class SereinNotificationDelegate: NSObject, UNUserNotificationCent
     func markMessageRead(_ id: String) async throws { _ = try await request("/api/v1/messages/\(id)/read", method: "POST", values: [:]) }
     func markMessagesRead(_ ids: [String]) async throws { guard !ids.isEmpty else { return }; _ = try await request("/api/v1/messages/read", method: "POST", values: ["ids": ids]) }
     func messageReceipts(ids: [String]) async throws -> Data { try await request("/api/v1/messages/receipts", method: "POST", values: ["ids": ids]) }
+    func messageDeletions(afterCreatedAt:String?,afterID:String?) async throws -> Data {
+        var components=URLComponents();components.path="/api/v1/messages/deletions";var items=[URLQueryItem(name:"limit",value:"100")]
+        if let afterCreatedAt,let afterID { items.append(URLQueryItem(name:"after_created_at",value:afterCreatedAt));items.append(URLQueryItem(name:"after_id",value:afterID)) }
+        components.queryItems=items;guard let path=components.string else{throw URLError(.badURL)};return try await request(path)
+    }
+    func deleteMessages(scope:String,messages:[[String:Any]]) async throws { _ = try await request("/api/v1/messages/deletions",method:"POST",values:["scope":scope,"messages":messages]) }
     func expiredMessages(contactID: String, afterCreatedAt: String?, afterID: String?) async throws -> Data {
         var components=URLComponents();components.path="/api/v1/messages/expiries";var items=[URLQueryItem(name:"contact_id",value:contactID),URLQueryItem(name:"limit",value:"100")]
         if let afterCreatedAt,let afterID { items.append(URLQueryItem(name:"after_created_at",value:afterCreatedAt));items.append(URLQueryItem(name:"after_id",value:afterID)) }

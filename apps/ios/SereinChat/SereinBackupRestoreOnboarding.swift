@@ -111,12 +111,37 @@ struct SereinBackupRestoreOnboarding: View {
 
     @MainActor private func mergeSelectedBackup() {
         guard let user = currentUser, let messages = snapshot?["messages"] as? [[String: Any]] else { status = "Backup contents are unavailable."; return }
-        busy = true; status = "Merging messages without replacing existing records…"
-        do {
-            let local = try SereinLocalStore(accountID: user.id)
-            mergeCount = try local.mergeBackupMessages(messages)
-            status = ""; phase = "complete"; busy = false; clearSelection(keepSnapshot: true)
-        } catch { status = "Restore failed without replacing existing records: \(error.localizedDescription)"; busy = false }
+        busy = true; status = "Syncing pending deletions before merging…"
+        Task {
+            do {
+                let local = try SereinLocalStore(accountID: user.id)
+                try await syncMessageDeletionsBeforeMerge(userID: user.id, local: local)
+                guard api.user?.id == user.id else { throw SereinLocalStore.StoreError.historyUnavailable }
+                mergeCount = try local.mergeBackupMessages(messages)
+                status = ""; phase = "complete"; busy = false; clearSelection(keepSnapshot: true)
+            } catch { status = "Restore failed without replacing existing records: \(error.localizedDescription)"; busy = false }
+        }
+    }
+
+    @MainActor private func syncMessageDeletionsBeforeMerge(userID:String,local:SereinLocalStore) async throws {
+        for transfer in local.pendingTransferDeletions() where SereinAttachmentStore.shared.deleteTransfer(accountID:userID,transferID:transfer) { try local.markTransferDeletionComplete(transfer) }
+        let cursor=local.metadata("messageDeletionCursor");var afterTime=cursor?["after_created_at"] as? String,afterID=cursor?["after_id"] as? String
+        for _ in 0..<1000 {
+            let data=try await api.messageDeletions(afterCreatedAt:afterTime,afterID:afterID)
+            guard let page=try JSONSerialization.jsonObject(with:data) as? [String:Any],let rows=page["deletions"] as? [[String:Any]] else { throw SereinLocalStore.StoreError.historyUnavailable }
+            if rows.isEmpty { return }
+            for row in rows {
+                guard let id=row["message_id"] as? String,let deletedAt=row["deleted_at"] as? String,let expiry=row["expires_at"] as? String else { throw SereinLocalStore.StoreError.historyUnavailable }
+                let formatter=ISO8601DateFormatter();formatter.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
+                guard let date=formatter.date(from:expiry) else { throw SereinLocalStore.StoreError.historyUnavailable }
+                let transfers=row["transfer_ids"] as? [String] ?? []
+                try local.deleteMessage(messageID:id,transferIDs:transfers,expiresAtMillis:Int64(date.timeIntervalSince1970*1000))
+                for transfer in transfers where SereinAttachmentStore.shared.deleteTransfer(accountID:userID,transferID:transfer) { try local.markTransferDeletionComplete(transfer) }
+                afterTime=deletedAt;afterID=id;try local.setMetadata(["after_created_at":deletedAt,"after_id":id],for:"messageDeletionCursor")
+            }
+            if page["has_more"] as? Bool != true { return }
+        }
+        throw SereinLocalStore.StoreError.historyUnavailable
     }
 
     private func clearSelection(keepSnapshot: Bool = false) {

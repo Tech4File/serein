@@ -130,6 +130,12 @@ final class SereinApi {
         if(afterCreatedAt!=null&&afterId!=null)try{path+="&after_created_at="+java.net.URLEncoder.encode(afterCreatedAt,"UTF-8")+"&after_id="+java.net.URLEncoder.encode(afterId,"UTF-8");}catch(Exception ignored){}
         return future("GET", path, null);
     }
+    CompletableFuture<JSONObject> messageDeletionsPage(String afterCreatedAt,String afterId) {
+        String path="/api/v1/messages/deletions?limit=100";
+        if(afterCreatedAt!=null&&afterId!=null)path+="&after_created_at="+java.net.URLEncoder.encode(afterCreatedAt,java.nio.charset.StandardCharsets.UTF_8)+"&after_id="+java.net.URLEncoder.encode(afterId,java.nio.charset.StandardCharsets.UTF_8);
+        return future("GET",path,null).thenApply(value->(JSONObject)value);
+    }
+    CompletableFuture<Object> deleteMessages(String scope,JSONArray messages){try{return future("POST","/api/v1/messages/deletions",new JSONObject().put("scope",scope).put("messages",messages));}catch(Exception error){CompletableFuture<Object> failed=new CompletableFuture<>();failed.completeExceptionally(error);return failed;}}
     CompletableFuture<Object> expiredMessagesPage(String contactId,String afterCreatedAt,String afterId) {
         String path="/api/v1/messages/expiries?limit=100&contact_id="+java.net.URLEncoder.encode(contactId,java.nio.charset.StandardCharsets.UTF_8);
         if(afterCreatedAt!=null&&afterId!=null)path+="&after_created_at="+java.net.URLEncoder.encode(afterCreatedAt,java.nio.charset.StandardCharsets.UTF_8)+"&after_id="+java.net.URLEncoder.encode(afterId,java.nio.charset.StandardCharsets.UTF_8);

@@ -95,6 +95,8 @@ final class SereinChatEngine: ObservableObject {
     private var lastExpiryRefresh = Date.distantPast
     private var expiryCursorTime: String?
     private var expiryCursorID: String?
+    private var deletionCursorTime: String?
+    private var deletionCursorID: String?
     private var pollRunning = false
     private var pendingRetryRunning = false
     private var nextPendingRetryAt = Date.distantPast
@@ -117,7 +119,7 @@ final class SereinChatEngine: ObservableObject {
             let signingKey = try SereinDeviceCrypto.loadOrCreateSigning(userID:user.id,deviceID:device.id)
             let localStore = try SereinLocalStore(accountID: user.id)
             crypto = deviceCrypto; layer2Crypto = deviceLayer2Crypto; local = localStore
-            let expiryCursor=localStore.metadata("expiryCursor:\(contact.user_id)");expiryCursorTime=expiryCursor?["after_created_at"] as? String;expiryCursorID=expiryCursor?["after_id"] as? String
+            let expiryCursor=localStore.metadata("expiryCursor:\(contact.user_id)");expiryCursorTime=expiryCursor?["after_created_at"] as? String;expiryCursorID=expiryCursor?["after_id"] as? String;let deletionCursor=localStore.metadata("messageDeletionCursor");deletionCursorTime=deletionCursor?["after_created_at"] as? String;deletionCursorID=deletionCursor?["after_id"] as? String
             if contact.isDeleted { loadMessages(); ready = true; status = "Archived conversation · this account was deleted · read-only"; return }
             ownFingerprint = try SereinDeviceCrypto.fingerprintBundle(layer1: deviceCrypto.publicJWK(), layer2: deviceLayer2Crypto.publicJWK())
             let ratchetVersion = SereinCoreBridge.version == "unavailable" ? 2 : 3
@@ -243,6 +245,7 @@ final class SereinChatEngine: ObservableObject {
     }
     func sendHistorySync(_ request:[String:Any]) async throws {
         guard let user=api.user,let device=api.currentDevice,let crypto else{throw ChatError.deviceUnavailable};let requestID=request["id"] as? String ?? "",childID=request["child_device_id"] as? String ?? "",directory=try await api.ownDeviceKeyDirectory();guard directory["main_device_id"] as? String==device.id else{throw ChatError.keyDirectoryMismatch};guard let child=(directory["devices"] as? [[String:Any]])?.first(where:{$0["device_id"] as? String==childID}) else{throw ChatError.deviceListChanged};_ = try pinOwnSyncDevice(child)
+        try await refreshMessageDeletions()
         let records=try normalizedHistoryMessages();var batches=[[ [String:Any] ]](),current=[[String:Any]]();for row in records {current.append(row);let size=(try JSONSerialization.data(withJSONObject:current)).count;if size>300*1024{current.removeLast();if current.isEmpty{throw ChatError.historyUnavailable};batches.append(current);current=[row]}};if !current.isEmpty||batches.isEmpty{batches.append(current)};guard batches.count<=128 else{throw ChatError.historyUnavailable};let count=batches.count
         for (index,rows) in batches.enumerated(){let payload:[String:Any]=["schema_version":1,"account_id":user.id,"main_device_id":device.id,"child_device_id":childID,"request_id":requestID,"batch_index":index,"batch_count":count,"messages":rows],clear=try JSONSerialization.data(withJSONObject:payload),key=try crypto.deriveHistorySyncKey(accountID:user.id,localDeviceID:device.id,peerDeviceID:childID,peerJWK:child["public_key"] as? [String:Any] ?? [:],mainDeviceID:device.id,childDeviceID:childID,requestID:requestID,index:index,count:count);let envelope=try crypto.encryptHistorySyncBatch(clear,key:key,accountID:user.id,mainDeviceID:device.id,childDeviceID:childID,requestID:requestID,index:index,count:count),canonical=try JSONSerialization.data(withJSONObject:envelope,options:[.sortedKeys]),ciphertext=String(data:canonical,encoding:.utf8) ?? "",digest=try SereinDeviceCrypto.historySyncDigest(envelope);try await api.putHistorySyncBatch(requestID,values:["batch_index":index,"batch_count":count,"ciphertext_json":ciphertext,"digest":digest])}
         await refreshHistorySync()
@@ -250,6 +253,7 @@ final class SereinChatEngine: ObservableObject {
     func receiveHistorySync(_ request:[String:Any]) async throws -> Int {
         guard let user=api.user,let device=api.currentDevice,let crypto,let local else{throw ChatError.deviceUnavailable};let requestID=request["id"] as? String ?? "",mainID=request["main_device_id"] as? String ?? "",directory=try await api.ownDeviceKeyDirectory();guard directory["main_device_id"] as? String==mainID,let main=(directory["devices"] as? [[String:Any]])?.first(where:{$0["device_id"] as? String==mainID}) else{throw ChatError.keyDirectoryMismatch};_ = try pinOwnSyncDevice(main);let response=try await api.historySyncBatches(requestID);guard response["status"] as? String=="ready",let count=response["batch_count"] as? Int,(1...128).contains(count),let batches=response["batches"] as? [[String:Any]],batches.count==count else{throw ChatError.historyUnavailable};var records=[[String:Any]]()
         for (index,batch) in batches.enumerated(){guard batch["batch_index"] as? Int==index,batch["batch_count"] as? Int==count,let envelope=batch["ciphertext"] as? [String:Any],try SereinDeviceCrypto.historySyncDigest(envelope)==batch["digest"] as? String else{throw ChatError.keyDirectoryMismatch};let key=try crypto.deriveHistorySyncKey(accountID:user.id,localDeviceID:device.id,peerDeviceID:mainID,peerJWK:main["public_key"] as? [String:Any] ?? [:],mainDeviceID:mainID,childDeviceID:device.id,requestID:requestID,index:index,count:count),clear=try crypto.decryptHistorySyncBatch(envelope,key:key,accountID:user.id,mainDeviceID:mainID,childDeviceID:device.id,requestID:requestID,index:index,count:count),payload=try JSONSerialization.jsonObject(with:clear) as? [String:Any];guard payload?["schema_version"] as? Int==1,payload?["account_id"] as? String==user.id,payload?["main_device_id"] as? String==mainID,payload?["child_device_id"] as? String==device.id,payload?["request_id"] as? String==requestID,payload?["batch_index"] as? Int==index,payload?["batch_count"] as? Int==count,let items=payload?["messages"] as? [[String:Any]] else{throw ChatError.keyDirectoryMismatch};records.append(contentsOf:items)}
+        try await refreshMessageDeletions()
         let added=try local.mergeHistorySyncMessages(records);try await api.acknowledgeHistorySync(requestID);await refreshHistorySync();loadMessages();return added
     }
     func cancelHistorySync(_ request:[String:Any]) async throws {guard let id=request["id"] as? String else{throw ChatError.historyUnavailable};try await api.cancelHistorySync(id);await refreshHistorySync()}
@@ -422,6 +426,7 @@ final class SereinChatEngine: ObservableObject {
         guard ready, !archived, !pollRunning, let user = api.user, let device = api.currentDevice, let crypto, let local else { return }
         pollRunning = true; defer { pollRunning = false }
         do {
+            try await refreshMessageDeletions()
             for _ in 0..<40 {
                 let data = try await api.messageHistory(afterCreatedAt: cursorTime, afterID: cursorID)
                 guard let page = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -432,6 +437,7 @@ final class SereinChatEngine: ObservableObject {
                           let packet = item["payload"] as? [String: Any], packet["type"] as? String == "message" else { continue }
                     let senderDeviceID = packet["from"] as? String ?? ""
                     guard activeDevices.contains(where: { $0.id == senderDeviceID }) else { cursorTime = created; cursorID = id; continue }
+                    if local.containsDeleted(messageID:id){cursorTime=created;cursorID=id;continue}
                     if local.contains(messageID: id) { try await api.acknowledgeMessage(id); cursorTime = created; cursorID = id; continue }
                     guard let peer = peerKeys.first(where: { $0.id == senderDeviceID }), peer.trusted else {
                         status = "A message is held because the sender-device key changed or is not locally pinned."; stopped = true; break
@@ -458,6 +464,18 @@ final class SereinChatEngine: ObservableObject {
         } catch { status = "Secure message sync paused; it will retry." }
     }
 
+    private func cleanupDeletedTransfer(_ transferID:String,accountID:String){if SereinAttachmentStore.shared.deleteTransfer(accountID:accountID,transferID:transferID){try? local?.markTransferDeletionComplete(transferID)}}
+    private func deletionExpiryMillis(_ value:String)->Int64 { let formatter=ISO8601DateFormatter();formatter.formatOptions=[.withInternetDateTime,.withFractionalSeconds];if let date=formatter.date(from:value){return Int64(date.timeIntervalSince1970*1000)};formatter.formatOptions=[.withInternetDateTime];if let date=formatter.date(from:value){return Int64(date.timeIntervalSince1970*1000)};return Int64(Date().timeIntervalSince1970*1000)+Int64(90*24*60*60*1000) }
+    private func retryPendingMediaCleanup(accountID:String){for transfer in local?.pendingTransferDeletions() ?? []{cleanupDeletedTransfer(transfer,accountID:accountID)}}
+    func syncMessageDeletions() async { do{try await refreshMessageDeletions();loadMessages()}catch{status="Deletion sync will retry when this conversation is available."} }
+    func syncMessageDeletionsForHistoryOperation() async throws { guard ready,!archived,local != nil else{throw ChatError.historyUnavailable};try await refreshMessageDeletions();loadMessages() }
+    private func refreshMessageDeletions() async throws {
+        guard let local else{return};retryPendingMediaCleanup(accountID:api.user?.id ?? "")
+        for _ in 0..<40 { let data=try await api.messageDeletions(afterCreatedAt:deletionCursorTime,afterID:deletionCursorID);guard let page=try JSONSerialization.jsonObject(with:data) as? [String:Any],let rows=page["deletions"] as? [[String:Any]],!rows.isEmpty else{return};for row in rows {guard let id=row["message_id"] as? String,let time=row["deleted_at"] as? String else{continue};let transfers=row["transfer_ids"] as? [String] ?? [];try local.deleteMessage(messageID:id,transferIDs:transfers,expiresAtMillis:deletionExpiryMillis(row["expires_at"] as? String ?? ""));for transfer in transfers {cleanupDeletedTransfer(transfer,accountID:api.user?.id ?? "")};deletionCursorTime=time;deletionCursorID=id;try local.setMetadata(["after_created_at":time,"after_id":id],for:"messageDeletionCursor")};if page["has_more"] as? Bool != true{return} }
+    }
+    func deleteMessages(_ ids:Set<String>,scope:String) async throws {
+        guard let local,let account=api.user?.id else{throw ChatError.historyUnavailable};let selected=local.messages(for:contact.user_id).filter{ids.contains($0["id"] as? String ?? "")};guard selected.count==ids.count else{throw ChatError.historyUnavailable};let records:[[String:Any]]=selected.map{row in let attachment=row["attachment"] as? [String:Any];let transfer=(attachment?["transfer_id"] as? String).map{[$0]} ?? [];return ["id":row["id"] ?? "","conversation_id":contact.user_id,"transfer_ids":transfer]};try await api.deleteMessages(scope:scope,messages:records);for row in records {guard let id=row["id"] as? String else{continue};let transfers=row["transfer_ids"] as? [String] ?? [];try local.deleteMessage(messageID:id,transferIDs:transfers);for transfer in transfers {cleanupDeletedTransfer(transfer,accountID:account)}};loadMessages()
+    }
     private func refreshExpiredNotices() async {
         guard let local else { return }
         do {
@@ -575,10 +593,11 @@ final class SereinChatEngine: ObservableObject {
         } catch { status = error.localizedDescription }
     }
 
-    func localFile(for attachment: SereinEncryptedAttachment) -> URL? { SereinAttachmentStore.shared.existing(accountID: api.user?.id ?? "", transferID: attachment.transferID, filename: attachment.filename, expectedBytes: attachment.size) }
+    func localFile(for attachment: SereinEncryptedAttachment) -> URL? { if local?.containsDeletedTransfer(transferID:attachment.transferID)==true{return nil};return SereinAttachmentStore.shared.existing(accountID: api.user?.id ?? "", transferID: attachment.transferID, filename: attachment.filename, expectedBytes: attachment.size) }
 
     func download(_ attachment: SereinEncryptedAttachment) async -> URL? {
         guard let user = api.user, let device = api.currentDevice, let crypto, let layer2Crypto else { status = "Protected device setup is not ready."; return nil }
+        if local?.containsDeletedTransfer(transferID:attachment.transferID)==true { status="This attachment was deleted.";return nil }
         if let existing = localFile(for: attachment) { return existing }
         var fileKeyData: Data?
         var layer2FileKeyData: Data?
@@ -657,6 +676,7 @@ final class SereinChatEngine: ObservableObject {
             }
             try output.synchronize()
             guard total == attachment.size else { throw ChatError.manifestMismatch }
+            if local?.containsDeletedTransfer(transferID:attachment.transferID)==true { throw ChatError.transferUnavailable }
             let saved = try SereinAttachmentStore.shared.save(accountID: user.id, transferID: attachment.transferID, filename: attachment.filename, from: temporary!, expectedBytes: attachment.size)
             try await api.acknowledgeTransfer(attachment.transferID)
             status = "Download saved. Tap Open to hand it to a compatible app."

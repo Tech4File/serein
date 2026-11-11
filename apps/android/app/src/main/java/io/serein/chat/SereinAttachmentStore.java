@@ -77,7 +77,11 @@ final class SereinAttachmentStore {
         try { return UUID.fromString(transferId).toString()+"_"+safeName(filename); }
         catch (Exception invalid) { throw new IllegalArgumentException("Invalid transfer identifier."); }
     }
-    static boolean deleteForAccount(Context context,String accountId){try{String prefix=accountScope(accountId)+"_";File root=directory(context);File[] files=root.listFiles();if(files==null)return true;boolean ok=true;for(File file:files)if(file.isFile()&&file.getName().startsWith(prefix)&&!file.delete())ok=false;return ok;}catch(Exception ignored){return false;}}
+    static boolean deleteForAccount(Context context,String accountId){try{String prefix=accountScope(accountId)+"_";File root=directory(context);File[] files=root.listFiles();if(files==null)return false;boolean ok=true;for(File file:files)if(file.isFile()&&file.getName().startsWith(prefix)&&!file.delete())ok=false;return ok;}catch(Exception ignored){return false;}}
+
+    static boolean deleteTransfer(Context context,String accountId,String transferId){
+        try{String uuid=UUID.fromString(transferId).toString();File root=directory(context).getCanonicalFile();String scoped=accountScope(accountId)+"_"+uuid+"_",legacy=uuid+"_";File[] files=root.listFiles();if(files==null)return true;boolean ok=true;for(File file:files){File canonical=file.getCanonicalFile();String name=file.getName();if(canonical.getParentFile().equals(root)&&file.isFile()&&(name.startsWith(scoped)||name.startsWith(legacy))&&!file.delete())ok=false;}return ok;}catch(Exception ignored){return false;}
+    }
 
     static void cleanTemporaryFiles(Context context) {
         long cutoff = System.currentTimeMillis() - 24L * 60L * 60L * 1000L;

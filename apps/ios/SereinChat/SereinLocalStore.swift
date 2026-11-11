@@ -49,8 +49,9 @@ final class SereinLocalStore {
             else if !(migrated["ratchets"] is [String: String]) { throw StoreError.historyUnavailable }
             if migrated["meta"] == nil { migrated["meta"] = [String: Any]() }
             else if !(migrated["meta"] is [String: Any]) { throw StoreError.historyUnavailable }
+            var meta=migrated["meta"] as? [String:Any] ?? [:];if meta["deleted_message_ids"] == nil { meta["deleted_message_ids"]=[String:Int64]() };if meta["deleted_transfer_ids"] == nil { meta["deleted_transfer_ids"]=[String:Int64]() };if meta["pending_transfer_deletions"] == nil { meta["pending_transfer_deletions"]=[String:Bool]() };guard meta["deleted_message_ids"] is [String:Int64],meta["deleted_transfer_ids"] is [String:Int64],meta["pending_transfer_deletions"] is [String:Bool] else { throw StoreError.historyUnavailable };migrated["meta"]=meta
             self.root = migrated
-        } else { self.root = ["version": 1, "messages": [[String: Any]](), "trust": [String: Any](), "ratchets": [String: String](), "meta": [String: Any]() }
+        } else { self.root = ["version": 1, "messages": [[String: Any]](), "trust": [String: Any](), "ratchets": [String: String](), "meta": ["deleted_message_ids": [String:Int64](),"deleted_transfer_ids":[String:Int64](),"pending_transfer_deletions":[String:Bool]()] as [String:Any] }
     }
 
     static func delete(accountID: String) throws {
@@ -66,7 +67,7 @@ final class SereinLocalStore {
     func allMessages() -> [[String:Any]] { root["messages"] as? [[String:Any]] ?? [] }
     func mergeHistorySyncMessages(_ incoming:[[String:Any]]) throws -> Int {
         guard incoming.count<=100_000 else{throw StoreError.invalidMessage};let previous=root;var byID:[String:[String:Any]]=[:];for row in allMessages(){if let id=row["id"] as? String{byID[id]=row}};var seen=Set<String>(),added=0
-        for record in incoming {guard let id=record["id"] as? String,(UUID(uuidString:id) != nil || (((record["payload"] as? [String:Any])?["system"] as? Bool == true) && id.range(of:#"^[A-Za-z0-9:._-]{1,128}$"#,options:.regularExpression) != nil)),let conversation=record["conversation_id"] as? String,UUID(uuidString:conversation) != nil,let created=record["created_at"] as? String,Self.validTimestamp(created),let status=record["status"] as? String,["pending","accepted","sent","delivered","read","received","expired"].contains(status),let payload=record["payload"] as? [String:Any],JSONSerialization.isValidJSONObject(payload) else{throw StoreError.invalidMessage};guard seen.insert(id).inserted else{throw StoreError.invalidMessage};if let old=byID[id]{if old["conversation_id"] as? String != conversation || old["created_at"] as? String != created || (old["text"] as? String ?? "") != (payload["text"] as? String ?? "") || (old["mine"] as? Bool ?? false) != (payload["mine"] as? Bool ?? false) || (old["sender"] as? String ?? "") != (payload["sender"] as? String ?? ""){throw StoreError.invalidMessage};continue};var row=payload;row["id"]=id;row["conversation_id"]=conversation;row["created_at"]=created;row["status"]=status;byID[id]=row;added+=1 }
+        for record in incoming {guard let id=record["id"] as? String,(UUID(uuidString:id) != nil || (((record["payload"] as? [String:Any])?["system"] as? Bool == true) && id.range(of:#"^[A-Za-z0-9:._-]{1,128}$"#,options:.regularExpression) != nil)),let conversation=record["conversation_id"] as? String,UUID(uuidString:conversation) != nil,let created=record["created_at"] as? String,Self.validTimestamp(created),let status=record["status"] as? String,["pending","accepted","sent","delivered","read","received","expired"].contains(status),let payload=record["payload"] as? [String:Any],JSONSerialization.isValidJSONObject(payload) else{throw StoreError.invalidMessage};guard seen.insert(id).inserted else{throw StoreError.invalidMessage};if containsDeleted(messageID:id){continue};if let old=byID[id]{if old["conversation_id"] as? String != conversation || old["created_at"] as? String != created || (old["text"] as? String ?? "") != (payload["text"] as? String ?? "") || (old["mine"] as? Bool ?? false) != (payload["mine"] as? Bool ?? false) || (old["sender"] as? String ?? "") != (payload["sender"] as? String ?? ""){throw StoreError.invalidMessage};continue};var row=payload;row["id"]=id;row["conversation_id"]=conversation;row["created_at"]=created;row["status"]=status;byID[id]=row;added+=1 }
         root["messages"]=byID.values.sorted{let left=$0["created_at"] as? String ?? "",right=$1["created_at"] as? String ?? "";if left != right{return left<right};return ($0["id"] as? String ?? "")<($1["id"] as? String ?? "")};do{try flush()}catch{root=previous;throw error};return added
     }
     func metadata(_ name: String) -> [String: Any]? { (root["meta"] as? [String: Any] ?? [:])[name] as? [String: Any] }
@@ -77,6 +78,16 @@ final class SereinLocalStore {
     }
     func contains(messageID: String) -> Bool {
         (root["messages"] as? [[String: Any]] ?? []).contains { $0["id"] as? String == messageID }
+    }
+    func containsDeleted(messageID:String)->Bool { let ids=(root["meta"] as? [String:Any])?["deleted_message_ids"] as? [String:Int64] ?? [:];return (ids[messageID.lowercased()] ?? 0)>Int64(Date().timeIntervalSince1970*1000) }
+    func containsDeletedTransfer(transferID:String)->Bool { let ids=(root["meta"] as? [String:Any])?["deleted_transfer_ids"] as? [String:Int64] ?? [:];return (ids[transferID.lowercased()] ?? 0)>Int64(Date().timeIntervalSince1970*1000) }
+    func pendingTransferDeletions()->[String] { let pending=(root["meta"] as? [String:Any])?["pending_transfer_deletions"] as? [String:Bool] ?? [:];return pending.filter{$0.value}.map{$0.key} }
+    func markTransferDeletionComplete(_ transferID:String)throws {guard let uuid=UUID(uuidString:transferID) else{throw StoreError.invalidMessage};let key=uuid.uuidString.lowercased(),previous=root;var meta=root["meta"] as? [String:Any] ?? [:],pending=meta["pending_transfer_deletions"] as? [String:Bool] ?? [:];pending.removeValue(forKey:key);meta["pending_transfer_deletions"]=pending;root["meta"]=meta;do{try flush()}catch{root=previous;throw error}}
+    @discardableResult func deleteMessage(messageID:String,transferIDs:[String]=[],expiresAtMillis:Int64?=nil)throws->Bool {
+        guard let uuid=UUID(uuidString:messageID) else { throw StoreError.invalidMessage };let transferKeys=transferIDs.compactMap{UUID(uuidString:$0)?.uuidString.lowercased()};guard transferKeys.count==transferIDs.count else{throw StoreError.invalidMessage};let id=uuid.uuidString.lowercased(),previous=root
+        var messages=root["messages"] as? [[String:Any]] ?? [];messages.removeAll{$0["id"] as? String == id};root["messages"]=messages
+        var meta=root["meta"] as? [String:Any] ?? [:],deleted=meta["deleted_message_ids"] as? [String:Int64] ?? [:],deletedTransfers=meta["deleted_transfer_ids"] as? [String:Int64] ?? [:],pending=meta["pending_transfer_deletions"] as? [String:Bool] ?? [:];let expires=expiresAtMillis ?? Int64(Date().timeIntervalSince1970*1000)+Int64(90*24*60*60*1000);guard expires>0 else{root=previous;throw StoreError.invalidMessage};deleted[id]=expires;for transfer in transferKeys { deletedTransfers[transfer]=expires;pending[transfer]=true };meta["deleted_message_ids"]=deleted;meta["deleted_transfer_ids"]=deletedTransfers;meta["pending_transfer_deletions"]=pending;root["meta"]=meta
+        do { try flush();return true } catch { root=previous;throw error }
     }
     func previousFingerprint(userID: String, deviceID: String) -> String {
         let value = (root["trust"] as? [String: Any] ?? [:])["\(userID):\(deviceID)"]
@@ -106,6 +117,7 @@ final class SereinLocalStore {
     func save(_ message: [String: Any]) throws { try save(message, ratchetSnapshots: [:]) }
     func save(_ message: [String: Any], ratchetSnapshots: [String: Data]) throws {
         guard let id = message["id"] as? String, ratchetSnapshots.count <= 64 else { throw StoreError.invalidMessage }
+        if containsDeleted(messageID:id) { return }
         let previous = root
         var messages = root["messages"] as? [[String: Any]] ?? []
         messages.removeAll { $0["id"] as? String == id }; messages.append(message)
@@ -135,6 +147,7 @@ final class SereinLocalStore {
                   let created = row["created_at"] as? String, created.utf8.count <= 128, Self.validTimestamp(created),
                   let status = row["status"] as? String, ["pending", "accepted", "received"].contains(status),
                   incomingIDs.insert(id).inserted else { throw StoreError.invalidMessage }
+            if containsDeleted(messageID:id) { continue }
             if seen.insert(id).inserted { existing.append(row); added += 1 }
         }
         existing.sort {

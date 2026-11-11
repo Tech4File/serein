@@ -883,9 +883,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { border-radiu
 /* Desktop web gets a roomier picker while remaining bounded by its conversation pane. */
 @media (min-width: 681px) {
   .emoji-picker {
-    width: min(560px, calc(100% - 24px));
-    min-width: min(480px, calc(100% - 24px));
-    max-width: calc(100% - 24px);
+    width: min(570px, calc(100% - 14px));
+    min-width: min(490px, calc(100% - 14px));
+    max-width: calc(100% - 14px);
   }
 }
 
@@ -927,3 +927,87 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { border-radiu
 .contact-lookup-action:disabled { background: var(--workspace-surface-2); color: var(--workspace-muted); cursor: default; }
 .dialog-lookup-results { margin: 8px 0 12px; }
 @media (max-width: 680px) { .contact-lookup-card { gap: 8px; padding: 8px; } .contact-lookup-action { padding-inline: 8px; } }
+
+
+/* Keep desktop reactions attached to the composer instead of floating at chat-center. */
+@media (min-width: 681px) {
+  .emoji-picker {
+    top: auto;
+    bottom: calc(108px + env(safe-area-inset-bottom));
+    max-height: min(52dvh, 520px, calc(100dvh - 230px));
+    transform: translateX(-50%);
+    animation: picker-rise-from-composer 170ms var(--ui-ease) both;
+  }
+  .emoji-picker.is-closing { animation: picker-close-to-composer 135ms ease-in both; }
+}
+@keyframes picker-rise-from-composer {
+  from { opacity: 0; transform: translate(-50%, 8px) scale(.985); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+@keyframes picker-close-to-composer {
+  from { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  to { opacity: 0; transform: translate(-50%, 8px) scale(.985); }
+}
+
+/* Override legacy generic GIF button sizing so Search and Clear are aligned controls. */
+.gif-search { min-width: 0; gap: 8px; }
+.gif-search .gif-search-wrap { min-width: 0; height: 44px; flex: 1 1 auto; }
+.gif-search .gif-search-button {
+  display: inline-flex;
+  width: auto;
+  min-width: 78px;
+  height: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border: 1px solid var(--workspace-accent);
+  border-radius: 12px;
+  background: var(--workspace-accent);
+  color: var(--workspace-accent-text, #fff);
+  font: inherit;
+  font-size: .82rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+.gif-search .gif-search-button:hover { filter: brightness(1.06); }
+.gif-search .gif-search-button:focus-visible { outline: 3px solid color-mix(in srgb, var(--workspace-accent) 45%, transparent); outline-offset: 2px; }
+.gif-search .gif-search-clear {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  flex: 0 0 44px;
+  padding: 0;
+  border: 1px solid var(--workspace-border);
+  border-radius: 12px;
+  background: var(--workspace-surface);
+  color: var(--workspace-muted);
+  line-height: 1;
+}
+.gif-search .gif-search-clear:hover { border-color: var(--workspace-accent); color: var(--workspace-accent); }
+
+/* Put the jump affordance immediately above the composer, horizontally centered. */
+.jump-to-latest {
+  top: auto;
+  bottom: calc(108px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+}
+@media (max-width: 360px) {
+  .gif-search .gif-search-button { min-width: 68px; padding-inline: 9px; }
+  .gif-search .gif-search-clear { width: 36px; min-width: 36px; flex-basis: 36px; }
+}
+
+/* Chat bubbles hug their content, then wrap at the established responsive maximum. */
+.message-row > .bubble { width: fit-content; min-width: 0; }
+.bubble .attachment-card { width: fit-content; min-width: 0; max-width: 100%; }
+
+/* A completed two-pass GIF hides its source img; keep the removed-src alt text hidden too. */
+.chat-media-content[hidden] { display: none !important; }
+
+/* Cross-device message selection and deletion */
+.message-selection-bar{display:flex;align-items:center;gap:8px;width:min(680px,calc(100% - 28px));margin:8px auto 2px;padding:7px 10px;border:1px solid var(--border-strong);border-radius:10px;background:var(--surface);box-shadow:0 3px 12px #12202a0a;color:var(--text);font-size:max(12px,calc(12px * var(--font-scale,1)))}
+.message-selection-bar[hidden]{display:none}.message-selection-bar span{flex:1;font-weight:700}.message-selection-bar button{border:1px solid var(--border);border-radius:8px;padding:6px 11px;background:var(--surface);color:var(--text);font:inherit;cursor:pointer}.message-selection-bar button.danger{border-color:#cc6464;color:#b42318}.message-row.selected .bubble{outline:3px solid color-mix(in srgb,var(--accent) 72%,transparent);outline-offset:2px}.message-row{cursor:context-menu}.message-row.selected{cursor:pointer}.confirm-dialog .confirm-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}

@@ -28,7 +28,7 @@ final class SereinLocalStore {
     static boolean deleteForAccount(Context context,String accountId){try{String id=UUID.fromString(accountId).toString();File file=new File(context.getApplicationContext().getFilesDir(),"serein-history-"+id+".bin");return !file.exists()||file.delete();}catch(Exception ignored){return false;}}
     private static final long MAX_LOCAL_HISTORY_BYTES = 64L * 1024 * 1024;
     private synchronized void load() throws Exception {
-        if (!file.isFile()) { root = new JSONObject().put("version", 1).put("messages", new JSONArray()).put("trust", new JSONObject()).put("ratchets", new JSONObject()).put("meta", new JSONObject()); return; }
+        if (!file.isFile()) { root = new JSONObject().put("version", 1).put("messages", new JSONArray()).put("trust", new JSONObject()).put("ratchets", new JSONObject()).put("meta", new JSONObject().put("deleted_message_ids",new JSONObject()).put("deleted_transfer_ids",new JSONObject()).put("pending_transfer_deletions",new JSONObject())); return; }
         byte[] packed = new byte[(int) Math.min(file.length(), MAX_LOCAL_HISTORY_BYTES)];
         if (file.length() > MAX_LOCAL_HISTORY_BYTES) throw new IllegalStateException("Local message history exceeds its safe size limit.");
         try (FileInputStream in = new FileInputStream(file)) { int at=0,n; while ((n=in.read(packed,at,packed.length-at))>0) at+=n; if(at!=packed.length)throw new java.io.IOException("Local message history was truncated."); }
@@ -40,6 +40,7 @@ final class SereinLocalStore {
         else if (!(root.opt("ratchets") instanceof JSONObject)) throw new IllegalStateException("Stored ratchet state format is unsupported; refusing to reset sessions.");
         if (!root.has("meta")) root.put("meta", new JSONObject());
         else if (!(root.opt("meta") instanceof JSONObject)) throw new IllegalStateException("Stored sync metadata is invalid; refusing to reset cursors.");
+        if(!root.getJSONObject("meta").has("deleted_message_ids"))root.getJSONObject("meta").put("deleted_message_ids",new JSONObject());else if(!(root.getJSONObject("meta").opt("deleted_message_ids") instanceof JSONObject))throw new IllegalStateException("Stored deletion metadata is invalid.");if(!root.getJSONObject("meta").has("deleted_transfer_ids"))root.getJSONObject("meta").put("deleted_transfer_ids",new JSONObject());else if(!(root.getJSONObject("meta").opt("deleted_transfer_ids") instanceof JSONObject))throw new IllegalStateException("Stored attachment deletion metadata is invalid.");if(!root.getJSONObject("meta").has("pending_transfer_deletions"))root.getJSONObject("meta").put("pending_transfer_deletions",new JSONObject());else if(!(root.getJSONObject("meta").opt("pending_transfer_deletions") instanceof JSONObject))throw new IllegalStateException("Pending attachment cleanup metadata is invalid.");
     }
     synchronized JSONObject meta(String key) throws Exception { JSONObject meta=root.getJSONObject("meta"),value=meta.optJSONObject(key);return value==null?null:new JSONObject(value.toString()); }
     synchronized void putMeta(String key,JSONObject value) throws Exception {if(key==null||key.isEmpty()||key.length()>256||value==null||value.toString().length()>4096)throw new IllegalArgumentException("Invalid sync metadata.");JSONObject previous=new JSONObject(root.toString());try{root.getJSONObject("meta").put(key,new JSONObject(value.toString()));flush();}catch(Exception error){root=previous;throw error;}}
@@ -48,11 +49,22 @@ final class SereinLocalStore {
         for(int i=0;i<all.length();i++){JSONObject row=all.optJSONObject(i);if(row!=null&&conversationId.equals(row.optString("conversation_id")))result.put(new JSONObject(row.toString()));}
         return result;
     }
+    private boolean isDeleted(String id) throws Exception { return root.getJSONObject("meta").getJSONObject("deleted_message_ids").optLong(id,0)>System.currentTimeMillis(); }
+    synchronized boolean deleteMessage(String id) throws Exception {return deleteMessage(id,new JSONArray());}
+    synchronized boolean deleteMessage(String id,JSONArray transferIds) throws Exception {return deleteMessage(id,transferIds,System.currentTimeMillis()+90L*24*60*60*1000);}
+    synchronized boolean deleteMessage(String id,JSONArray transferIds,long expiresAtMillis) throws Exception {
+        String normalized=UUID.fromString(id).toString();if(expiresAtMillis<=0)throw new IllegalArgumentException("Invalid deletion expiry.");JSONObject previous=new JSONObject(root.toString());
+        try{JSONArray all=root.getJSONArray("messages"),next=new JSONArray();for(int i=0;i<all.length();i++){JSONObject row=all.optJSONObject(i);if(row!=null&&!normalized.equals(row.optString("id")))next.put(row);}root.put("messages",next);long expires=expiresAtMillis;root.getJSONObject("meta").getJSONObject("deleted_message_ids").put(normalized,expires);JSONObject transfers=root.getJSONObject("meta").getJSONObject("deleted_transfer_ids");for(int i=0;transferIds!=null&&i<transferIds.length();i++){String transfer=UUID.fromString(transferIds.getString(i)).toString();transfers.put(transfer,expires);root.getJSONObject("meta").getJSONObject("pending_transfer_deletions").put(transfer,true);}flush();return true;}catch(Exception error){root=previous;throw error;}
+    }
+    synchronized boolean containsDeletedMessage(String id) throws Exception { try{return isDeleted(UUID.fromString(id).toString());}catch(Exception invalid){return false;} }
+    synchronized boolean containsDeletedTransfer(String id) throws Exception {try{return root.getJSONObject("meta").getJSONObject("deleted_transfer_ids").optLong(UUID.fromString(id).toString(),0)>System.currentTimeMillis();}catch(Exception invalid){return false;}}
+    synchronized java.util.List<String> pendingTransferDeletions() throws Exception {java.util.ArrayList<String> ids=new java.util.ArrayList<>();JSONObject pending=root.getJSONObject("meta").getJSONObject("pending_transfer_deletions");java.util.Iterator<String> keys=pending.keys();while(keys.hasNext()){String id=keys.next();if(pending.optBoolean(id))ids.add(id);}return ids;}
+    synchronized void markTransferDeletionComplete(String id) throws Exception {String normalized=UUID.fromString(id).toString();JSONObject previous=new JSONObject(root.toString());try{root.getJSONObject("meta").getJSONObject("pending_transfer_deletions").remove(normalized);flush();}catch(Exception error){root=previous;throw error;}}
     synchronized boolean containsMessage(String id) throws Exception {
         JSONArray all=root.getJSONArray("messages");for(int i=0;i<all.length();i++){JSONObject row=all.optJSONObject(i);if(row!=null&&id.equals(row.optString("id")))return true;}return false;
     }
     synchronized void saveMessage(JSONObject message) throws Exception {
-        JSONArray all=root.getJSONArray("messages"), next=new JSONArray();String id=message.getString("id");
+        JSONArray all=root.getJSONArray("messages"), next=new JSONArray();String id=message.getString("id");if(isDeleted(id))return;
         for(int i=0;i<all.length();i++){JSONObject row=all.optJSONObject(i);if(row!=null&&!id.equals(row.optString("id")))next.put(row);}
         next.put(new JSONObject(message.toString()));
         root.put("messages",next);flush();
@@ -69,7 +81,7 @@ final class SereinLocalStore {
         if (snapshots == null || snapshots.size() > 64) throw new IllegalArgumentException("Invalid ratchet snapshot batch.");
         JSONObject previous = new JSONObject(root.toString());
         try {
-            JSONArray all = root.getJSONArray("messages"), next = new JSONArray(); String id = message.getString("id");
+            JSONArray all = root.getJSONArray("messages"), next = new JSONArray(); String id = message.getString("id");if(isDeleted(id))return;
             for (int i=0;i<all.length();i++) { JSONObject row=all.optJSONObject(i); if(row!=null&&!id.equals(row.optString("id"))) next.put(row); }
             next.put(new JSONObject(message.toString())); root.put("messages", next);
             JSONObject ratchets=root.getJSONObject("ratchets");
@@ -95,7 +107,7 @@ final class SereinLocalStore {
             JSONObject row=incoming.optJSONObject(i);if(row==null)throw new IllegalArgumentException("Backup contains a malformed message record.");
             Object rawId=row.opt("id"),rawConversation=row.opt("conversation_id"),rawCreated=row.opt("created_at"),rawStatus=row.opt("status");
             if(!(rawId instanceof String)||((String)rawId).isEmpty()||((String)rawId).length()>128||!(rawConversation instanceof String)||((String)rawConversation).isEmpty()||((String)rawConversation).length()>128||!(rawCreated instanceof String)||((String)rawCreated).length()>128||!(rawStatus instanceof String)||!java.util.Arrays.asList("pending","accepted","received").contains(rawStatus))throw new IllegalArgumentException("Backup contains a malformed message record.");
-            String id=(String)rawId;try{java.time.Instant.parse((String)rawCreated);}catch(Exception invalidTime){throw new IllegalArgumentException("Backup contains a message with an invalid timestamp.");}
+            String id=(String)rawId;if(isDeleted(id))continue;try{java.time.Instant.parse((String)rawCreated);}catch(Exception invalidTime){throw new IllegalArgumentException("Backup contains a message with an invalid timestamp.");}
             if(!incomingIds.add(id))throw new IllegalArgumentException("Backup contains duplicate message IDs.");
             if(!byId.containsKey(id)){JSONObject safe=new JSONObject(row.toString());byId.put(id,safe);added++;}
         }

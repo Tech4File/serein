@@ -37,8 +37,8 @@ test('iOS lazily loads animated GIFs for visible chat rows, stops after two loop
 });
 
 test('picker is bounded and proportionally scaled while category chips scroll horizontally without overscroll capture', () => {
-  assert.match(css, /width: min\(560px, calc\(100% - 24px\)\)/);
-  assert.match(css, /min-width: min\(480px, calc\(100% - 24px\)\)/);
+  assert.match(css, /width: min\(570px, calc\(100% - 14px\)\)/);
+  assert.match(css, /min-width: min\(490px, calc\(100% - 14px\)\)/);
   assert.match(css, /flex-wrap: nowrap;[^}]*overflow-x: auto;[^}]*overflow-y: hidden/);
   assert.match(css, /overscroll-behavior-x: auto/);
   assert.match(css, /font-size: clamp\(22px, 5\.6cqi, 27px\)/);
@@ -48,10 +48,11 @@ test('picker is bounded and proportionally scaled while category chips scroll ho
   assert.match(ios, /ScrollView\(\.horizontal, showsIndicators: false\)/);
 });
 
-test('all clients add a centered accessible jump-to-latest control and use an arrow for shared-media View all', () => {
+test('all clients add an accessible jump-to-latest control above the web composer and use an arrow for shared-media View all', () => {
   assert.match(html, /id="jumpToLatest"[^>]*aria-label="Jump to latest messages"/);
   assert.match(web, /function updateJumpToLatest\(\)/);
   assert.match(css, /\.jump-to-latest \{ position: absolute; z-index: 12; top: 50%; left: 50%/);
+  assert.match(css, /\.jump-to-latest \{\s*top: auto;\s*bottom: calc\(108px \+ env\(safe-area-inset-bottom\)\);\s*left: 50%;\s*transform: translateX\(-50%\);/);
   assert.match(android, /Button jumpLatest=SereinUi\.button\(this,"↓"/);
   assert.match(android, /Gravity\.CENTER\);chatArea\.addView\(jumpLatest/);
   assert.match(ios, /if showJumpToLatest/);
